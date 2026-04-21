@@ -1,15 +1,55 @@
+import django_filters
 import graphene
 from graphene_django import DjangoObjectType
+from graphene_django.filter import TypedFilter
 
 from core import prefix_filterset, ExtendedConnection
 from tasaf_payment.models import (
     PaymentAccount,
+    VerificationStatus,
     VerificationRecord,
     MuseVerificationRecord,
     Paylist,
     PaylistItem,
     ReturnFeedback,
 )
+
+
+PaymentAccountVerificationStatusEnum = graphene.Enum.from_enum(VerificationStatus)
+
+
+class PaymentAccountFilterSet(django_filters.FilterSet):
+    verification_status = TypedFilter(
+        method="filter_verification_status",
+        input_type=PaymentAccountVerificationStatusEnum,
+    )
+
+    def filter_verification_status(self, queryset, name, value):
+        if value in (None, ""):
+            return queryset
+
+        normalized = getattr(value, "value", value)
+        if isinstance(normalized, str) and normalized in VerificationStatus.__members__:
+            normalized = VerificationStatus[normalized].value
+
+        return queryset.filter(verification_status=normalized)
+
+    class Meta:
+        model = PaymentAccount
+        fields = {
+            "id": ["exact"],
+            "account_number": ["exact", "icontains", "istartswith"],
+            "account_name": ["icontains"],
+            "fsp_type": ["exact"],
+            "fsp_name": ["exact", "icontains"],
+            "pre_audit_status": ["exact"],
+            "active_check_status": ["exact"],
+            "is_primary": ["exact"],
+            "date_created": ["exact", "lt", "lte", "gt", "gte"],
+            "date_updated": ["exact", "lt", "lte", "gt", "gte"],
+            "is_deleted": ["exact"],
+            "version": ["exact"],
+        }
 
 
 class PaymentAccountGQLType(DjangoObjectType):
@@ -19,21 +59,7 @@ class PaymentAccountGQLType(DjangoObjectType):
     class Meta:
         model = PaymentAccount
         interfaces = (graphene.relay.Node,)
-        filter_fields = {
-            "id": ["exact"],
-            "account_number": ["exact", "icontains", "istartswith"],
-            "account_name": ["icontains"],
-            "fsp_type": ["exact"],
-            "fsp_name": ["exact", "icontains"],
-            "verification_status": ["exact"],
-            "pre_audit_status": ["exact"],
-            "active_check_status": ["exact"],
-            "is_primary": ["exact"],
-            "date_created": ["exact", "lt", "lte", "gt", "gte"],
-            "date_updated": ["exact", "lt", "lte", "gt", "gte"],
-            "is_deleted": ["exact"],
-            "version": ["exact"],
-        }
+        filterset_class = PaymentAccountFilterSet
         connection_class = ExtendedConnection
 
     @classmethod
