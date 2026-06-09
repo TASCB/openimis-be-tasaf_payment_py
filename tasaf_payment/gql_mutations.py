@@ -75,10 +75,11 @@ class RunPreAuditInputType(OpenIMISMutation.Input):
 
 
 class GeneratePaylistInputType(OpenIMISMutation.Input):
-    payroll_id       = graphene.Int(required=True)
+    # Payroll / PaymentCycle are HistoryModels with UUID primary keys.
+    payroll_id       = graphene.UUID(required=True)
     batch_type       = graphene.String(required=True)   # BANK / MNO / MIXED
-    payment_cycle_id = graphene.Int(required=False)
-    location_id      = graphene.Int(required=False)
+    payment_cycle_id = graphene.UUID(required=False)
+    location_id      = graphene.Int(required=False)      # Location uses a legacy integer PK
 
 
 class ApprovePaylistInputType(OpenIMISMutation.Input):
@@ -416,9 +417,9 @@ class RouteToCorrectionMutation(BaseMutation):
             verification_status=VerificationStatus.FAILED,
             is_deleted=False,
         )
-        # Scaffold: log route-to-correction intent.
-        # TODO: Create tasks_management.
-        # the Case Management correction workflow to be implemented.
+        # Scaffold: for now this only logs the route-to-correction intent.
+        # TODO: create a tasks_management task to drive the Case Management
+        # correction workflow (not yet implemented).
         import logging
         logger = logging.getLogger(__name__)
         for account in accounts:

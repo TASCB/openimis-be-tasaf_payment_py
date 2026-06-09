@@ -1,19 +1,20 @@
 """
 tasaf_payment.views
 ====================
-Stub REST endpoints for receiving MUSE push results via GovESB.
+REST endpoints for receiving MUSE push results via GovESB.
 
-These endpoints exist for development and testing. When the GovESB adaptor
-is available, the inbound handling will be triggered by the GovESB consumer
-in coremis_app_integration instead — these endpoints become optional
-(can be kept for manual testing / admin override).
-
-TODO (GovESB): Wire MuseVerificationInboundService.handle_result() and
-ReturnFeedbackService.handle_feedback() to the GovESB consumer.
+Each inbound request is run through GovESB signature verification
+(:func:`coremis_app_integration.govesb_inbound.verify_inbound`) before any
+business handling. In production (when ``settings.ESB`` is configured) a valid
+ECDSA-signed ``{data, signature}`` envelope is **required**, verified against
+the ESB public key; otherwise the request is rejected with HTTP 401. When ESB
+is not configured these endpoints stay open for development/testing and
+admin-override with bare JSON payloads — see ``govesb_inbound`` for the policy.
 """
 
 import logging
 
+from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
@@ -33,14 +34,39 @@ def _parse_json_body(request):
         return None, str(exc)
 
 
+def _verify_inbound(payload):
+    """
+    Verify an inbound GovESB push and return ``(business_payload, error)``.
+
+    ``error`` non-``None`` ⇒ the caller must reject with HTTP 401. Fail-closed:
+    if signature verification is required (ESB configured) but the verifier
+    cannot be loaded, the request is rejected rather than trusted.
+    """
+    try:
+        from coremis_app_integration.govesb_inbound import verify_inbound
+    except ImportError:
+        esb = getattr(settings, 'ESB', None) or {}
+        required = bool(esb) and bool(esb.get('VERIFY_INBOUND_SIGNATURE', esb.get('ENABLED', True)))
+        if required:
+            return None, "GovESB inbound verification module unavailable"
+        return payload, None
+
+    business, verified, error = verify_inbound(payload)
+    if error:
+        return None, error
+    if verified:
+        logger.info("[GovESB] inbound signature verified")
+    return business, None
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class MuseVerificationResultView(View):
     """
     POST /api/tasaf_payment/muse/verification_result/
 
-    Receives a verification result payload pushed by MUSE (via GovESB stub).
-
-    Expected payload:
+    Receives a verification result pushed by MUSE over GovESB. In production the
+    request body is a signed ``{data, signature}`` envelope; the verified
+    business payload (``esbBody``) has the shape:
     {
         "account_uuid":       "<uuid>",
         "muse_reference":     "MUSE-REF-123",
@@ -56,13 +82,18 @@ class MuseVerificationResultView(View):
         if error:
             return JsonResponse({'success': False, 'error': f'Invalid JSON: {error}'}, status=400)
 
+        payload, verr = _verify_inbound(payload)
+        if verr:
+            logger.warning("[GovESB] inbound verification result rejected: %s", verr)
+            return JsonResponse({'success': False, 'error': verr}, status=401)
+
         if not payload.get('account_uuid'):
             return JsonResponse({'success': False, 'error': 'account_uuid is required'}, status=400)
         if not payload.get('result'):
             return JsonResponse({'success': False, 'error': 'result is required'}, status=400)
 
         logger.info(
-            "[GovESB STUB] Inbound verification result: account=%s result=%s ref=%s",
+            "Inbound verification result: account=%s result=%s ref=%s",
             payload.get('account_uuid'),
             payload.get('result'),
             payload.get('muse_reference'),
@@ -80,9 +111,9 @@ class MuseReturnFeedbackView(View):
     """
     POST /api/tasaf_payment/muse/return_feedback/
 
-    Receives return / unapplied feedback pushed by MUSE (via GovESB stub).
-
-    Expected payload:
+    Receives return / unapplied feedback pushed by MUSE over GovESB. In
+    production the request body is a signed ``{data, signature}`` envelope; the
+    verified business payload (``esbBody``) has the shape:
     {
         "paylist_item_uuid":  "<uuid>",
         "feedback_type":      "UNAPPLIED" | "RETURNED" | "PARTIAL",
@@ -97,13 +128,18 @@ class MuseReturnFeedbackView(View):
         if error:
             return JsonResponse({'success': False, 'error': f'Invalid JSON: {error}'}, status=400)
 
+        payload, verr = _verify_inbound(payload)
+        if verr:
+            logger.warning("[GovESB] inbound return feedback rejected: %s", verr)
+            return JsonResponse({'success': False, 'error': verr}, status=401)
+
         if not payload.get('paylist_item_uuid'):
             return JsonResponse({'success': False, 'error': 'paylist_item_uuid is required'}, status=400)
         if not payload.get('feedback_type'):
             return JsonResponse({'success': False, 'error': 'feedback_type is required'}, status=400)
 
         logger.info(
-            "[GovESB STUB] Inbound return feedback: item=%s type=%s code=%s",
+            "Inbound return feedback: item=%s type=%s code=%s",
             payload.get('paylist_item_uuid'),
             payload.get('feedback_type'),
             payload.get('reason_code'),

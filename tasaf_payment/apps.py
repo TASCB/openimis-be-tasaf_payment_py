@@ -31,6 +31,15 @@ DEFAULT_CONFIG = {
 
     # Business rules (editable via Django Admin → ModuleConfig)
     "max_resubmissions": 3,
+    # MUSE accepts at most this many transactions per disbursement batch.
+    # BANK and MNO are batched separately (never mixed); each FSP's eligible
+    # accounts are split into Paylists of at most this size. 0 / None = no cap.
+    "paylist_max_batch_size": 50000,
+    # When a payroll has more than this many ACCEPTED benefits, paylist
+    # generation is handed to the generate_paylists_task Celery task so the
+    # request returns immediately (falls back to inline if no broker).
+    # 0 / None = always run inline.
+    "paylist_async_threshold": 20000,
 
     # GovESB integration (TODO: to be configured next after discussion with MUSE team)
     "govesb_endpoint": os.getenv('GOVESB_ENDPOINT', ''),
@@ -59,6 +68,8 @@ class TasafPaymentConfig(AppConfig):
     gql_muse_verification_search_perms = None
 
     max_resubmissions = None
+    paylist_max_batch_size = None
+    paylist_async_threshold = None
     govesb_endpoint = None
     govesb_api_key = None
 

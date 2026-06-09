@@ -37,6 +37,7 @@ consumer in coremis_app_integration when the adaptor is available.
 """
 
 import logging
+import uuid
 from datetime import datetime, timezone
 
 from django.db import transaction
@@ -61,6 +62,34 @@ from tasaf_payment.models import (
 from tasaf_payment.validation import PaymentAccountValidation
 
 logger = logging.getLogger(__name__)
+
+
+def _govesb_publish(topic: str, payload: dict, *, user_id=None, context: str = "") -> dict:
+    """
+    Send ``payload`` to MUSE over the shared GovESB transport
+    (``coremis_app_integration.govesb.GovESBProducer``).
+
+    This is deliberately fail-soft: if the coremis adaptor is not installed, or
+    GovESB is disabled/misconfigured, or the send raises, it logs and returns a
+    result dict instead of propagating — so the surrounding payment-state
+    transitions (PENDING_MUSE, SUBMITTED, ...) still commit in environments
+    without live ESB credentials, exactly as the previous stub behaved. The
+    ESB-disabled case is itself a clean no-op inside the producer.
+    """
+    try:
+        from coremis_app_integration.govesb import GovESBProducer
+    except ImportError:
+        logger.info("[GovESB] adaptor unavailable; skipped topic=%s %s", topic, context)
+        return {"published": False, "unavailable": True}
+
+    try:
+        result = GovESBProducer().publish(topic, payload, user_id=user_id)
+        if not result.get("published"):
+            logger.info("[GovESB] not sent (disabled) topic=%s %s", topic, context)
+        return result
+    except Exception:  # noqa: BLE001 — never let dispatch transport break the flow
+        logger.exception("[GovESB] publish failed topic=%s %s", topic, context)
+        return {"published": False, "error": True}
 
 
 # ─── PaymentAccountService ────────────────────────────────────────────────────
@@ -99,10 +128,8 @@ class MuseVerificationDispatchService:
     Sends payment accounts to MUSE for verification via GovESB.
 
     Sets each account to PENDING_MUSE status and publishes a verification
-    request message. MUSE will push the result back asynchronously.
-
-    TODO (GovESB): Replace _publish() stub with real GovESB producer call
-    when the coremis_app_integration adaptor is ready.
+    request message over GovESB. MUSE pushes the result back asynchronously to
+    the inbound endpoint (handled by MuseVerificationInboundService).
     """
 
     GOVESB_TOPIC_VERIFICATION_REQUEST = 'tasaf.verification.request'
@@ -154,11 +181,11 @@ class MuseVerificationDispatchService:
 
     def _publish(self, account: PaymentAccount) -> None:
         """
-        Publish a verification request message to GovESB.
+        Publish a verification request to MUSE over the shared GovESB transport.
 
-        TODO (GovESB): Replace this stub with:
-            from coremis_app_integration.govesb import GovESBProducer
-            GovESBProducer().publish(self.GOVESB_TOPIC_VERIFICATION_REQUEST, payload)
+        Fail-soft (see :func:`_govesb_publish`): when GovESB is unavailable or
+        disabled the account still stays in PENDING_MUSE — the request simply
+        is not transmitted until ESB credentials are configured.
         """
         payload = {
             'account_uuid':   str(account.uuid),
@@ -168,9 +195,11 @@ class MuseVerificationDispatchService:
             'fsp_name':       account.fsp_name,
             'requested_by':   self.user.username,
         }
-        logger.info(
-            "[GovESB STUB] topic=%s payload=%s",
-            self.GOVESB_TOPIC_VERIFICATION_REQUEST, payload,
+        _govesb_publish(
+            self.GOVESB_TOPIC_VERIFICATION_REQUEST,
+            payload,
+            user_id=getattr(self.user, 'username', None),
+            context=f"verification account={account.uuid}",
         )
 
 
@@ -429,94 +458,243 @@ class PaylistService:
     @check_authentication
     def generate(
         self,
-        payroll_id: int,
+        payroll_id,            # UUID — Payroll PK
         batch_type: str,
-        payment_cycle_id: int = None,
+        payment_cycle_id=None,  # UUID — PaymentCycle PK
         location_id: int = None,
     ) -> dict:
         """
-        Generate a Paylist from verified + pre-audited accounts in a payroll.
+        Generate one or more Paylists from verified + pre-audited accounts.
 
-        Only accounts with:
-          - verification_status = VERIFIED
-          - pre_audit_status    = PASSED
-          - active_check_status = ACTIVE (or PENDING if active check not yet run)
-          - is_primary = True
-          - is_deleted = False
-
-        And whose fsp_type matches batch_type (BANK/MNO) or any for MIXED.
-
-        Returns: {'success': bool, 'paylist_uuid': str, 'item_count': int, 'error': str|None}
+        Thin dispatcher: for large payrolls (eligible benefits >
+        ``TasafPaymentConfig.paylist_async_threshold``) the work is handed to the
+        ``generate_paylists_task`` Celery task so the request returns immediately;
+        otherwise it runs inline. If enqueuing fails (e.g. no broker in dev) it
+        falls back to running inline. The heavy lifting lives in
+        :meth:`_generate_sync`.
         """
         try:
-            from payroll.models import BenefitConsumption
+            from payroll.models import (
+                BenefitConsumption,
+                BenefitConsumptionStatus,
+                PayrollBenefitConsumption,
+            )
+            from tasaf_payment.apps import TasafPaymentConfig
 
-            # Load ACCEPTED benefits for this payroll
-            benefits = BenefitConsumption.objects.filter(
-                payroll_id=payroll_id,
+            # Cheap size probe — count of ACCEPTED benefits on the payroll.
+            benefit_count = BenefitConsumption.objects.filter(
+                id__in=PayrollBenefitConsumption.objects.filter(
+                    payroll_id=payroll_id, is_deleted=False,
+                ).values_list('benefit_id', flat=True),
+                status=BenefitConsumptionStatus.ACCEPTED,
                 is_deleted=False,
-            ).select_related('individual')
-
-            if not benefits.exists():
+            ).count()
+            if benefit_count == 0:
                 return {'success': False, 'error': 'No ACCEPTED benefits found for payroll'}
 
-            # Build individual_id → PaymentAccount map
-            individual_ids = [b.individual_id for b in benefits]
-            account_qs = PaymentAccount.objects.filter(
-                group_beneficiary__group__groupindividual__individual_id__in=individual_ids,
-                verification_status=VerificationStatus.VERIFIED,
-                pre_audit_status=PreAuditStatus.PASSED,
-                is_primary=True,
-                is_deleted=False,
-            )
-            if batch_type in ('BANK', 'MNO'):
-                fsp_filter = 'BANK' if batch_type == 'BANK' else 'MOBILE'
-                account_qs = account_qs.filter(fsp_type=fsp_filter)
+            try:
+                threshold = int(TasafPaymentConfig.paylist_async_threshold or 0)
+            except (TypeError, ValueError):
+                threshold = 0
 
-            account_map = {}
-            for acc in account_qs.select_related(
-                'group_beneficiary__group__groupindividual'
-            ):
-                for gi in acc.group_beneficiary.group.groupindividual_set.filter(is_deleted=False):
-                    account_map[gi.individual_id] = acc
+            if threshold and benefit_count > threshold:
+                try:
+                    from tasaf_payment.tasks import generate_paylists_task
+                    generate_paylists_task.delay(
+                        self.user.id,
+                        str(payroll_id),
+                        batch_type,
+                        str(payment_cycle_id) if payment_cycle_id else None,
+                        location_id,
+                    )
+                    logger.info(
+                        "PaylistService.generate: queued async (benefits=%d > threshold=%d, payroll=%s)",
+                        benefit_count, threshold, payroll_id,
+                    )
+                    return {
+                        'success': True, 'error': None, 'queued': True,
+                        'paylists': [], 'paylist_count': 0, 'total_items': 0,
+                        'paylist_uuid': None, 'item_count': 0,
+                    }
+                except Exception:  # noqa: BLE001 — no broker / enqueue failure → run inline
+                    logger.warning(
+                        "PaylistService.generate: async enqueue failed, running inline",
+                        exc_info=True,
+                    )
+
+            return self._generate_sync(payroll_id, batch_type, payment_cycle_id, location_id)
+
+        except Exception as exc:
+            logger.exception("PaylistService.generate failed")
+            return output_exception(model_name="Paylist", method="generate", exception=exc)
+
+    def _generate_sync(
+        self,
+        payroll_id,
+        batch_type: str,
+        payment_cycle_id=None,
+        location_id: int = None,
+    ) -> dict:
+        """
+        Build the Paylists + items (the heavy worker behind :meth:`generate`).
+
+        Only accounts with verification_status=VERIFIED, pre_audit_status=PASSED,
+        is_primary=True, is_deleted=False are included.
+
+        Batching rule (MUSE): BANK and MNO are NEVER mixed in one batch, and each
+        FSP's eligible accounts are split into Paylists of at most
+        ``TasafPaymentConfig.paylist_max_batch_size`` transactions (default 50000;
+        0/None = no cap). ``batch_type``: BANK → BANK batches; MNO → MNO batches;
+        MIXED → both, each as its own single-FSP batches (never a mixed batch).
+        Sibling batches from one FSP run share a ``batch_group`` UUID and carry
+        ``batch_sequence`` (1..N) / ``batch_total`` (N).
+
+        Line items are written with ``bulk_create`` (audit columns set explicitly)
+        for throughput; this bypasses per-item simple_history rows by design — the
+        Paylist header keeps full history, and items are immutable batch lines.
+
+        Returns: {'success': bool, 'paylists': [{paylist_uuid, batch_type,
+        batch_sequence, batch_total, item_count}], 'paylist_count': int,
+        'total_items': int, 'paylist_uuid': str (first), 'item_count': int
+        (total), 'error': str|None}
+        """
+        try:
+            from payroll.models import (
+                BenefitConsumption,
+                BenefitConsumptionStatus,
+                PayrollBenefitConsumption,
+            )
+            from tasaf_payment.apps import TasafPaymentConfig
+
+            try:
+                max_size = int(TasafPaymentConfig.paylist_max_batch_size or 0)
+            except (TypeError, ValueError):
+                max_size = 0
+            if max_size < 0:
+                max_size = 0
+
+            user_pk = getattr(self.user, 'id', None)
+
+            # (account.fsp_type, stored Paylist.batch_type) targets for this run.
+            if batch_type == 'BANK':
+                fsp_targets = [('BANK', 'BANK')]
+            elif batch_type == 'MNO':
+                fsp_targets = [('MOBILE', 'MNO')]
+            else:  # MIXED → both FSPs, each in its own single-FSP batches
+                fsp_targets = [('BANK', 'BANK'), ('MOBILE', 'MNO')]
+
+            # BenefitConsumption has no direct payroll FK — the payroll↔benefit
+            # relation lives on the PayrollBenefitConsumption join model.
+            benefit_ids = PayrollBenefitConsumption.objects.filter(
+                payroll_id=payroll_id,
+                is_deleted=False,
+            ).values_list('benefit_id', flat=True)
+
+            benefits = list(BenefitConsumption.objects.filter(
+                id__in=benefit_ids,
+                status=BenefitConsumptionStatus.ACCEPTED,
+                is_deleted=False,
+            ).select_related('individual'))
+
+            if not benefits:
+                return {'success': False, 'error': 'No ACCEPTED benefits found for payroll'}
+
+            individual_ids = [b.individual_id for b in benefits]
+            created = []
 
             with transaction.atomic():
-                paylist = Paylist.objects.create(
-                    payroll_id=payroll_id,
-                    payment_cycle_id=payment_cycle_id,
-                    batch_type=batch_type,
-                    status=PaylistStatus.PENDING_APPROVAL,
-                    location_id=location_id,
-                    generated_at=datetime.now(tz=timezone.utc),
-                )
+                for fsp_type, stored_type in fsp_targets:
+                    account_qs = PaymentAccount.objects.filter(
+                        group_beneficiary__group__groupindividual__individual_id__in=individual_ids,
+                        verification_status=VerificationStatus.VERIFIED,
+                        pre_audit_status=PreAuditStatus.PASSED,
+                        is_primary=True,
+                        is_deleted=False,
+                        fsp_type=fsp_type,
+                    ).select_related('group_beneficiary__group__groupindividual')
 
-                items_created = 0
-                for benefit in benefits:
-                    account = account_map.get(benefit.individual_id)
-                    if not account:
+                    account_map = {}
+                    for acc in account_qs:
+                        for gi in acc.group_beneficiary.group.groupindividual_set.filter(is_deleted=False):
+                            account_map[gi.individual_id] = acc
+
+                    # Eligible (benefit, account) pairs, deterministically ordered
+                    # so batch boundaries are reproducible and auditable.
+                    pairs = [
+                        (b, account_map[b.individual_id])
+                        for b in benefits if b.individual_id in account_map
+                    ]
+                    pairs.sort(key=lambda p: ((p[1].account_number or ''), str(p[0].id)))
+                    if not pairs:
                         continue
-                    PaylistItem.objects.create(
-                        paylist=paylist,
-                        payment_account=account,
-                        benefit_consumption=benefit,
-                        amount=benefit.amount,
-                        status=PaylistItemStatus.PENDING,
-                    )
-                    items_created += 1
 
-                if items_created == 0:
-                    # Rollback — no point keeping an empty paylist
+                    if max_size and len(pairs) > max_size:
+                        chunks = [pairs[i:i + max_size] for i in range(0, len(pairs), max_size)]
+                    else:
+                        chunks = [pairs]
+
+                    group_id = uuid.uuid4()
+                    total = len(chunks)
+                    now = datetime.now(tz=timezone.utc)
+                    for seq, chunk in enumerate(chunks, start=1):
+                        paylist = Paylist.objects.create(
+                            payroll_id=payroll_id,
+                            payment_cycle_id=payment_cycle_id,
+                            batch_type=stored_type,
+                            status=PaylistStatus.PENDING_APPROVAL,
+                            location_id=location_id,
+                            generated_at=now,
+                            batch_group=group_id,
+                            batch_sequence=seq,
+                            batch_total=total,
+                        )
+                        # bulk_create the line items for throughput. Audit columns
+                        # (id/version/is_deleted/dates/user) are set explicitly since
+                        # bulk_create bypasses Model.save() and HistoryModel defaults.
+                        item_objs = [
+                            PaylistItem(
+                                id=uuid.uuid4(),
+                                paylist=paylist,
+                                payment_account=account,
+                                benefit_consumption=benefit,
+                                amount=benefit.amount,
+                                status=PaylistItemStatus.PENDING,
+                                is_deleted=False,
+                                version=1,
+                                date_created=now,
+                                date_updated=now,
+                                user_created_id=user_pk,
+                                user_updated_id=user_pk,
+                            )
+                            for benefit, account in chunk
+                        ]
+                        PaylistItem.objects.bulk_create(item_objs, batch_size=2000)
+                        created.append({
+                            'paylist_uuid':   str(paylist.uuid),
+                            'batch_type':     stored_type,
+                            'batch_sequence': seq,
+                            'batch_total':    total,
+                            'item_count':     len(chunk),
+                        })
+
+                if not created:
+                    # Rollback — nothing eligible for any FSP target
                     raise ValueError('No eligible accounts found for paylist generation')
 
+            total_items = sum(c['item_count'] for c in created)
             logger.info(
-                "PaylistService.generate: paylist=%s batch_type=%s items=%d (user=%s)",
-                paylist.uuid, batch_type, items_created, self.user.username,
+                "PaylistService.generate: payroll=%s batch_type=%s → %d paylist(s), %d item(s) (max_size=%s, user=%s)",
+                payroll_id, batch_type, len(created), total_items, max_size or 'unlimited', self.user.username,
             )
             return {
                 'success': True,
-                'paylist_uuid': str(paylist.uuid),
-                'item_count': items_created,
                 'error': None,
+                'paylists': created,
+                'paylist_count': len(created),
+                'total_items': total_items,
+                # Back-compat single-paylist fields (first batch / total items).
+                'paylist_uuid': created[0]['paylist_uuid'],
+                'item_count': total_items,
             }
 
         except Exception as exc:
@@ -577,17 +755,20 @@ class PaylistService:
 
     def _publish_paylist(self, paylist: Paylist) -> None:
         """
-        Publish paylist to GovESB for MUSE processing.
+        Publish the approved paylist to MUSE over the shared GovESB transport.
 
-        TODO (GovESB): Replace with:
-            from coremis_app_integration.govesb import GovESBProducer
-            GovESBProducer().publish(self.GOVESB_TOPIC_PAYMENT_SUBMIT, payload)
+        Fail-soft (see :func:`_govesb_publish`): when GovESB is unavailable or
+        disabled the paylist still moves to SUBMITTED; the batch is simply not
+        transmitted until ESB credentials are configured.
         """
         items = list(paylist.items.select_related('payment_account').all())
         payload = {
-            'paylist_uuid':  str(paylist.uuid),
-            'batch_type':    paylist.batch_type,
-            'item_count':    len(items),
+            'paylist_uuid':   str(paylist.uuid),
+            'batch_type':     paylist.batch_type,
+            'batch_group':    str(paylist.batch_group) if paylist.batch_group else None,
+            'batch_sequence': paylist.batch_sequence,
+            'batch_total':    paylist.batch_total,
+            'item_count':     len(items),
             'items': [
                 {
                     'item_uuid':      str(item.uuid),
@@ -599,8 +780,12 @@ class PaylistService:
                 for item in items
             ],
         }
-        logger.info("[GovESB STUB] topic=%s paylist=%s", self.GOVESB_TOPIC_PAYMENT_SUBMIT, paylist.uuid)
-        logger.debug("[GovESB STUB] payload=%s", payload)
+        _govesb_publish(
+            self.GOVESB_TOPIC_PAYMENT_SUBMIT,
+            payload,
+            user_id=getattr(self.user, 'username', None),
+            context=f"paylist={paylist.uuid} items={len(items)}",
+        )
 
 
 # ─── ReturnFeedbackService ────────────────────────────────────────────────────

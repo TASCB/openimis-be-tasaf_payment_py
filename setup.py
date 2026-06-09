@@ -28,6 +28,7 @@ setup(
         'openimis-be-individual',
         'openimis-be-social_protection',
         'openimis-be-payroll',
+        'openimis-be-coremis_app_integration',  # shared GovESB transport (used fail-soft via lazy import)
     ],
     classifiers=[
         'Environment :: Web Environment',

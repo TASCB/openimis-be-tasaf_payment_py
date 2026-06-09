@@ -208,6 +208,42 @@ def resubmit_failed_accounts_task(self, account_ids: list, user_id: int):
         raise self.retry(exc=exc)
 
 
+# ─── Paylist generation (large payrolls) ──────────────────────────────────────
+
+@shared_task(
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+    name='tasaf_payment.generate_paylists_task',
+)
+def generate_paylists_task(self, user_id, payroll_id, batch_type,
+                           payment_cycle_id=None, location_id=None):
+    """
+    Build a payroll's Paylists (and bulk-create their items) off the request
+    thread. Used for large payrolls (see PaylistService.generate dispatcher).
+
+    Delegates to PaylistService._generate_sync, which applies the per-FSP
+    50k-batch split and bulk_creates line items.
+    """
+    try:
+        from core.models import User
+        from tasaf_payment.services import PaylistService
+
+        user = User.objects.get(id=user_id)
+        result = PaylistService(user)._generate_sync(
+            payroll_id, batch_type, payment_cycle_id, location_id,
+        )
+        logger.info(
+            "generate_paylists_task: payroll=%s → %s paylist(s), %s item(s)",
+            payroll_id, result.get('paylist_count'), result.get('total_items'),
+        )
+        return result
+
+    except Exception as exc:
+        logger.exception("generate_paylists_task failed: payroll=%s", payroll_id)
+        raise self.retry(exc=exc)
+
+
 # ─── Pre-audit batch ──────────────────────────────────────────────────────────
 
 @shared_task(
