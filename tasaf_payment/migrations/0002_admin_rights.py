@@ -1,13 +1,32 @@
+"""
+Grant the tasaf_payment rights to the 'IMIS Administrator' role.
+
+Consolidated from the original hand-written 0002 + 0005 migrations (which were
+removed when the initial migration was regenerated to match the installed core
+HistoryBusinessModel schema). Idempotent via get_or_create.
+"""
 from django.db import migrations
 
-# Rights added in 0002: 152001-152004, 152101-152105
-# Rights missing from 0002 and added here:
-MISSING_RIGHTS = [
+RIGHTS = [
+    # payment accounts
+    152001,  # search payment accounts
+    152002,  # create payment account
+    152003,  # update payment account
+    152004,  # delete payment account
+    # verification / approval
+    152101,  # run verification
+    152102,  # approve payment accounts
+    152103,  # generate payroll
+    152104,  # submit payroll to MUSE
+    152105,  # resubmit failed accounts
+    # pre-audit
     152201,  # run pre-audit
+    # paylists
     152301,  # search paylists
     152302,  # generate paylist
     152303,  # approve paylist
     152304,  # submit paylist
+    # feedback / dashboard / records
     152401,  # return feedback search
     152501,  # dashboard
     152601,  # muse verification records search
@@ -20,7 +39,7 @@ def add_rights_to_admin(apps, schema_editor):
     admin_role = Role.objects.filter(name='IMIS Administrator').first()
     if not admin_role:
         return
-    for right in MISSING_RIGHTS:
+    for right in RIGHTS:
         RoleRight.objects.get_or_create(
             role=admin_role,
             right_id=right,
@@ -30,13 +49,13 @@ def add_rights_to_admin(apps, schema_editor):
 
 def remove_rights_from_admin(apps, schema_editor):
     RoleRight = apps.get_model('core', 'RoleRight')
-    RoleRight.objects.filter(right_id__in=MISSING_RIGHTS).delete()
+    RoleRight.objects.filter(right_id__in=RIGHTS).delete()
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('tasaf_payment', '0004_muse_flow_models'),
+        ('tasaf_payment', '0001_initial'),
     ]
 
     operations = [

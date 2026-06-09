@@ -123,6 +123,11 @@ class PaymentAccount(HistoryBusinessModel):
             models.Index(fields=['verification_status'], name='tasaf_pa_vstatus_idx'),
             models.Index(fields=['fsp_type', 'fsp_name'], name='tasaf_pa_fsp_idx'),
             models.Index(fields=['pre_audit_status'], name='tasaf_pa_preaudit_idx'),
+            # Payroll-creation guard EXISTS subquery (group_beneficiary + verified primary).
+            models.Index(
+                fields=['group_beneficiary', 'verification_status', 'is_primary', 'is_deleted'],
+                name='tasaf_pa_guard_idx',
+            ),
         ]
 
     def __str__(self):
@@ -251,6 +256,13 @@ class Paylist(HistoryBusinessModel):
     approved_at = models.DateTimeField(null=True, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
     muse_batch_reference = models.CharField(max_length=100, null=True, blank=True)
+    # When a payroll's eligible accounts for one FSP exceed the MUSE batch size,
+    # generation splits them into several sibling Paylists. They share a
+    # batch_group (UUID) and carry their 1-based position (batch_sequence) within
+    # the group of batch_total siblings. Single-batch generation → seq 1 / total 1.
+    batch_group = models.UUIDField(null=True, blank=True, db_index=True)
+    batch_sequence = models.IntegerField(null=True, blank=True)
+    batch_total = models.IntegerField(null=True, blank=True)
     json_ext = models.JSONField(db_column='Json_ext', blank=True, default=dict)
 
     class Meta:
