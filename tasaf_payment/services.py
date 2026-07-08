@@ -1,40 +1,4 @@
-"""
-tasaf_payment.services
-=======================
-Business logic for payment account registration and MUSE-driven verification.
-
-Architecture notes
-------------------
-*   PaymentAccountService         — standard openIMIS CRUD service
-*   MuseVerificationDispatchService — marks accounts as PENDING_MUSE and publishes
-                                      a verification request to GovESB (stubbed
-                                      until the GovESB adaptor is available)
-*   MuseVerificationInboundService  — handles the result payload pushed back from
-                                      MUSE via GovESB; creates MuseVerificationRecord
-                                      and updates PaymentAccount status
-*   ManualApprovalService         — approve / reject MANUAL-status accounts
-*   PreAuditService               — pre-audit and claims validation checks
-*   PaylistService                — generate, approve and submit paylists
-*   ReturnFeedbackService         — receive and store return/unapplied feedback
-
-MUSE verification flow (new)
------------------------------
-1.  Operator selects accounts in UI → runVerification mutation.
-2.  MuseVerificationDispatchService.dispatch(account_ids):
-        a.  Set PaymentAccount.verification_status = PENDING_MUSE.
-        b.  Publish verification request to GovESB (stub: logs only).
-3.  MUSE performs FSP/account verification via TIPS + mobile validation.
-4.  MUSE pushes result to GovESB → TASAF MIS consumes it.
-5.  MuseVerificationInboundService.handle_result(payload):
-        a.  Validate and parse payload.
-        b.  Update PaymentAccount.verification_status (VERIFIED/FAILED/MANUAL).
-        c.  Store muse_verification_reference.
-        d.  Create MuseVerificationRecord for audit trail.
-
-TODO (GovESB): Replace stub in MuseVerificationDispatchService._publish()
-and wire MuseVerificationInboundService.handle_result() to the GovESB
-consumer in coremis_app_integration when the adaptor is available.
-"""
+"""Business logic for TASAF payment accounts, MUSE verification, and paylists."""
 
 import logging
 import uuid
@@ -92,8 +56,6 @@ def _govesb_publish(topic: str, payload: dict, *, user_id=None, context: str = "
         return {"published": False, "error": True}
 
 
-# ─── PaymentAccountService ────────────────────────────────────────────────────
-
 class PaymentAccountService(BaseService):
     """
     Standard openIMIS CRUD service for PaymentAccount.
@@ -120,8 +82,6 @@ class PaymentAccountService(BaseService):
     def delete(self, obj_data):
         return super().delete(obj_data)
 
-
-# ─── MuseVerificationDispatchService ─────────────────────────────────────────
 
 class MuseVerificationDispatchService:
     """
@@ -203,8 +163,6 @@ class MuseVerificationDispatchService:
         )
 
 
-# ─── MuseVerificationInboundService ──────────────────────────────────────────
-
 class MuseVerificationInboundService:
     """
     Processes verification results pushed from MUSE via GovESB.
@@ -225,7 +183,6 @@ class MuseVerificationInboundService:
     }
     """
 
-    # Map MUSE result string to VerificationStatus int
     _RESULT_TO_STATUS = {
         'PASSED': VerificationStatus.VERIFIED,
         'FAILED': VerificationStatus.FAILED,
@@ -257,12 +214,10 @@ class MuseVerificationInboundService:
 
         try:
             with transaction.atomic():
-                # Update account
                 account.verification_status = new_status
                 account.muse_verification_reference = muse_ref
                 account.save()
 
-                # If this is an active check result, update active_check_status too
                 if v_type == MuseVerificationType.ACTIVE_CHECK:
                     account.active_check_status = (
                         ActiveCheckStatus.ACTIVE
@@ -271,7 +226,6 @@ class MuseVerificationInboundService:
                     )
                     account.save()
 
-                # Immutable audit record
                 MuseVerificationRecord.objects.create(
                     payment_account=account,
                     muse_reference=muse_ref,
@@ -298,8 +252,6 @@ class MuseVerificationInboundService:
                 exception=exc,
             )
 
-
-# ─── ManualApprovalService ────────────────────────────────────────────────────
 
 class ManualApprovalService:
     """
@@ -347,8 +299,6 @@ class ManualApprovalService:
                 exception=exc,
             )
 
-
-# ─── PreAuditService ──────────────────────────────────────────────────────────
 
 class PreAuditService:
     """
@@ -434,8 +384,6 @@ class PreAuditService:
         return reasons
 
 
-# ─── PaylistService ───────────────────────────────────────────────────────────
-
 class PaylistService:
     """
     Generate, approve, and submit paylists to MUSE via GovESB.
@@ -447,7 +395,6 @@ class PaylistService:
     approve():   Move paylist from PENDING_APPROVAL → APPROVED.
     submit():    Move paylist from APPROVED → SUBMITTED and publish to GovESB.
 
-    TODO (GovESB): Replace _publish_paylist() stub with real GovESB producer.
     """
 
     GOVESB_TOPIC_PAYMENT_SUBMIT = 'tasaf.payment.submit'
@@ -481,7 +428,6 @@ class PaylistService:
             )
             from tasaf_payment.apps import TasafPaymentConfig
 
-            # Cheap size probe — count of ACCEPTED benefits on the payroll.
             benefit_count = BenefitConsumption.objects.filter(
                 id__in=PayrollBenefitConsumption.objects.filter(
                     payroll_id=payroll_id, is_deleted=False,
@@ -575,7 +521,6 @@ class PaylistService:
 
             user_pk = getattr(self.user, 'id', None)
 
-            # (account.fsp_type, stored Paylist.batch_type) targets for this run.
             if batch_type == 'BANK':
                 fsp_targets = [('BANK', 'BANK')]
             elif batch_type == 'MNO':
@@ -583,8 +528,6 @@ class PaylistService:
             else:  # MIXED → both FSPs, each in its own single-FSP batches
                 fsp_targets = [('BANK', 'BANK'), ('MOBILE', 'MNO')]
 
-            # BenefitConsumption has no direct payroll FK — the payroll↔benefit
-            # relation lives on the PayrollBenefitConsumption join model.
             benefit_ids = PayrollBenefitConsumption.objects.filter(
                 payroll_id=payroll_id,
                 is_deleted=False,
@@ -618,8 +561,6 @@ class PaylistService:
                         for gi in acc.group_beneficiary.group.groupindividual_set.filter(is_deleted=False):
                             account_map[gi.individual_id] = acc
 
-                    # Eligible (benefit, account) pairs, deterministically ordered
-                    # so batch boundaries are reproducible and auditable.
                     pairs = [
                         (b, account_map[b.individual_id])
                         for b in benefits if b.individual_id in account_map
@@ -669,6 +610,7 @@ class PaylistService:
                             for benefit, account in chunk
                         ]
                         PaylistItem.objects.bulk_create(item_objs, batch_size=2000)
+                        self._start_paylist_approval(paylist)
                         created.append({
                             'paylist_uuid':   str(paylist.uuid),
                             'batch_type':     stored_type,
@@ -678,7 +620,6 @@ class PaylistService:
                         })
 
                 if not created:
-                    # Rollback — nothing eligible for any FSP target
                     raise ValueError('No eligible accounts found for paylist generation')
 
             total_items = sum(c['item_count'] for c in created)
@@ -692,7 +633,6 @@ class PaylistService:
                 'paylists': created,
                 'paylist_count': len(created),
                 'total_items': total_items,
-                # Back-compat single-paylist fields (first batch / total items).
                 'paylist_uuid': created[0]['paylist_uuid'],
                 'item_count': total_items,
             }
@@ -706,19 +646,68 @@ class PaylistService:
             )
 
     @check_authentication
+    def _start_paylist_approval(self, paylist):
+        """Kick off the two-level PAYMENT_APPROVAL sign-off in the generic Approval Engine.
+        Best-effort — never breaks paylist generation."""
+        try:
+            from approval.services import ApprovalService
+        except Exception as exc:
+            logger.warning("tasaf_payment: approval engine unavailable (%s)", exc)
+            return
+        try:
+            summary = {
+                'batch_type': paylist.batch_type,
+                'batch_sequence': paylist.batch_sequence,
+                'batch_total': paylist.batch_total,
+                'payroll_id': str(paylist.payroll_id) if paylist.payroll_id else None,
+                'location_id': paylist.location_id,
+            }
+            res = ApprovalService(self.user).request_approval(paylist, 'PAYMENT_APPROVAL', summary=summary)
+            if not res.get('success'):
+                logger.warning("tasaf_payment: paylist approval start failed: %s", res)
+        except Exception as exc:
+            logger.warning("tasaf_payment: paylist approval start error (%s)", exc)
+
+    def _engine_request_for(self, paylist):
+        """The open (PENDING) engine ApprovalRequest for this paylist, if any."""
+        try:
+            from approval.models import ApprovalRequest, RequestStatus as AStatus
+            return ApprovalRequest.objects.filter(
+                object_id=str(paylist.id), status=AStatus.PENDING, is_deleted=False,
+            ).order_by('-date_created').first()
+        except Exception:
+            return None
+
     def approve(self, paylist_uuid: str) -> dict:
-        """Move paylist from PENDING_APPROVAL → APPROVED."""
+        """Approve the paylist's CURRENT step in the two-level Approval Engine sign-off.
+
+        The paylist only reaches APPROVED once BOTH steps are signed by two DIFFERENT approvers
+        (the engine's finalize adapter flips the status). Falls back to a direct transition for
+        in-flight paylists that predate the engine (no ApprovalRequest)."""
         try:
             paylist = Paylist.objects.get(uuid=paylist_uuid, is_deleted=False)
             if paylist.status != PaylistStatus.PENDING_APPROVAL:
                 return {'success': False, 'error': f'Paylist is {paylist.status}, not PENDING_APPROVAL'}
 
+            appr = self._engine_request_for(paylist)
+            if appr:
+                from approval.services import ApprovalService
+                step = appr.steps.filter(order=appr.current_step_order, is_deleted=False).first()
+                res = ApprovalService(self.user).approve(str(appr.id), str(step.id))
+                if not res.get('success'):
+                    return {'success': False,
+                            'error': res.get('message') or res.get('detail') or 'approval failed'}
+                paylist.refresh_from_db()  # adapter sets APPROVED once the final step is signed
+                logger.info("PaylistService.approve: paylist=%s step advanced (status=%s, user=%s)",
+                            paylist_uuid, paylist.status, self.user.username)
+                return {'success': True, 'error': None, 'status': paylist.status}
+
             paylist.status = PaylistStatus.APPROVED
             paylist.approved_at = datetime.now(tz=timezone.utc)
             paylist.save()
-
-            logger.info("PaylistService.approve: paylist=%s (user=%s)", paylist_uuid, self.user.username)
-            return {'success': True, 'error': None}
+            logger.info("PaylistService.approve: paylist=%s (legacy direct, user=%s)",
+                        paylist_uuid, self.user.username)
+            return {'success': True, 'error': None, 'status': paylist.status}
 
         except Paylist.DoesNotExist:
             return {'success': False, 'error': f'Paylist {paylist_uuid} not found'}
@@ -731,7 +720,6 @@ class PaylistService:
         """
         Move paylist from APPROVED → SUBMITTED and publish to GovESB.
 
-        TODO (GovESB): Replace _publish_paylist() stub.
         """
         try:
             paylist = Paylist.objects.get(uuid=paylist_uuid, is_deleted=False)
@@ -788,8 +776,6 @@ class PaylistService:
         )
 
 
-# ─── ReturnFeedbackService ────────────────────────────────────────────────────
-
 class ReturnFeedbackService:
     """
     Receives and stores return / unapplied feedback from MUSE via GovESB.
@@ -831,7 +817,6 @@ class ReturnFeedbackService:
                     reason_code=payload.get('reason_code'),
                     reason_description=payload.get('reason_description'),
                 )
-                # Update item status
                 item.status = (
                     PaylistItemStatus.UNAPPLIED
                     if feedback_type == 'UNAPPLIED'
@@ -857,11 +842,6 @@ class ReturnFeedbackService:
             )
 
 
-# ─── Backward-compatible alias ────────────────────────────────────────────────
-
-# Old code that imports VerificationService still works — it now points to the
-# dispatch service for the run path and the approval service for the approve path.
-# Callers that used _verify_single_account() directly must migrate to the new services.
 class VerificationService(MuseVerificationDispatchService):
     """Deprecated alias. Use MuseVerificationDispatchService."""
 
