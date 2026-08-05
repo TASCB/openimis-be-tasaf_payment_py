@@ -5,29 +5,29 @@ from django.apps import AppConfig
 MODULE_NAME = 'tasaf_payment'
 
 DEFAULT_CONFIG = {
-    # GraphQL permissions (format: MMEEAA — module 15, entity, action)
-    # Entity 20: PaymentAccount CRUD
-    "gql_payment_account_search_perms": ["152001"],
-    "gql_payment_account_create_perms": ["152002"],
-    "gql_payment_account_update_perms": ["152003"],
-    "gql_payment_account_delete_perms": ["152004"],
-    # Entity 21: Verification workflow
-    "gql_run_verification_perms":        ["152101"],
-    "gql_approve_account_perms":         ["152102"],
-    "gql_resubmit_failed_perms":         ["152103"],
-    # Entity 22: Pre-audit
-    "gql_run_pre_audit_perms":           ["152201"],
-    # Entity 23: Paylist
-    "gql_paylist_search_perms":          ["152301"],
-    "gql_generate_paylist_perms":        ["152302"],
-    "gql_approve_paylist_perms":         ["152303"],
-    "gql_submit_paylist_perms":          ["152304"],
-    # Entity 24: Return feedback
-    "gql_return_feedback_search_perms":  ["152401"],
-    # Entity 25: Dashboard
-    "gql_dashboard_perms":               ["152501"],
-    # Entity 26: Muse verification records
-    "gql_muse_verification_search_perms": ["152601"],
+    # GraphQL permissions (format: MMEEAA — module 27, entity, action)
+    # Entity 00: PaymentAccount CRUD
+    "gql_payment_account_search_perms": ["270001"],
+    "gql_payment_account_create_perms": ["270002"],
+    "gql_payment_account_update_perms": ["270003"],
+    "gql_payment_account_delete_perms": ["270004"],
+    # Entity 01: Verification workflow
+    "gql_run_verification_perms":        ["270101"],
+    "gql_approve_account_perms":         ["270102"],
+    "gql_resubmit_failed_perms":         ["270103"],
+    # Entity 02: Pre-audit
+    "gql_run_pre_audit_perms":           ["270201"],
+    # Entity 03: Paylist
+    "gql_paylist_search_perms":          ["270301"],
+    "gql_generate_paylist_perms":        ["270302"],
+    "gql_approve_paylist_perms":         ["270303"],
+    "gql_submit_paylist_perms":          ["270304"],
+    # Entity 04: Return feedback
+    "gql_return_feedback_search_perms":  ["270401"],
+    # Entity 05: Dashboard
+    "gql_dashboard_perms":               ["270501"],
+    # Entity 06: Muse verification records
+    "gql_muse_verification_search_perms": ["270601"],
 
     # Business rules (editable via Django Admin → ModuleConfig)
     "max_resubmissions": 3,
