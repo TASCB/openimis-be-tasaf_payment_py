@@ -618,9 +618,11 @@ class PaylistService:
             .first()
         )
         if status is None:
-            return 'Payroll not found'
+            return _("tasaf_payment.error.payroll_not_found")
         if status not in self.ALLOWED_PAYROLL_STATUSES:
-            return f'Payroll is not approved for payment (status={status})'
+            logger.info("PaylistService: payroll %s is %s, not approved for payment",
+                        payroll_id, status)
+            return _("tasaf_payment.error.payroll_not_approved")
         return None
 
     @check_authentication
@@ -656,7 +658,7 @@ class PaylistService:
 
             destination = self._resolve_destination(destination)
             if destination is None:
-                return {'success': False, 'error': 'Unknown payment destination'}
+                return {'success': False, 'error': _("tasaf_payment.error.unknown_destination")}
 
             benefit_count = BenefitConsumption.objects.filter(
                 id__in=PayrollBenefitConsumption.objects.filter(
@@ -666,7 +668,7 @@ class PaylistService:
                 is_deleted=False,
             ).count()
             if benefit_count == 0:
-                return {'success': False, 'error': 'No ACCEPTED benefits found for payroll'}
+                return {'success': False, 'error': _("tasaf_payment.error.no_accepted_benefits")}
 
             try:
                 threshold = int(TasafPaymentConfig.paylist_async_threshold or 0)
@@ -751,7 +753,7 @@ class PaylistService:
 
             destination = self._resolve_destination(destination)
             if destination is None:
-                return {'success': False, 'error': 'Unknown payment destination'}
+                return {'success': False, 'error': _("tasaf_payment.error.unknown_destination")}
 
             try:
                 max_size = int(TasafPaymentConfig.paylist_max_batch_size or 0)
@@ -781,7 +783,7 @@ class PaylistService:
             ).select_related('individual'))
 
             if not benefits:
-                return {'success': False, 'error': 'No ACCEPTED benefits found for payroll'}
+                return {'success': False, 'error': _("tasaf_payment.error.no_accepted_benefits")}
 
             individual_ids = [b.individual_id for b in benefits]
             created = []
@@ -954,7 +956,9 @@ class PaylistService:
         try:
             paylist = Paylist.objects.get(uuid=paylist_uuid, is_deleted=False)
             if paylist.status != PaylistStatus.PENDING_APPROVAL:
-                return {'success': False, 'error': f'Paylist is {paylist.status}, not PENDING_APPROVAL'}
+                logger.info("PaylistService.approve: paylist %s is %s", paylist_uuid, paylist.status)
+                return {'success': False,
+                        'error': _("tasaf_payment.error.paylist_not_pending_approval")}
 
             appr = self._engine_request_for(paylist)
             if appr:
@@ -963,7 +967,8 @@ class PaylistService:
                 res = ApprovalService(self.user).approve(str(appr.id), str(step.id))
                 if not res.get('success'):
                     return {'success': False,
-                            'error': res.get('message') or res.get('detail') or 'approval failed'}
+                            'error': (res.get('message') or res.get('detail')
+                                      or _("tasaf_payment.error.approval_failed"))}
                 paylist.refresh_from_db()  # adapter sets APPROVED once the final step is signed
                 logger.info("PaylistService.approve: paylist=%s step advanced (status=%s, user=%s)",
                             paylist_uuid, paylist.status, self.user.username)
@@ -977,7 +982,7 @@ class PaylistService:
             return {'success': True, 'error': None, 'status': paylist.status}
 
         except Paylist.DoesNotExist:
-            return {'success': False, 'error': f'Paylist {paylist_uuid} not found'}
+            return {'success': False, 'error': _("tasaf_payment.error.paylist_not_found")}
         except Exception as exc:
             logger.exception("PaylistService.approve failed")
             return output_exception(model_name="Paylist", method="approve", exception=exc)
@@ -991,7 +996,8 @@ class PaylistService:
         try:
             paylist = Paylist.objects.get(uuid=paylist_uuid, is_deleted=False)
             if paylist.status != PaylistStatus.APPROVED:
-                return {'success': False, 'error': f'Paylist is {paylist.status}, not APPROVED'}
+                logger.info("PaylistService.submit: paylist %s is %s", paylist_uuid, paylist.status)
+                return {'success': False, 'error': _("tasaf_payment.error.paylist_not_approved")}
 
             paylist.status = PaylistStatus.SUBMITTED
             paylist.submitted_at = datetime.now(tz=timezone.utc)
@@ -1003,7 +1009,7 @@ class PaylistService:
             return {'success': True, 'error': None}
 
         except Paylist.DoesNotExist:
-            return {'success': False, 'error': f'Paylist {paylist_uuid} not found'}
+            return {'success': False, 'error': _("tasaf_payment.error.paylist_not_found")}
         except Exception as exc:
             logger.exception("PaylistService.submit failed")
             return output_exception(model_name="Paylist", method="submit", exception=exc)
