@@ -17,7 +17,7 @@ setup(
     long_description_content_type='text/markdown',
     url='https://openimis.org/',
     author='TASCB',
-    author_email='dev@tascb.go.tz',
+    author_email='dev@tasaf.go.tz',
     install_requires=[
         'django',
         'graphene-django',

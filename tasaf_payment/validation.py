@@ -1,7 +1,7 @@
 from django.utils.translation import gettext as _
 
 from core.validation import BaseModelValidation
-from tasaf_payment.models import PaymentAccount
+from tasaf_payment.models import WithdrawalCharge, PaymentAccount
 
 
 class PaymentAccountValidation(BaseModelValidation):
@@ -46,3 +46,44 @@ def validate_fsp_type(data):
     if fsp_type and fsp_type not in ('BANK', 'MOBILE'):
         return [{"message": _("tasaf_payment.validation.fsp_type_invalid")}]
     return []
+
+
+class WithdrawalChargeValidation(BaseModelValidation):
+    """Bands must be sane and must not overlap: an overlap makes the applicable charge
+    ambiguous, and the wrong charge underpays or overpays a beneficiary.
+    """
+    OBJECT_TYPE = WithdrawalCharge
+
+    @classmethod
+    def _check(cls, **data):
+        errors = []
+        lower, upper = data.get('lower_amount'), data.get('upper_amount')
+        if lower is not None and upper is not None and lower > upper:
+            errors.append("Lower amount is above upper amount")
+        if data.get('withdrawal') is not None and float(data['withdrawal']) < 0:
+            errors.append("Withdrawal charge cannot be negative")
+
+        fsp_code = data.get('fsp_code')
+        if fsp_code and lower is not None and upper is not None:
+            clash = WithdrawalCharge.objects.filter(
+                is_deleted=False, fsp_code=fsp_code,
+                lower_amount__lte=upper, upper_amount__gte=lower)
+            if data.get('id'):
+                clash = clash.exclude(id=data['id'])
+            if clash.exists():
+                errors.append("Band overlaps an existing band for this FSP")
+        if errors:
+            raise ValidationError(' '.join(errors))
+        return []
+
+    @classmethod
+    def validate_create(cls, user, **data):
+        return cls._check(**data)
+
+    @classmethod
+    def validate_update(cls, user, **data):
+        return cls._check(**data)
+
+    @classmethod
+    def validate_delete(cls, user, **data):
+        return []

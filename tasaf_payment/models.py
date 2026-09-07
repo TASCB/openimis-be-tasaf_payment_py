@@ -34,6 +34,12 @@ class BatchType(models.TextChoices):
     MIXED  = 'MIXED',  _("MIXED")
 
 
+class PaymentDestination(models.TextChoices):
+    """Both ride the shared GovESB transport, differing only by topic."""
+    MUSE = 'MUSE', _("MUSE")
+    GEPG = 'GEPG', _("GePG")
+
+
 class PaylistStatus(models.TextChoices):
     DRAFT            = 'DRAFT',            _("DRAFT")
     PENDING_APPROVAL = 'PENDING_APPROVAL', _("PENDING_APPROVAL")
@@ -47,6 +53,13 @@ class PaylistItemStatus(models.TextChoices):
     PROCESSED  = 'PROCESSED',  _("PROCESSED")
     RETURNED   = 'RETURNED',   _("RETURNED")
     UNAPPLIED  = 'UNAPPLIED',  _("UNAPPLIED")
+
+
+PAYLIST_ITEM_TERMINAL_STATUSES = (
+    PaylistItemStatus.PROCESSED,
+    PaylistItemStatus.RETURNED,
+    PaylistItemStatus.UNAPPLIED,
+)
 
 
 class MuseVerificationResult(models.TextChoices):
@@ -113,6 +126,7 @@ class PaymentAccount(HistoryBusinessModel):
         default=ActiveCheckStatus.PENDING,
     )
     is_primary = models.BooleanField(default=True)
+    contact_phone = models.CharField(max_length=20, null=True, blank=True)
     json_ext = models.JSONField(db_column='Json_ext', blank=True, default=dict)
 
     class Meta:
@@ -240,6 +254,11 @@ class Paylist(HistoryBusinessModel):
         max_length=10,
         choices=BatchType.choices,
     )
+    destination = models.CharField(
+        max_length=10,
+        choices=PaymentDestination.choices,
+        default=PaymentDestination.MUSE,
+    )
     status = models.CharField(
         max_length=20,
         choices=PaylistStatus.choices,
@@ -255,11 +274,9 @@ class Paylist(HistoryBusinessModel):
     generated_at = models.DateTimeField(null=True, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
+    # Set when every item is terminal.
+    closed_at = models.DateTimeField(null=True, blank=True)
     muse_batch_reference = models.CharField(max_length=100, null=True, blank=True)
-    # When a payroll's eligible accounts for one FSP exceed the MUSE batch size,
-    # generation splits them into several sibling Paylists. They share a
-    # batch_group (UUID) and carry their 1-based position (batch_sequence) within
-    # the group of batch_total siblings. Single-batch generation → seq 1 / total 1.
     batch_group = models.UUIDField(null=True, blank=True, db_index=True)
     batch_sequence = models.IntegerField(null=True, blank=True)
     batch_total = models.IntegerField(null=True, blank=True)
@@ -271,10 +288,11 @@ class Paylist(HistoryBusinessModel):
         indexes = [
             models.Index(fields=['status'], name='tasaf_paylist_status_idx'),
             models.Index(fields=['batch_type'], name='tasaf_paylist_btype_idx'),
+            models.Index(fields=['destination'], name='tasaf_paylist_dest_idx'),
         ]
 
     def __str__(self):
-        return f"Paylist [{self.batch_type}] {self.status}"
+        return f"Paylist [{self.destination}/{self.batch_type}] {self.status}"
 
 
 class PaylistItem(HistoryModel):
@@ -301,7 +319,11 @@ class PaylistItem(HistoryModel):
         blank=True,
         related_name='paylist_items',
     )
+    # amount is the GROSS: what MUSE is asked to move (net + charge).
     amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    net_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    # Resolved at generation and stored, so the line stays auditable if the tariff changes.
+    charge_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     status = models.CharField(
         max_length=20,
         choices=PaylistItemStatus.choices,
@@ -310,6 +332,8 @@ class PaylistItem(HistoryModel):
     muse_reference = models.CharField(max_length=100, null=True, blank=True)
     return_reason = models.TextField(null=True, blank=True)
     final_status = models.CharField(max_length=50, null=True, blank=True)
+    # Set when the gateway confirms the money landed.
+    settled_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         managed = True
@@ -373,3 +397,59 @@ class PaymentAccountMutation(UUIDModel, ObjectMutation):
     class Meta:
         managed = True
         db_table = 'tasaf_PaymentAccountMutation'
+
+
+# ---------------------------------------------------------------------------
+# Withdrawal charges
+# ---------------------------------------------------------------------------
+
+class WithdrawalCharge(HistoryModel):
+    """One FSP tariff band. The beneficiary must receive the entitlement in full, so the
+    transfer is grossed up by the charge the FSP deducts on withdrawal.
+
+    Bands are looked up on the NET amount and are effective-dated: a historical paylist must
+    stay reproducible at the rates that applied when it was generated.
+    """
+    fsp_code = models.CharField(max_length=50, db_index=True)
+    lower_amount = models.DecimalField(max_digits=18, decimal_places=2)
+    upper_amount = models.DecimalField(max_digits=18, decimal_places=2)
+    # 0 is a valid, deliberate value meaning "no charge" -- distinct from no band at all.
+    withdrawal = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    effective_from = models.DateField(null=True, blank=True)
+    effective_to = models.DateField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'tasaf_WithdrawalCharge'
+        indexes = [
+            models.Index(fields=['fsp_code', 'lower_amount', 'upper_amount'],
+                         name='idx_wcharge_lookup'),
+        ]
+
+    def __str__(self):
+        return f"{self.fsp_code} {self.lower_amount}-{self.upper_amount} = {self.withdrawal}"
+
+
+class FspMapping(HistoryModel):
+    """Maps a PaymentAccount.fsp_name (a display name, e.g. "Vodacom M-Pesa") to the
+    tariff-table fsp_code (e.g. "MPESA").
+
+    A table rather than static config so a new FSP can be onboarded entirely from the UI:
+    add the mapping, add its bands, done. Seeded from TasafPaymentConfig.fsp_code_aliases
+    on first use so existing configuration keeps working.
+    """
+    fsp_name = models.CharField(max_length=100)
+    # Normalised (upper, alphanumeric only) so lookup is punctuation/case insensitive.
+    fsp_name_key = models.CharField(max_length=100, db_index=True)
+    fsp_code = models.CharField(max_length=50, db_index=True)
+
+    class Meta:
+        db_table = 'tasaf_FspMapping'
+
+    def save(self, *args, **kwargs):
+        from tasaf_payment.charges import normalise_fsp
+        self.fsp_name_key = normalise_fsp(self.fsp_name)
+        self.fsp_code = normalise_fsp(self.fsp_code)
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.fsp_name} -> {self.fsp_code}"
