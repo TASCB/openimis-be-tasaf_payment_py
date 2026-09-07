@@ -9,20 +9,32 @@ from core.services import wait_for_mutation
 from core.utils import append_validity_filter
 from tasaf_payment.apps import TasafPaymentConfig
 from tasaf_payment.gql_mutations import (
+    SaveWithdrawalChargeMutation,
+    DeleteWithdrawalChargeMutation,
+    ImportWithdrawalChargesMutation,
+    SaveFspMappingMutation,
+    DeleteFspMappingMutation,
+    SeedFspMappingsMutation,
+    SaveFspChargesMutation,
     CreatePaymentAccountMutation,
     UpdatePaymentAccountMutation,
     DeletePaymentAccountMutation,
     RunVerificationMutation,
     ApprovePaymentAccountsMutation,
     RunBatchVerificationMutation,
-    ResubmitFailedAccountsMutation,
     RunPreAuditMutation,
+    RunBatchPreAuditMutation,
     GeneratePaylistMutation,
     ApprovePaylistMutation,
     SubmitPaylistMutation,
-    RouteToCorrectionMutation,
 )
 from tasaf_payment.gql_queries import (
+    WithdrawalChargeGQLType,
+    FspCoverageGQLType,
+    ChargeGapGQLType,
+    FspMappingGQLType,
+    UnmappedFspGQLType,
+    KnownFspGQLType,
     PaymentAccountGQLType,
     VerificationRecordGQLType,
     MuseVerificationRecordGQLType,
@@ -31,6 +43,8 @@ from tasaf_payment.gql_queries import (
     ReturnFeedbackGQLType,
 )
 from tasaf_payment.models import (
+    WithdrawalCharge,
+    FspMapping,
     PaymentAccount,
     VerificationRecord,
     MuseVerificationRecord,
@@ -43,10 +57,6 @@ from tasaf_payment.models import (
 )
 
 
-# ── Dashboard summary GQL types ────────────────────────────────────────────────
-# One round-trip for the Payment Operations dashboard: per-status counts (accounts
-# carry no money, so count-only) plus per-paylist-status beneficiary counts and
-# summed amounts (amounts only exist on PaylistItem), and two headline totals.
 
 class DashboardAccountStatGQLType(graphene.ObjectType):
     status = graphene.String()
@@ -69,7 +79,70 @@ class PaymentDashboardSummaryGQLType(graphene.ObjectType):
     paid_amount = graphene.Float()         # amount on PROCESSED items (disbursed)
 
 
+
+
+class EpaymentFspRowGQLType(graphene.ObjectType):
+    epayment_code = graphene.String()
+    households = graphene.Int()
+    withdrawal_charges = graphene.Float()
+    pct_payment = graphene.Float()
+    child_grant = graphene.Float()
+    disability_grant = graphene.Float()
+    pwp_payment = graphene.Float()        # no PWP concept exists yet — always 0
+    ei_payment = graphene.Float()        # Economic Inclusion — no data yet, always 0
+    has_child = graphene.Int()
+    primary_student = graphene.Int()
+    secondary_student = graphene.Int()
+    component_total = graphene.Float()    # pct_breakdown.raw_total — PRE household cap
+    total_paid = graphene.Float()
+    items = graphene.Int()
+
+
+class EpaymentSummaryByFspGQLType(graphene.ObjectType):
+    rows = graphene.List(EpaymentFspRowGQLType)
+    totals = graphene.Field(EpaymentFspRowGQLType)
+
+
 class Query(graphene.ObjectType):
+
+    epayment_fsp_items = OrderedDjangoFilterConnectionField(
+        PaylistItemGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+        epayment_code=graphene.String(required=True),
+        payment_cycle_id=graphene.UUID(required=False),
+        date_from=graphene.Date(required=False),
+        date_to=graphene.Date(required=False),
+        destination=graphene.String(required=False),
+        include_unpaid=graphene.Boolean(required=False),
+        description="Paid items behind one FSP row of the e-Payment summary, for "
+                    "reconciliation. Defaults to PROCESSED only, matching the report.",
+    )
+
+    epayment_beneficiary_items = OrderedDjangoFilterConnectionField(
+        PaylistItemGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+        payment_account_uuid=graphene.UUID(required=True),
+        description="Every payment made to one beneficiary's account, all statuses, "
+                    "so an auditor can see their full history from the FSP drill-down.",
+    )
+
+    epayment_summary_by_fsp_export = graphene.String(
+        payment_cycle_id=graphene.UUID(required=False),
+        date_from=graphene.Date(required=False),
+        date_to=graphene.Date(required=False),
+        destination=graphene.String(required=False),
+        description="Writes the FSP summary as .xlsx and returns the export name for "
+                    "core's /api/core/fetch_export.",
+    )
+
+    epayment_summary_by_fsp = graphene.Field(
+        EpaymentSummaryByFspGQLType,
+        payment_cycle_id=graphene.UUID(required=False),
+        date_from=graphene.Date(required=False),
+        date_to=graphene.Date(required=False),
+        destination=graphene.String(required=False),
+        description="Summary of e-Payment by FSP. Counts only PROCESSED (confirmed paid) items.",
+    )
 
     # ── Payment accounts ──────────────────────────────────────────────────────
     payment_account = OrderedDjangoFilterConnectionField(
@@ -79,6 +152,7 @@ class Query(graphene.ObjectType):
         client_mutation_id=graphene.String(),
         uuid=graphene.UUID(),
         group_beneficiary_uuid=graphene.UUID(),
+        location_id=graphene.Int(),
     )
 
     # ── MUSE verification records ─────────────────────────────────────────────
@@ -88,6 +162,25 @@ class Query(graphene.ObjectType):
         payment_account_uuid=graphene.UUID(),
         # verification_type, result handled by filter_fields
     )
+
+    # ── Withdrawal charges (tariff table) ─────────────────────────────────────
+    withdrawal_charge = OrderedDjangoFilterConnectionField(
+        WithdrawalChargeGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+    )
+    # Configured vs unconfigured ranges per FSP; drives the coverage view.
+    fsp_coverage = graphene.List(FspCoverageGQLType, fsp_code=graphene.String())
+    # FSP display-name -> tariff-code map, editable so a new FSP can be onboarded in the UI.
+    fsp_mapping = OrderedDjangoFilterConnectionField(
+        FspMappingGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+    )
+    # FSPs on accounts that have no bands yet -- makes onboarding a visible task.
+    unmapped_fsps = graphene.List(UnmappedFspGQLType)
+    # FSP options for pickers -- avoids hand-typing a code that then fails to match.
+    known_fsps = graphene.List(KnownFspGQLType)
+    # Current bands for one FSP, for the config editor.
+    fsp_band_set = graphene.List(WithdrawalChargeGQLType, fsp_code=graphene.String(required=True))
 
     # ── Paylists ──────────────────────────────────────────────────────────────
     paylist = OrderedDjangoFilterConnectionField(
@@ -126,7 +219,10 @@ class Query(graphene.ObjectType):
     # ─── Resolvers ───────────────────────────────────────────────────────────
 
     def resolve_payment_account(self, info, **kwargs):
-        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_payment_account_search_perms)
+        Query._check_any_permission(info.context.user, [
+            TasafPaymentConfig.gql_payment_account_search_perms,
+            TasafPaymentConfig.gql_pre_audit_search_perms,
+        ])
         filters = append_validity_filter(**kwargs)
 
         client_mutation_id = kwargs.get("client_mutation_id")
@@ -142,6 +238,9 @@ class Query(graphene.ObjectType):
             filters.append(Q(pre_audit_status=kwargs["pre_audit_status"]))
         if kwargs.get("active_check_status"):
             filters.append(Q(active_check_status=kwargs["active_check_status"]))
+        if kwargs.get("location_id"):
+            from tasaf_payment.services import location_descendants_q
+            filters.append(location_descendants_q(kwargs["location_id"]))
 
         return gql_optimizer.query(PaymentAccount.objects.filter(*filters), info)
 
@@ -206,6 +305,95 @@ class Query(graphene.ObjectType):
             filters.append(Q(payment_account__uuid=kwargs["payment_account_uuid"]))
         return gql_optimizer.query(VerificationRecord.objects.filter(*filters), info)
 
+    def resolve_epayment_beneficiary_items(self, info, **kwargs):
+        """One beneficiary's full payment history, deliberately unfiltered by status.
+
+        The FSP drill-down is scoped to PROCESSED so it reconciles; this level is the
+        opposite — an auditor looking at a single household wants everything that was
+        ever attempted for them, including what came back.
+        """
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_reports_perms)
+
+        return gql_optimizer.query(
+            PaylistItem.objects.filter(
+                is_deleted=False,
+                payment_account__uuid=kwargs['payment_account_uuid'],
+            ),
+            info,
+        )
+
+    def resolve_epayment_fsp_items(self, info, **kwargs):
+        """The individual payments behind one FSP row, so an auditor can reconcile.
+
+        Same scope rule as the summary — PROCESSED only — so the rows here add up to
+        the figure clicked on. ``include_unpaid`` widens it to returned/unapplied/
+        pending for investigating a discrepancy, and is off by default precisely so
+        the default view reconciles.
+        """
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_reports_perms)
+        from tasaf_payment.reports import fsp_names_for_code
+
+        names = fsp_names_for_code(kwargs.get('epayment_code'))
+        filters = [Q(is_deleted=False), Q(payment_account__fsp_name__in=names)]
+
+        if not kwargs.get('include_unpaid'):
+            filters.append(Q(status=PaylistItemStatus.PROCESSED))
+        if kwargs.get('payment_cycle_id'):
+            filters.append(Q(paylist__payment_cycle_id=kwargs['payment_cycle_id']))
+        if kwargs.get('destination'):
+            filters.append(Q(paylist__destination=kwargs['destination']))
+        if kwargs.get('date_from'):
+            filters.append(Q(settled_at__gte=kwargs['date_from']))
+        if kwargs.get('date_to'):
+            filters.append(Q(settled_at__lte=kwargs['date_to']))
+
+        return gql_optimizer.query(PaylistItem.objects.filter(*filters), info)
+
+    def resolve_epayment_summary_by_fsp_export(self, info, **kwargs):
+        """CSV export via core's export transport."""
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_reports_perms)
+        from tasaf_payment.reports import export_epayment_summary_by_fsp
+
+        return export_epayment_summary_by_fsp(
+            info.context.user,
+            payment_cycle_id=kwargs.get('payment_cycle_id'),
+            date_from=kwargs.get('date_from'),
+            date_to=kwargs.get('date_to'),
+            destination=kwargs.get('destination'),
+        )
+
+    def resolve_epayment_summary_by_fsp(self, info, **kwargs):
+        """Summary of e-Payment by FSP."""
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_reports_perms)
+        from tasaf_payment.reports import epayment_summary_by_fsp
+
+        result = epayment_summary_by_fsp(
+            payment_cycle_id=kwargs.get('payment_cycle_id'),
+            date_from=kwargs.get('date_from'),
+            date_to=kwargs.get('date_to'),
+            destination=kwargs.get('destination'),
+        )
+        to_row = lambda r: EpaymentFspRowGQLType(  # noqa: E731
+            epayment_code=r['epayment_code'],
+            households=r['households'],
+            withdrawal_charges=float(r['withdrawal_charges']),
+            pct_payment=float(r['pct_payment']),
+            child_grant=float(r['child_grant']),
+            disability_grant=float(r['disability_grant']),
+            pwp_payment=float(r['pwp_payment']),
+            ei_payment=float(r["ei_payment"]),
+            has_child=r['has_child'],
+            primary_student=r['primary_student'],
+            secondary_student=r['secondary_student'],
+            component_total=float(r['component_total']),
+            total_paid=float(r['total_paid']),
+            items=r['items'],
+        )
+        return EpaymentSummaryByFspGQLType(
+            rows=[to_row(r) for r in result['rows']],
+            totals=to_row(result['totals']),
+        )
+
     def resolve_payment_dashboard_summary(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_dashboard_perms)
 
@@ -264,13 +452,79 @@ class Query(graphene.ObjectType):
             paid_amount=float(paid),
         )
 
+    def resolve_withdrawal_charge(self, info, **kwargs):
+        Query._check_permissions(info.context.user,
+                                 TasafPaymentConfig.gql_withdrawal_charge_search_perms)
+        return WithdrawalCharge.objects.filter(is_deleted=False)
+
+    def resolve_fsp_coverage(self, info, fsp_code=None, **kwargs):
+        Query._check_permissions(info.context.user,
+                                 TasafPaymentConfig.gql_withdrawal_charge_search_perms)
+        from tasaf_payment.charges import coverage
+        codes = ([fsp_code] if fsp_code else sorted(
+            WithdrawalCharge.objects.filter(is_deleted=False)
+            .values_list('fsp_code', flat=True).distinct()))
+        return [FspCoverageGQLType(
+            fsp_code=c['fsp_code'], bands=c['bands'], lowest=c['lowest'],
+            highest=c['highest'], covers_from_zero=c['covers_from_zero'],
+            gaps=[ChargeGapGQLType(range_from=g['from'], range_to=g['to']) for g in c['gaps']],
+            overlaps=[ChargeGapGQLType(range_from=g['from'], range_to=g['to'])
+                      for g in c['overlaps']],
+        ) for c in (coverage(code) for code in codes)]
+
+    def resolve_fsp_mapping(self, info, **kwargs):
+        Query._check_permissions(info.context.user,
+                                 TasafPaymentConfig.gql_withdrawal_charge_search_perms)
+        return FspMapping.objects.filter(is_deleted=False)
+
+    def resolve_unmapped_fsps(self, info, **kwargs):
+        Query._check_permissions(info.context.user,
+                                 TasafPaymentConfig.gql_withdrawal_charge_search_perms)
+        from tasaf_payment.charges import unmapped_fsp_names
+        return [UnmappedFspGQLType(**row) for row in unmapped_fsp_names()]
+
+    def resolve_known_fsps(self, info, **kwargs):
+        Query._check_permissions(info.context.user,
+                                 TasafPaymentConfig.gql_withdrawal_charge_search_perms)
+        from tasaf_payment.charges import known_fsps
+        return [KnownFspGQLType(**row) for row in known_fsps()]
+
+    def resolve_fsp_band_set(self, info, fsp_code, **kwargs):
+        Query._check_permissions(info.context.user,
+                                 TasafPaymentConfig.gql_withdrawal_charge_search_perms)
+        from tasaf_payment.charges import normalise_fsp
+        return (WithdrawalCharge.objects
+                .filter(is_deleted=False, fsp_code=normalise_fsp(fsp_code))
+                .order_by('lower_amount'))
+
     @staticmethod
     def _check_permissions(user, perms):
         if type(user) is AnonymousUser or not user.id or not user.has_perms(perms):
             raise PermissionError(_("Unauthorized"))
 
+    @staticmethod
+    def _check_any_permission(user, perm_sets):
+        """Authorise when the user holds ANY of the given permission sets.
+
+        `has_perms` is all-or-nothing, so a plain union would demand every right at once.
+        """
+        if type(user) is not AnonymousUser and user.id:
+            for perms in perm_sets:
+                if perms and user.has_perms(perms):
+                    return
+        raise PermissionError(_("Unauthorized"))
+
 
 class Mutation(graphene.ObjectType):
+    # Withdrawal charges (tariff table)
+    save_withdrawal_charge = SaveWithdrawalChargeMutation.Field()
+    delete_withdrawal_charge = DeleteWithdrawalChargeMutation.Field()
+    import_withdrawal_charges = ImportWithdrawalChargesMutation.Field()
+    save_fsp_mapping = SaveFspMappingMutation.Field()
+    delete_fsp_mapping = DeleteFspMappingMutation.Field()
+    seed_fsp_mappings = SeedFspMappingsMutation.Field()
+    save_fsp_charges = SaveFspChargesMutation.Field()
+
     # CRUD
     create_payment_account = CreatePaymentAccountMutation.Field()
     update_payment_account = UpdatePaymentAccountMutation.Field()
@@ -279,10 +533,9 @@ class Mutation(graphene.ObjectType):
     run_verification         = RunVerificationMutation.Field()
     approve_payment_accounts = ApprovePaymentAccountsMutation.Field()
     run_batch_verification   = RunBatchVerificationMutation.Field()
-    resubmit_failed_accounts = ResubmitFailedAccountsMutation.Field()
-    route_to_correction      = RouteToCorrectionMutation.Field()
     # Pre-audit
-    run_pre_audit = RunPreAuditMutation.Field()
+    run_pre_audit       = RunPreAuditMutation.Field()
+    run_batch_pre_audit = RunBatchPreAuditMutation.Field()
     # Paylist
     generate_paylist = GeneratePaylistMutation.Field()
     approve_paylist  = ApprovePaylistMutation.Field()

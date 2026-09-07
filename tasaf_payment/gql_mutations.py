@@ -11,7 +11,9 @@ from core.gql.gql_mutations.base_mutation import (
 )
 from core.schema import OpenIMISMutation
 from tasaf_payment.apps import TasafPaymentConfig
-from tasaf_payment.models import PaymentAccount, VerificationStatus
+from tasaf_payment.models import (
+    PaymentAccount, VerificationStatus, WithdrawalCharge, FspMapping, PaymentDestination,
+)
 
 
 def _resolve_account_ids(uuids):
@@ -62,16 +64,21 @@ class ApprovePaymentAccountsInputType(OpenIMISMutation.Input):
 class RunBatchVerificationInputType(OpenIMISMutation.Input):
     benefit_plan_id = graphene.UUID(required=False)
     fsp_type        = graphene.String(required=False)
+    location_id     = graphene.Int(required=False)
     rerun           = graphene.Boolean(required=False)
     account_uuids   = graphene.List(graphene.UUID, required=False)
 
 
-class ResubmitFailedAccountsInputType(OpenIMISMutation.Input):
-    account_uuids = graphene.List(graphene.UUID, required=True)
-
-
 class RunPreAuditInputType(OpenIMISMutation.Input):
     account_uuids = graphene.List(graphene.UUID, required=True)
+
+
+class RunBatchPreAuditInputType(OpenIMISMutation.Input):
+    benefit_plan_id = graphene.UUID(required=False)
+    fsp_type        = graphene.String(required=False)
+    location_id     = graphene.Int(required=False)
+    rerun           = graphene.Boolean(required=False)
+    account_uuids   = graphene.List(graphene.UUID, required=False)
 
 
 class GeneratePaylistInputType(OpenIMISMutation.Input):
@@ -80,6 +87,7 @@ class GeneratePaylistInputType(OpenIMISMutation.Input):
     batch_type       = graphene.String(required=True)   # BANK / MNO / MIXED
     payment_cycle_id = graphene.UUID(required=False)
     location_id      = graphene.Int(required=False)      # Location uses a legacy integer PK
+    destination      = graphene.String(required=False)   # MUSE / GEPG — defaults to MUSE
 
 
 class ApprovePaylistInputType(OpenIMISMutation.Input):
@@ -88,12 +96,6 @@ class ApprovePaylistInputType(OpenIMISMutation.Input):
 
 class SubmitPaylistInputType(OpenIMISMutation.Input):
     paylist_uuid = graphene.UUID(required=True)
-
-
-class RouteToCorrection(OpenIMISMutation.Input):
-    """Send FAILED accounts to tasks_management for case management correction."""
-    account_uuids = graphene.List(graphene.UUID, required=True)
-    notes = graphene.String(required=False)
 
 
 # ─── PaymentAccount CRUD ─────────────────────────────────────────────────────
@@ -227,6 +229,7 @@ class RunBatchVerificationMutation(BaseMutation):
         has_filter = any([
             data.get('benefit_plan_id'),
             data.get('fsp_type'),
+            data.get('location_id'),
             data.get('account_uuids'),
         ])
         if not has_filter:
@@ -244,6 +247,8 @@ class RunBatchVerificationMutation(BaseMutation):
             filters['benefit_plan_id'] = str(data['benefit_plan_id'])
         if data.get('fsp_type'):
             filters['fsp_type'] = data['fsp_type']
+        if data.get('location_id'):
+            filters['location_id'] = int(data['location_id'])
         if data.get('rerun'):
             filters['rerun'] = bool(data['rerun'])
         if data.get('account_uuids'):
@@ -253,36 +258,6 @@ class RunBatchVerificationMutation(BaseMutation):
             raise Exception(result.get('error', 'Batch verification dispatch failed'))
 
     class Input(RunBatchVerificationInputType):
-        pass
-
-
-class ResubmitFailedAccountsMutation(BaseMutation):
-    """Reset FAILED accounts to PENDING and re-dispatch to MUSE."""
-    _mutation_class = "ResubmitFailedAccountsMutation"
-    _mutation_module = TasafPaymentConfig.name
-
-    @classmethod
-    def _validate_mutation(cls, user, **data):
-        _require_perms(user, TasafPaymentConfig.gql_resubmit_failed_perms)
-        if not data.get('account_uuids'):
-            raise ValidationError(_("tasaf_payment.validation.no_accounts_selected"))
-
-    @classmethod
-    def _mutate(cls, user, **data):
-        from tasaf_payment.tasks import resubmit_failed_accounts_task
-        data.pop('client_mutation_id', None)
-        data.pop('client_mutation_label', None)
-        account_ids = list(
-            PaymentAccount.objects.filter(
-                uuid__in=data.get('account_uuids', []),
-                verification_status=VerificationStatus.FAILED,
-                is_deleted=False,
-            ).values_list('id', flat=True)
-        )
-        if account_ids:
-            resubmit_failed_accounts_task.delay(account_ids, user.id)
-
-    class Input(ResubmitFailedAccountsInputType):
         pass
 
 
@@ -313,6 +288,53 @@ class RunPreAuditMutation(BaseMutation):
         pass
 
 
+class RunBatchPreAuditMutation(BaseMutation):
+    """Pre-audit every candidate matching the filters, not just a selection.
+
+    Same right as the per-selection mutation: this widens the scope, it does not change
+    what the check does or who may run it.
+    """
+    _mutation_class = "RunBatchPreAuditMutation"
+    _mutation_module = TasafPaymentConfig.name
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require_perms(user, TasafPaymentConfig.gql_run_pre_audit_perms)
+        has_filter = any([
+            data.get('benefit_plan_id'),
+            data.get('fsp_type'),
+            data.get('location_id'),
+            data.get('account_uuids'),
+        ])
+        if not has_filter:
+            raise ValidationError(
+                _("tasaf_payment.validation.batch_pre_audit_requires_filter")
+            )
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        from tasaf_payment.services import BatchPreAuditService
+        data.pop('client_mutation_id', None)
+        data.pop('client_mutation_label', None)
+        filters = {}
+        if data.get('benefit_plan_id'):
+            filters['benefit_plan_id'] = str(data['benefit_plan_id'])
+        if data.get('fsp_type'):
+            filters['fsp_type'] = data['fsp_type']
+        if data.get('location_id'):
+            filters['location_id'] = int(data['location_id'])
+        if data.get('rerun'):
+            filters['rerun'] = bool(data['rerun'])
+        if data.get('account_uuids'):
+            filters['account_uuids'] = [str(u) for u in data['account_uuids']]
+        result = BatchPreAuditService(user).dispatch(filters)
+        if not result.get('success'):
+            raise Exception(result.get('error', 'Batch pre-audit dispatch failed'))
+
+    class Input(RunBatchPreAuditInputType):
+        pass
+
+
 # ─── Paylist mutations ────────────────────────────────────────────────────────
 
 class GeneratePaylistMutation(BaseMutation):
@@ -327,6 +349,9 @@ class GeneratePaylistMutation(BaseMutation):
             raise ValidationError(_("tasaf_payment.validation.payroll_id_required"))
         if data.get('batch_type') not in ('BANK', 'MNO', 'MIXED'):
             raise ValidationError(_("tasaf_payment.validation.invalid_batch_type"))
+        destination = data.get('destination')
+        if destination and destination not in PaymentDestination.values:
+            raise ValidationError(_("tasaf_payment.validation.invalid_destination"))
 
     @classmethod
     def _mutate(cls, user, **data):
@@ -338,6 +363,7 @@ class GeneratePaylistMutation(BaseMutation):
             batch_type=data['batch_type'],
             payment_cycle_id=data.get('payment_cycle_id'),
             location_id=data.get('location_id'),
+            destination=data.get('destination'),
         )
         if not result.get('success'):
             raise Exception(result.get('error', 'Paylist generation failed'))
@@ -390,43 +416,266 @@ class SubmitPaylistMutation(BaseMutation):
         pass
 
 
-class RouteToCorrectionMutation(BaseMutation):
-    """
-    Route FAILED verification accounts to Case Management for correction.
+# ─── Withdrawal charges ───────────────────────────────────────────────────────
 
-    Creates a tasks_management Task for each account. Scaffold only —
-    full Case Management integration is a future development item.
-    """
-    _mutation_class = "RouteToCorrectionMutation"
+class WithdrawalChargeInputType(OpenIMISMutation.Input):
+    uuid = graphene.UUID(required=False)
+    fsp_code = graphene.String(required=True)
+    lower_amount = graphene.Decimal(required=True)
+    upper_amount = graphene.Decimal(required=True)
+    # 0 is valid and means "no charge" -- distinct from having no band at all.
+    withdrawal = graphene.Decimal(required=True)
+    effective_from = graphene.Date(required=False)
+    effective_to = graphene.Date(required=False)
+
+
+class SaveWithdrawalChargeMutation(OpenIMISMutation):
+    """Create or update one tariff band."""
     _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SaveWithdrawalChargeMutation"
 
-    @classmethod
-    def _validate_mutation(cls, user, **data):
-        _require_perms(user, TasafPaymentConfig.gql_approve_account_perms)
-        if not data.get('account_uuids'):
-            raise ValidationError(_("tasaf_payment.validation.no_accounts_selected"))
-
-    @classmethod
-    def _mutate(cls, user, **data):
-        data.pop('client_mutation_id', None)
-        data.pop('client_mutation_label', None)
-        account_uuids = data.get('account_uuids', [])
-        notes = data.get('notes', '')
-        accounts = PaymentAccount.objects.filter(
-            uuid__in=account_uuids,
-            verification_status=VerificationStatus.FAILED,
-            is_deleted=False,
-        )
-        # Scaffold: for now this only logs the route-to-correction intent.
-        # TODO: create a tasks_management task to drive the Case Management
-        # correction workflow (not yet implemented).
-        import logging
-        logger = logging.getLogger(__name__)
-        for account in accounts:
-            logger.info(
-                "[CASE_MGMT SCAFFOLD] Route account %s to correction. Notes: %s",
-                account.uuid, notes,
-            )
-
-    class Input(RouteToCorrection):
+    class Input(WithdrawalChargeInputType):
         pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
+            data.pop('client_mutation_id', None)
+            data.pop('client_mutation_label', None)
+            from tasaf_payment.charges import normalise_fsp
+            uuid_ = data.pop('uuid', None)
+            if data['lower_amount'] > data['upper_amount']:
+                return [{'message': _("Lower amount is above upper amount")}]
+            data['fsp_code'] = normalise_fsp(data['fsp_code'])
+
+            # Overlaps make the band that applies ambiguous, so reject rather than guess.
+            clash = WithdrawalCharge.objects.filter(
+                is_deleted=False, fsp_code=data['fsp_code'],
+                lower_amount__lte=data['upper_amount'],
+                upper_amount__gte=data['lower_amount'])
+            if uuid_:
+                clash = clash.exclude(uuid=uuid_)
+            if clash.exists():
+                return [{'message': _("Band overlaps an existing band for this FSP")}]
+
+            from tasaf_payment.services import WithdrawalChargeService
+            service = WithdrawalChargeService(user)
+
+            if uuid_:
+                obj = WithdrawalCharge.objects.filter(uuid=uuid_, is_deleted=False).first()
+                if not obj:
+                    return [{'message': _("Withdrawal charge not found")}]
+                data['id'] = str(obj.id)
+                if TasafPaymentConfig.charges_require_approval:
+                    result = service.create_update_task(data)
+                else:
+                    result = service.update(data)
+            else:
+                result = service.create(data)
+            return result if not result.get('success') else None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class DeleteWithdrawalChargeInputType(OpenIMISMutation.Input):
+    uuids = graphene.List(graphene.UUID, required=True)
+
+
+class DeleteWithdrawalChargeMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "DeleteWithdrawalChargeMutation"
+
+    class Input(DeleteWithdrawalChargeInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
+            from tasaf_payment.services import WithdrawalChargeService
+            service = WithdrawalChargeService(user)
+            for obj in WithdrawalCharge.objects.filter(uuid__in=data.get('uuids', []),
+                                                       is_deleted=False):
+                service.delete({'id': str(obj.id)})
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class ImportWithdrawalChargesInputType(OpenIMISMutation.Input):
+    # Raw CSV text: EPAYMENT_CODE, LOWER_AMOUNT, UPPER_AMOUNT, WITHDRAWAL
+    csv_content = graphene.String(required=True)
+    effective_from = graphene.Date(required=False)
+    replace = graphene.Boolean(required=False)
+
+
+class ImportWithdrawalChargesMutation(OpenIMISMutation):
+    """Load a tariff CSV. Malformed rows are skipped and reported rather than aborting the
+    import; gaps are reported for configuration but are not errors."""
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "ImportWithdrawalChargesMutation"
+
+    class Input(ImportWithdrawalChargesInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
+            from tasaf_payment.charges import import_csv
+            result = import_csv(data['csv_content'], user,
+                                effective_from=data.get('effective_from'),
+                                replace=bool(data.get('replace')))
+            if result['skipped']:
+                first = result['errors'][0]
+                return [{'message': _("Imported %d row(s), skipped %d. First problem: line %s, %s")
+                         % (result['imported'], result['skipped'],
+                            first['line'], first['error'])}]
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class SaveFspMappingInputType(OpenIMISMutation.Input):
+    uuid = graphene.UUID(required=False)
+    fsp_name = graphene.String(required=True)
+    fsp_code = graphene.String(required=True)
+
+
+class SaveFspMappingMutation(OpenIMISMutation):
+    """Add or edit an FSP display-name -> tariff-code mapping, so onboarding a new FSP is a
+    UI action rather than a configuration change."""
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SaveFspMappingMutation"
+
+    class Input(SaveFspMappingInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
+            data.pop('client_mutation_id', None)
+            data.pop('client_mutation_label', None)
+            uuid_ = data.pop('uuid', None)
+            if uuid_:
+                obj = FspMapping.objects.filter(uuid=uuid_, is_deleted=False).first()
+                if not obj:
+                    return [{'message': _("FSP mapping not found")}]
+                obj.fsp_name = data['fsp_name']
+                obj.fsp_code = data['fsp_code']
+                obj.save(username=user.username)
+            else:
+                FspMapping(**data).save(username=user.username)
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class DeleteFspMappingInputType(OpenIMISMutation.Input):
+    uuids = graphene.List(graphene.UUID, required=True)
+
+
+class DeleteFspMappingMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "DeleteFspMappingMutation"
+
+    class Input(DeleteFspMappingInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
+            for obj in FspMapping.objects.filter(uuid__in=data.get('uuids', []), is_deleted=False):
+                obj.delete(username=user.username)
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class SeedFspMappingsMutation(OpenIMISMutation):
+    """Materialise the shipped alias defaults as editable rows, once."""
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SeedFspMappingsMutation"
+
+    class Input(OpenIMISMutation.Input):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
+            from tasaf_payment.charges import seed_fsp_mappings
+            seed_fsp_mappings(user)
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class ChargeBandInputType(graphene.InputObjectType):
+    lower_amount = graphene.Decimal(required=True)
+    upper_amount = graphene.Decimal(required=True)
+    withdrawal = graphene.Decimal(required=True)
+
+
+class SaveFspChargesInputType(OpenIMISMutation.Input):
+    fsp_code = graphene.String(required=True)
+    bands = graphene.List(ChargeBandInputType, required=True)
+    effective_from = graphene.Date(required=False)
+
+
+class SaveFspChargesMutation(OpenIMISMutation):
+    """Apply a whole FSP tariff in one action, like the PMT formula: the config editor sends
+    every band for one FSP and this replaces the set atomically. A partially applied tariff
+    would misprice payments, so it is all-or-nothing.
+
+    With charges_require_approval on, the set is parked as a tasks_management Task and nothing
+    changes until a second user approves.
+    """
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SaveFspChargesMutation"
+
+    class Input(SaveFspChargesInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
+            data.pop('client_mutation_id', None)
+            data.pop('client_mutation_label', None)
+            from tasaf_payment.charges import (
+                FSP_CHARGES_EVENT, apply_band_set, normalise_fsp, validate_band_set,
+            )
+            fsp_code = normalise_fsp(data['fsp_code'])
+            bands = [dict(b) for b in (data.get('bands') or [])]
+            errors = validate_band_set(bands)
+            if errors:
+                return [{'message': '; '.join(errors)}]
+
+            effective_from = data.get('effective_from')
+            if not TasafPaymentConfig.charges_require_approval:
+                apply_band_set(fsp_code, bands, user, effective_from)
+                return None
+
+            from tasks_management.services import TaskService
+            payload = {
+                'fsp_code': fsp_code,
+                'effective_from': str(effective_from) if effective_from else None,
+                'bands': [{k: str(v) for k, v in b.items()} for b in bands],
+            }
+            result = TaskService(user).create({
+                'source': 'tasaf_payment',
+                'entity_id': None,
+                'entity_type': None,
+                'business_event': FSP_CHARGES_EVENT,
+                'business_status': {},
+                'data': payload,
+            })
+            if not result.get('success'):
+                return [{'message': result.get('detail') or _("Could not queue the change")}]
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]

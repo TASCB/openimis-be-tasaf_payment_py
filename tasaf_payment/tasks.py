@@ -20,7 +20,7 @@ MuseVerificationInboundService.handle_result().
 
 Pre-audit batch:
 
-    run_batch_pre_audit_task(account_ids)
+    run_batch_pre_audit_task(filters)
         │
         └── pre_audit_chunk(chunk)  ← worker
 
@@ -60,6 +60,7 @@ def _build_account_queryset(filters: dict):
         benefit_plan_id:     int        — all accounts in this benefit plan
         verification_status: int        — filter by status (default: PENDING)
         fsp_type:            str        — 'BANK' or 'MOBILE'
+        location_id:         int        — households in this PAA (or below it)
         rerun:               bool       — if True, also include FAILED accounts
     """
     from tasaf_payment.models import PaymentAccount, VerificationStatus
@@ -86,6 +87,58 @@ def _build_account_queryset(filters: dict):
 
     if filters.get('fsp_type'):
         qs = qs.filter(fsp_type=filters['fsp_type'])
+
+    if filters.get('location_id'):
+        from tasaf_payment.services import location_descendants_q
+        qs = qs.filter(location_descendants_q(filters['location_id']))
+
+    return qs
+
+
+def _build_pre_audit_queryset(filters: dict):
+    """
+    Build a PaymentAccount queryset of pre-audit candidates.
+
+    Supported filters:
+        account_ids:     list[int]  — explicit IDs (from UI selection)
+        account_uuids:   list[str]  — explicit UUIDs
+        benefit_plan_id: str        — all accounts in this benefit plan
+        fsp_type:        str        — 'BANK' or 'MOBILE'
+        location_id:     int        — households in this PAA (or below it)
+        rerun:           bool       — if True, also re-check accounts already FAILED
+
+    Only VERIFIED accounts are candidates. Pre-auditing an unverified account would just
+    stamp it FAILED with "Account is not VERIFIED" — noise that buries the accounts a
+    person actually has to act on.
+    """
+    from tasaf_payment.models import PaymentAccount, PreAuditStatus, VerificationStatus
+    from tasaf_payment.services import location_descendants_q
+
+    qs = PaymentAccount.objects.filter(is_deleted=False)
+
+    if filters.get('account_ids'):
+        return qs.filter(id__in=filters['account_ids'])
+
+    if filters.get('account_uuids'):
+        return qs.filter(uuid__in=filters['account_uuids'])
+
+    statuses = [PreAuditStatus.PENDING]
+    if filters.get('rerun'):
+        statuses.append(PreAuditStatus.FAILED)
+
+    qs = qs.filter(
+        verification_status=VerificationStatus.VERIFIED,
+        pre_audit_status__in=statuses,
+    )
+
+    if filters.get('benefit_plan_id'):
+        qs = qs.filter(group_beneficiary__benefit_plan_id=filters['benefit_plan_id'])
+
+    if filters.get('fsp_type'):
+        qs = qs.filter(fsp_type=filters['fsp_type'])
+
+    if filters.get('location_id'):
+        qs = qs.filter(location_descendants_q(filters['location_id']))
 
     return qs
 
@@ -162,50 +215,6 @@ def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_ind
         raise self.retry(exc=exc)
 
 
-@shared_task(
-    bind=True,
-    max_retries=2,
-    default_retry_delay=300,
-    name='tasaf_payment.resubmit_failed_accounts_task',
-)
-def resubmit_failed_accounts_task(self, account_ids: list, user_id: int):
-    """
-    Resubmit FAILED accounts to MUSE after account data has been corrected.
-
-    Resets status to PENDING then fans out to dispatch_verification_chunk.
-    Only dispatches accounts that are actually in FAILED state.
-    """
-    try:
-        from tasaf_payment.models import PaymentAccount, VerificationStatus
-
-        ids_to_reset = list(
-            PaymentAccount.objects.filter(
-                id__in=account_ids,
-                verification_status=VerificationStatus.FAILED,
-                is_deleted=False,
-            ).values_list('id', flat=True)
-        )
-
-        if not ids_to_reset:
-            logger.info("resubmit_failed_accounts_task: no FAILED accounts found")
-            return {'resubmitted': 0}
-
-        PaymentAccount.objects.filter(id__in=ids_to_reset).update(
-            verification_status=VerificationStatus.PENDING,
-        )
-        logger.info(
-            "resubmit_failed_accounts_task: reset %d accounts to PENDING",
-            len(ids_to_reset),
-        )
-
-        for chunk in _chunks(ids_to_reset, _CHUNK_SIZE):
-            dispatch_verification_chunk.delay(chunk, user_id)
-
-        return {'resubmitted': len(ids_to_reset)}
-
-    except Exception as exc:
-        logger.exception("resubmit_failed_accounts_task failed")
-        raise self.retry(exc=exc)
 
 
 # ─── Paylist generation (large payrolls) ──────────────────────────────────────
@@ -217,7 +226,8 @@ def resubmit_failed_accounts_task(self, account_ids: list, user_id: int):
     name='tasaf_payment.generate_paylists_task',
 )
 def generate_paylists_task(self, user_id, payroll_id, batch_type,
-                           payment_cycle_id=None, location_id=None):
+                           payment_cycle_id=None, location_id=None,
+                           destination=None):
     """
     Build a payroll's Paylists (and bulk-create their items) off the request
     thread. Used for large payrolls (see PaylistService.generate dispatcher).
@@ -231,7 +241,7 @@ def generate_paylists_task(self, user_id, payroll_id, batch_type,
 
         user = User.objects.get(id=user_id)
         result = PaylistService(user)._generate_sync(
-            payroll_id, batch_type, payment_cycle_id, location_id,
+            payroll_id, batch_type, payment_cycle_id, location_id, destination,
         )
         logger.info(
             "generate_paylists_task: payroll=%s → %s paylist(s), %s item(s)",
@@ -252,25 +262,35 @@ def generate_paylists_task(self, user_id, payroll_id, batch_type,
     default_retry_delay=60,
     name='tasaf_payment.run_batch_pre_audit_task',
 )
-def run_batch_pre_audit_task(self, account_ids: list, user_id: int):
+def run_batch_pre_audit_task(self, filters: dict, user_id: int):
     """
-    Run pre-audit checks on a large set of accounts via Celery.
+    Entry-point for large-scale pre-audit.
 
-    Fans out to pre_audit_chunk workers.
+    Accepts *filters* (see _build_pre_audit_queryset) and fans out chunks to
+    pre_audit_chunk workers. Takes filters rather than an id list so a PAA-wide run is
+    never limited to whatever a searcher page had loaded.
     """
     try:
+        qs = _build_pre_audit_queryset(filters)
+        account_ids = list(qs.values_list('id', flat=True))
+        total = len(account_ids)
+
+        if total == 0:
+            logger.info("run_batch_pre_audit_task: no accounts match filters %s", filters)
+            return {'queued': 0}
+
         chunks = list(_chunks(account_ids, _CHUNK_SIZE))
         logger.info(
-            "run_batch_pre_audit_task: %d accounts → %d chunks (user=%s)",
-            len(account_ids), len(chunks), user_id,
+            "run_batch_pre_audit_task: %d accounts → %d chunks (user=%s, filters=%s)",
+            total, len(chunks), user_id, filters,
         )
         for i, chunk in enumerate(chunks, start=1):
             pre_audit_chunk.delay(chunk, user_id, chunk_index=i)
 
-        return {'queued': len(account_ids), 'chunks': len(chunks)}
+        return {'queued': total, 'chunks': len(chunks)}
 
     except Exception as exc:
-        logger.exception("run_batch_pre_audit_task failed")
+        logger.exception("run_batch_pre_audit_task failed: filters=%s", filters)
         raise self.retry(exc=exc)
 
 
