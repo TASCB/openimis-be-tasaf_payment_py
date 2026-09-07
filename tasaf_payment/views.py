@@ -21,7 +21,7 @@ from django.views.decorators.http import require_POST
 from django.utils.decorators import method_decorator
 from django.views import View
 
-from tasaf_payment.services import MuseVerificationInboundService, ReturnFeedbackService
+from tasaf_payment.services import PaymentSettlementService, MuseVerificationInboundService, ReturnFeedbackService
 
 logger = logging.getLogger(__name__)
 
@@ -150,3 +150,56 @@ class MuseReturnFeedbackView(View):
 
         status_code = 200 if result.get('success') else 400
         return JsonResponse(result, status=status_code)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MuseSettlementView(View):
+    """
+    POST /api/tasaf_payment/muse/settlement/
+
+    Receives **successful** payment confirmations pushed by the gateway over GovESB —
+    the counterpart to :class:`MuseReturnFeedbackView`, which only carries failures.
+    Without this endpoint nothing sets ``PaylistItem.status = PROCESSED``, so a paid
+    item is indistinguishable from one that was merely sent.
+
+    Single item::
+
+        {"paylist_item_uuid": "<uuid>", "muse_reference": "...", "settled_at": "ISO8601"}
+
+    Batch — the shape a settlement file takes::
+
+        {"items": [{"paylist_item_uuid": "...", ...}, ...]}
+
+    A batch reports partial success rather than failing wholesale: unknown or
+    already-returned items are listed in ``rejected`` and the rest still settle.
+    """
+
+    def post(self, request, *args, **kwargs):
+        payload, error = _parse_json_body(request)
+        if error:
+            return JsonResponse({'success': False, 'error': f'Invalid JSON: {error}'}, status=400)
+
+        payload, verr = _verify_inbound(payload)
+        if verr:
+            logger.warning("[GovESB] inbound settlement rejected: %s", verr)
+            return JsonResponse({'success': False, 'error': verr}, status=401)
+
+        service = PaymentSettlementService()
+
+        if isinstance(payload.get('items'), list):
+            logger.info("Inbound settlement batch: %d item(s)", len(payload['items']))
+            result = service.handle_batch_settlement(payload)
+            return JsonResponse(result, status=200 if result.get('success') else 400)
+
+        if not payload.get('paylist_item_uuid'):
+            return JsonResponse(
+                {'success': False, 'error': "paylist_item_uuid is required (or 'items' for a batch)"},
+                status=400,
+            )
+
+        logger.info(
+            "Inbound settlement: item=%s ref=%s",
+            payload.get('paylist_item_uuid'), payload.get('muse_reference'),
+        )
+        result = service.handle_settlement(payload)
+        return JsonResponse(result, status=200 if result.get('success') else 400)

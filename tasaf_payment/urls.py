@@ -1,9 +1,11 @@
 from django.urls import path
-from tasaf_payment.views import MuseVerificationResultView, MuseReturnFeedbackView
+from tasaf_payment.views import (
+    MuseVerificationResultView,
+    MuseReturnFeedbackView,
+    MuseSettlementView,
+)
 
 urlpatterns = [
-    # Stub endpoints — receive MUSE push results for dev/testing.
-    # TODO (GovESB): These will be supplemented/replaced by the GovESB consumer.
     path(
         'muse/verification_result/',
         MuseVerificationResultView.as_view(),
@@ -13,5 +15,11 @@ urlpatterns = [
         'muse/return_feedback/',
         MuseReturnFeedbackView.as_view(),
         name='muse-return-feedback',
+    ),
+    # Successful payment confirmations — the counterpart to return_feedback.
+    path(
+        'muse/settlement/',
+        MuseSettlementView.as_view(),
+        name='muse-settlement',
     ),
 ]

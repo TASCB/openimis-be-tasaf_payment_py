@@ -13,6 +13,45 @@ logger = logging.getLogger(__name__)
 def bind_service_signals():
     """Wire tasaf_payment signal handlers."""
 
+    def apply_fsp_charges_on_approval(**kwargs):
+        """Approving an FSP tariff task replaces that FSP's whole band set atomically."""
+        from tasaf_payment.charges import FSP_CHARGES_EVENT, apply_band_set
+        try:
+            task = kwargs.get('result', {}).get('data', {}).get('task')
+            if not task or task.get('business_event') != FSP_CHARGES_EVENT:
+                return
+            if (task.get('status') or '').upper() != 'COMPLETED':
+                return
+            payload = task.get('data') or {}
+            bands = payload.get('bands') or []
+            if not bands:
+                return
+            from core.models import User
+            user = User.objects.filter(id=task.get('user_updated_id')).first()
+            apply_band_set(payload['fsp_code'], bands, user, payload.get('effective_from'))
+            logger.info("tasaf_payment: applied %d band(s) for %s after approval",
+                        len(bands), payload['fsp_code'])
+        except Exception:
+            logger.error("tasaf_payment: failed to apply approved FSP charges", exc_info=True)
+
+    bind_service_signal(
+        'task_service.complete_task',
+        apply_fsp_charges_on_approval,
+        bind_type=ServiceSignalBindType.AFTER,
+    )
+
+    # Approving a tariff-change task runs the real write, mirroring PmtGlobalFormulaService.
+    try:
+        from tasks_management.services import on_task_complete_service_handler
+        from tasaf_payment.services import WithdrawalChargeService
+        bind_service_signal(
+            'task_service.complete_task',
+            on_task_complete_service_handler(WithdrawalChargeService),
+            bind_type=ServiceSignalBindType.AFTER,
+        )
+    except Exception:
+        logger.warning("tasaf_payment: charge maker-checker binding skipped", exc_info=True)
+
     def check_all_accounts_verified(**kwargs):
         """Block payroll creation when active households lack verified primary accounts."""
         data = kwargs.get('data', [[], {}])
