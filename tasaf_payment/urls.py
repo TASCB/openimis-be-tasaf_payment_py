@@ -3,6 +3,7 @@ from tasaf_payment.views import (
     MuseVerificationResultView,
     MuseReturnFeedbackView,
     MuseSettlementView,
+    MuseMessageView,
 )
 
 urlpatterns = [
@@ -21,5 +22,11 @@ urlpatterns = [
         'muse/settlement/',
         MuseSettlementView.as_view(),
         name='muse-settlement',
+    ),
+    # Every message MUSE sends: ACK / RESPONSE (batch) and PAYMENT_STATUS (per payment).
+    path(
+        'muse/message/',
+        MuseMessageView.as_view(),
+        name='muse-message',
     ),
 ]

@@ -31,6 +31,16 @@ DEFAULT_CONFIG = {
 
     "gql_withdrawal_charge_search_perms": ["270701"],
     "gql_withdrawal_charge_manage_perms": ["270702"],
+    "gql_muse_settings_search_perms": ["270901"],
+    "gql_muse_settings_propose_perms": ["270902"],
+    "gql_muse_settings_approve_perms": ["270903"],
+    "muse_change_approval_flow": "MUSE_SETTINGS_CHANGE",
+    # SEND: real GovESB send. RECORD_ONLY: demo servers without GovESB — marks SUBMITTED unsent.
+    "muse_submit_mode": "SEND",
+    "muse_send_max_attempts": 3,
+    "muse_send_backoff_seconds": 2,
+    # Also push TASAF's ACKs over GovESB (they are always returned in the HTTP response).
+    "muse_ack_push": False,
 
     "fsp_code_aliases": {
         "Vodacom M-Pesa": "MPESA",
@@ -49,6 +59,9 @@ DEFAULT_CONFIG = {
         "TPB Bank": "TPB",
     },
     "batch_inline_fallback_limit": 1000,
+    # Rows per MUSE verification message. Every message holds ONE FSP; an FSP with more
+    # accounts is split into several. Same ceiling as a paylist batch.
+    "verification_batch_max_rows": 50000,
     # Applied at paylist generation. Off by default: turning it on changes disbursed totals.
     "apply_withdrawal_charges": False,
     "charges_require_approval": True,
@@ -86,8 +99,17 @@ class TasafPaymentConfig(AppConfig):
     gql_muse_verification_search_perms = None
     gql_withdrawal_charge_search_perms = None
     gql_withdrawal_charge_manage_perms = None
+    gql_muse_settings_search_perms = None
+    gql_muse_settings_propose_perms = None
+    gql_muse_settings_approve_perms = None
+    muse_change_approval_flow = None
+    muse_submit_mode = None
+    muse_send_max_attempts = None
+    muse_send_backoff_seconds = None
+    muse_ack_push = None
     fsp_code_aliases = {}
     batch_inline_fallback_limit = 1000
+    verification_batch_max_rows = 50000
     apply_withdrawal_charges = False
     charges_require_approval = True
 

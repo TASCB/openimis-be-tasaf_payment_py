@@ -23,6 +23,7 @@ from tasaf_payment.models import (
     PaylistItemStatus,
     PaymentDestination,
     PAYLIST_ITEM_TERMINAL_STATUSES,
+    PAYLIST_IN_FLIGHT_STATUSES,
     MuseVerificationRecord,
     MuseVerificationType,
     Paylist,
@@ -219,45 +220,50 @@ class MuseVerificationDispatchService:
     def __init__(self, user):
         self.user = user
 
+    # Only these may be sent. PENDING_MUSE is already with MUSE, so a retried chunk or a second
+    # click cannot send it twice; VERIFIED and MANUAL are finished or with an officer.
+    DISPATCHABLE_STATUSES = (VerificationStatus.PENDING, VerificationStatus.FAILED)
+
     @check_authentication
     def dispatch(self, account_ids: list) -> dict:
         """
-        Mark accounts as PENDING_MUSE and publish verification request to GovESB.
+        Mark accounts as PENDING_MUSE and publish verification requests to GovESB:
+        one message per FSP, split at ``verification_batch_max_rows``.
 
-        Returns: {'success': bool, 'count': int, 'error': str|None}
+        Returns: {'success': bool, 'count': int, 'batches': int, 'skipped': int, 'error': str|None}
         """
         try:
             with transaction.atomic():
                 accounts = list(
-                    PaymentAccount.objects.filter(
+                    PaymentAccount.objects.select_for_update(of=('self',)).filter(
                         id__in=account_ids,
                         is_deleted=False,
+                        verification_status__in=self.DISPATCHABLE_STATUSES,
                     ).select_related('group_beneficiary__group')
                 )
+                skipped = len(set(account_ids)) - len(accounts)
                 if not accounts:
-                    return {'success': True, 'count': 0, 'error': None}
+                    return {'success': True, 'count': 0, 'batches': 0, 'skipped': skipped,
+                            'error': None}
 
-                ids_to_dispatch = []
                 for account in accounts:
                     account.verification_status = VerificationStatus.PENDING_MUSE
                     account.save(username=self.user.username)
-                    ids_to_dispatch.append(account.id)
 
             # Published outside the atomic block so the commit is visible to the consumer.
-            batches = self._batch_rows(accounts)
-            for batch in batches.values():
-                self._publish_batch(batch)
+            messages = 0
+            for payload in self.messages(accounts):
+                self._publish_payload(payload)
+                messages += 1
 
             logger.info(
-                "MuseVerificationDispatchService.dispatch: %d account(s) in %d FSP batch(es) "
-                "(%s) user=%s",
-                len(ids_to_dispatch), len(batches),
-                ', '.join(f"{c}:{len(b['rows'])}" for c, b in sorted(batches.items())),
-                self.user.username,
+                "MuseVerificationDispatchService.dispatch: %d account(s) in %d message(s), "
+                "%d skipped as already sent or not sendable, user=%s",
+                len(accounts), messages, skipped, self.user.username,
             )
             return {
-                'success': True, 'count': len(ids_to_dispatch),
-                'batches': len(batches), 'error': None,
+                'success': True, 'count': len(accounts),
+                'batches': messages, 'skipped': skipped, 'error': None,
             }
 
         except Exception as exc:
@@ -328,21 +334,72 @@ class MuseVerificationDispatchService:
             batch['rows'].append(row)
         return batches
 
-    def _publish_batch(self, batch) -> None:
-        """One GovESB message per FSP. Fail-soft, as elsewhere."""
+    def messages(self, accounts):
+        """The exact GovESB payloads a dispatch publishes: one FSP each, split at
+        ``verification_batch_max_rows``. ``preview`` uses this too, so what it shows is
+        what is sent."""
+        from tasaf_payment.apps import TasafPaymentConfig
+
+        size = int(TasafPaymentConfig.verification_batch_max_rows or 0) or max(len(accounts), 1)
+        for batch in self._batch_rows(accounts).values():
+            rows = batch['rows']
+            for start in range(0, len(rows), size):
+                part = rows[start:start + size]
+                yield {
+                    'fsp_code': batch['fsp_code'],
+                    'fsp_name': batch['fsp_name'],
+                    'fsp_type': batch['fsp_type'],
+                    'count': len(part),
+                    'requested_by': getattr(self.user, 'username', None),
+                    'rows': part,
+                }
+
+    def _publish_payload(self, payload) -> None:
+        """One GovESB message. Fail-soft, as elsewhere."""
         _govesb_publish(
             self.GOVESB_TOPIC_VERIFICATION_REQUEST,
-            {
-                'fsp_code': batch['fsp_code'],
-                'fsp_name': batch['fsp_name'],
-                'fsp_type': batch['fsp_type'],
-                'count': len(batch['rows']),
-                'requested_by': getattr(self.user, 'username', None),
-                'rows': batch['rows'],
-            },
+            payload,
             user_id=getattr(self.user, 'username', None),
-            context=f"verification fsp={batch['fsp_code']} rows={len(batch['rows'])}",
+            context=f"verification fsp={payload['fsp_code']} rows={payload['count']}",
         )
+
+    def preview(self, account_ids: list, sample_rows: int = 20) -> dict:
+        """What a dispatch of these accounts would publish, without publishing or changing
+        anything. Rows are trimmed to ``sample_rows`` per message for display; ``count`` keeps
+        the real number."""
+        from django.conf import settings
+        from tasaf_payment.apps import TasafPaymentConfig
+        try:
+            from coremis_app_integration.govesb import GovESBProducer, govesb_enabled
+            enabled = govesb_enabled()
+            api_code = GovESBProducer._resolve_api_code(self.GOVESB_TOPIC_VERIFICATION_REQUEST)
+        except ImportError:
+            enabled, api_code = False, None
+
+        accounts = list(PaymentAccount.objects.filter(
+            id__in=account_ids, is_deleted=False,
+            verification_status__in=self.DISPATCHABLE_STATUSES,
+        ).select_related('group_beneficiary__group'))
+        messages = []
+        for payload in self.messages(accounts):
+            shown = {**payload, 'rows': payload['rows'][:sample_rows]}
+            messages.append({
+                'fsp_code': payload['fsp_code'],
+                'count': payload['count'],
+                'rows_shown': len(shown['rows']),
+                # The ESB client wraps every payload as {"requestdata": ...} and signs it.
+                'body': {'requestdata': shown},
+            })
+        return {
+            'topic': self.GOVESB_TOPIC_VERIFICATION_REQUEST,
+            'api_code': api_code,
+            'govesb_enabled': enabled,
+            'esb_url': ((getattr(settings, 'ESB', None) or {}).get('ENGINE_URL') if enabled else None),
+            'request_type': 'PUSH',
+            'accounts': len(accounts),
+            'max_rows_per_message': int(TasafPaymentConfig.verification_batch_max_rows or 0),
+            'messages': messages,
+        }
 
 
 class MuseVerificationInboundService:
@@ -568,6 +625,10 @@ class PreAuditService:
             reasons.append('NO_BENEFICIARY')
         elif account.group_beneficiary.status != 'ACTIVE':
             reasons.append('BENEFICIARY_INACTIVE')
+        if account.fsp_type == 'MOBILE':
+            from tasaf_payment.msisdn import is_valid
+            if not is_valid(account.account_number):
+                reasons.append('INVALID_MOBILE_NUMBER')
         return reasons
 
 
@@ -631,7 +692,6 @@ class PaylistService:
         payroll_id,            # UUID — Payroll PK
         batch_type: str,
         payment_cycle_id=None,  # UUID — PaymentCycle PK
-        location_id: int = None,
         destination: str = None,  # MUSE / GEPG — defaults to MUSE
     ) -> dict:
         """
@@ -660,15 +720,18 @@ class PaylistService:
             if destination is None:
                 return {'success': False, 'error': _("tasaf_payment.error.unknown_destination")}
 
-            benefit_count = BenefitConsumption.objects.filter(
+            accepted = BenefitConsumption.objects.filter(
                 id__in=PayrollBenefitConsumption.objects.filter(
                     payroll_id=payroll_id, is_deleted=False,
                 ).values_list('benefit_id', flat=True),
                 status=BenefitConsumptionStatus.ACCEPTED,
                 is_deleted=False,
-            ).count()
-            if benefit_count == 0:
+            )
+            if not accepted.exists():
                 return {'success': False, 'error': _("tasaf_payment.error.no_accepted_benefits")}
+            benefit_count = accepted.exclude(id__in=benefits_on_a_paylist()).count()
+            if benefit_count == 0:
+                return {'success': False, 'error': _("tasaf_payment.error.benefits_already_on_paylists")}
 
             try:
                 threshold = int(TasafPaymentConfig.paylist_async_threshold or 0)
@@ -683,7 +746,6 @@ class PaylistService:
                         str(payroll_id),
                         batch_type,
                         str(payment_cycle_id) if payment_cycle_id else None,
-                        location_id,
                         destination,
                     )
                     logger.info(
@@ -701,8 +763,7 @@ class PaylistService:
                         exc_info=True,
                     )
 
-            return self._generate_sync(payroll_id, batch_type, payment_cycle_id, location_id,
-                                       destination)
+            return self._generate_sync(payroll_id, batch_type, payment_cycle_id, destination)
 
         except Exception as exc:
             logger.exception("PaylistService.generate failed")
@@ -713,7 +774,6 @@ class PaylistService:
         payroll_id,
         batch_type: str,
         payment_cycle_id=None,
-        location_id: int = None,
         destination: str = None,
     ) -> dict:
         """
@@ -722,12 +782,10 @@ class PaylistService:
         Only accounts with verification_status=VERIFIED, pre_audit_status=PASSED,
         is_primary=True, is_deleted=False are included.
 
-        Batching rule (MUSE): BANK and MNO are NEVER mixed in one batch, and each
-        FSP's eligible accounts are split into Paylists of at most
-        ``TasafPaymentConfig.paylist_max_batch_size`` transactions (default 50000;
-        0/None = no cap). ``batch_type``: BANK → BANK batches; MNO → MNO batches;
-        MIXED → both, each as its own single-FSP batches (never a mixed batch).
-        Sibling batches from one FSP run share a ``batch_group`` UUID and carry
+        Batching rule (MUSE): a paylist is BANK or MNO, never both, and the eligible accounts
+        are split into Paylists of at most ``TasafPaymentConfig.paylist_max_batch_size``
+        transactions (default 50000; 0/None = no cap).
+        Sibling batches from one run share a ``batch_group`` UUID and carry
         ``batch_sequence`` (1..N) / ``batch_total`` (N).
 
         Line items are written with ``bulk_create`` (audit columns set explicitly)
@@ -743,6 +801,7 @@ class PaylistService:
             from payroll.models import (
                 BenefitConsumption,
                 BenefitConsumptionStatus,
+                Payroll,
                 PayrollBenefitConsumption,
             )
             from tasaf_payment.apps import TasafPaymentConfig
@@ -764,52 +823,34 @@ class PaylistService:
 
             user_pk = getattr(self.user, 'id', None)
 
-            if batch_type == 'BANK':
-                fsp_targets = [('BANK', 'BANK')]
-            elif batch_type == 'MNO':
-                fsp_targets = [('MOBILE', 'MNO')]
-            else:  # MIXED → both FSPs, each in its own single-FSP batches
-                fsp_targets = [('BANK', 'BANK'), ('MOBILE', 'MNO')]
+            fsp_targets = {'BANK': [('BANK', 'BANK')], 'MNO': [('MOBILE', 'MNO')]}.get(batch_type)
+            if not fsp_targets:
+                return {'success': False, 'error': _("tasaf_payment.validation.invalid_batch_type")}
 
             benefit_ids = PayrollBenefitConsumption.objects.filter(
                 payroll_id=payroll_id,
                 is_deleted=False,
             ).values_list('benefit_id', flat=True)
 
-            benefits = list(BenefitConsumption.objects.filter(
-                id__in=benefit_ids,
-                status=BenefitConsumptionStatus.ACCEPTED,
-                is_deleted=False,
-            ).select_related('individual'))
-
-            if not benefits:
-                return {'success': False, 'error': _("tasaf_payment.error.no_accepted_benefits")}
-
-            individual_ids = [b.individual_id for b in benefits]
             created = []
 
             with transaction.atomic():
+                # One generation per payroll at a time, so two runs cannot both pass the check below.
+                Payroll.objects.select_for_update().filter(id=payroll_id).first()
+                accepted = BenefitConsumption.objects.filter(
+                    id__in=benefit_ids,
+                    status=BenefitConsumptionStatus.ACCEPTED,
+                    is_deleted=False,
+                )
+                if not accepted.exists():
+                    return {'success': False, 'error': _("tasaf_payment.error.no_accepted_benefits")}
+                benefits = list(accepted.exclude(id__in=benefits_on_a_paylist()).select_related('individual'))
+                skipped_on_paylist = accepted.count() - len(benefits)
+                if not benefits:
+                    return {'success': False, 'error': _("tasaf_payment.error.benefits_already_on_paylists")}
+
                 for fsp_type, stored_type in fsp_targets:
-                    account_qs = PaymentAccount.objects.filter(
-                        group_beneficiary__group__groupindividuals__individual_id__in=individual_ids,
-                        group_beneficiary__group__groupindividuals__is_deleted=False,
-                        verification_status=VerificationStatus.VERIFIED,
-                        pre_audit_status=PreAuditStatus.PASSED,
-                        is_primary=True,
-                        is_deleted=False,
-                        fsp_type=fsp_type,
-                    ).select_related('group_beneficiary__group').distinct()
-
-                    account_map = {}
-                    for acc in account_qs:
-                        for gi in acc.group_beneficiary.group.groupindividuals.filter(is_deleted=False):
-                            account_map[gi.individual_id] = acc
-
-                    pairs = [
-                        (b, account_map[b.individual_id])
-                        for b in benefits if b.individual_id in account_map
-                    ]
-                    pairs.sort(key=lambda p: ((p[1].account_number or ''), str(p[0].id)))
+                    pairs = payable_pairs(benefits, fsp_type)
                     if not pairs:
                         continue
 
@@ -828,7 +869,6 @@ class PaylistService:
                             batch_type=stored_type,
                             destination=destination,
                             status=PaylistStatus.PENDING_APPROVAL,
-                            location_id=location_id,
                             generated_at=now,
                             batch_group=group_id,
                             batch_sequence=seq,
@@ -850,9 +890,12 @@ class PaylistService:
                         })
 
                 if not created:
-                    raise ValueError('No eligible accounts found for paylist generation')
+                    return {'success': False, 'error': _("tasaf_payment.error.no_eligible_accounts")}
 
             total_items = sum(c['item_count'] for c in created)
+            if skipped_on_paylist:
+                logger.info("PaylistService.generate: payroll=%s skipped %d benefit(s) already on a paylist",
+                            payroll_id, skipped_on_paylist)
             logger.info(
                 "PaylistService.generate: payroll=%s batch_type=%s → %d paylist(s), %d item(s) (max_size=%s, user=%s)",
                 payroll_id, batch_type, len(created), total_items, max_size or 'unlimited', self.user.username,
@@ -865,6 +908,7 @@ class PaylistService:
                 'total_items': total_items,
                 'paylist_uuid': created[0]['paylist_uuid'],
                 'item_count': total_items,
+                'skipped_on_paylist': skipped_on_paylist,
             }
 
         except Exception as exc:
@@ -876,6 +920,86 @@ class PaylistService:
             )
 
     @check_authentication
+
+    def preview_generation(self, payroll_id, batch_type, destination=None):
+        """What generating this batch would do, without writing anything: who is included (count,
+        amounts, per FSP), who is left out and why, and what will cause trouble later."""
+        from payroll.models import BenefitConsumption, BenefitConsumptionStatus, PayrollBenefitConsumption
+        from tasaf_payment.apps import TasafPaymentConfig
+        from tasaf_payment.charges import ChargeError, gross_up, resolve_fsp_code
+        from tasaf_payment.models import FspProfile
+
+        error = self._payroll_status_error(payroll_id)
+        if error:
+            return {'success': False, 'error': error}
+        destination = self._resolve_destination(destination)
+        fsp_type = GENERATION_FSP_TYPES.get(batch_type)
+        if destination is None or fsp_type is None:
+            return {'success': False, 'error': _("tasaf_payment.validation.invalid_batch_type")}
+
+        accepted = BenefitConsumption.objects.filter(
+            id__in=PayrollBenefitConsumption.objects.filter(payroll_id=payroll_id, is_deleted=False)
+            .values('benefit_id'),
+            status=BenefitConsumptionStatus.ACCEPTED, is_deleted=False,
+        )
+        accepted_count = accepted.count()
+        benefits = list(accepted.exclude(id__in=benefits_on_a_paylist()))
+        pairs = payable_pairs(benefits, fsp_type)
+        paired = {b.id for b, _ in pairs}
+        missing = [b for b in benefits if b.id not in paired]
+        reasons = exclusion_reasons([b.individual_id for b in missing], fsp_type)
+
+        excluded = {'ALREADY_ON_PAYLIST': accepted_count - len(benefits)}
+        for b in missing:
+            reason = reasons.get(b.individual_id, 'NO_ACCOUNT')
+            excluded[reason] = excluded.get(reason, 0) + 1
+
+        charges_on = bool(TasafPaymentConfig.apply_withdrawal_charges)
+        profiles = {p.fsp_code: p for p in FspProfile.objects.filter(is_deleted=False)}
+        per_fsp, codes, no_band = {}, {}, {}
+        net_total = gross_total = 0
+        for benefit, account in pairs:
+            name = account.fsp_name
+            if name not in codes:
+                try:
+                    codes[name] = resolve_fsp_code(name)
+                except ChargeError:
+                    codes[name] = name or '—'
+            code = codes[name]
+            net, gross = benefit.amount or 0, benefit.amount or 0
+            if charges_on:
+                try:
+                    net, _charge, gross = gross_up(name, benefit.amount)
+                except ChargeError:
+                    no_band[code] = no_band.get(code, 0) + 1
+            row = per_fsp.setdefault(code, {'fsp_code': code, 'payments': 0, 'gross': 0})
+            row['payments'] += 1
+            row['gross'] += gross
+            net_total += net
+            gross_total += gross
+
+        warnings = []
+        if destination == PaymentDestination.MUSE:
+            for code, row in per_fsp.items():
+                p = profiles.get(code)
+                if not (p and p.bank_name and p.bic and p.fsp_type):
+                    warnings.append({'code': 'FSP_MISSING_MUSE_DETAILS', 'fsp_code': code, 'payments': row['payments'],
+                                     'awaiting_muse': fsp_type == 'MOBILE'})
+        for code, count in no_band.items():
+            warnings.append({'code': 'NO_CHARGE_BAND', 'fsp_code': code, 'payments': count})
+
+        return {
+            'success': True,
+            'accepted': accepted_count,
+            'included': len(pairs),
+            'net_total': float(net_total),
+            'gross_total': float(gross_total),
+            'charges_applied': charges_on,
+            'per_fsp': sorted(({**r, 'gross': float(r['gross'])} for r in per_fsp.values()),
+                              key=lambda r: -r['payments']),
+            'excluded': {k: v for k, v in excluded.items() if v},
+            'warnings': warnings,
+        }
 
     def _build_paylist_item(self, paylist, benefit, account, now, user_pk):
         """One line. When charges are enabled the transfer is grossed up so the beneficiary
@@ -929,7 +1053,6 @@ class PaylistService:
                 'batch_sequence': paylist.batch_sequence,
                 'batch_total': paylist.batch_total,
                 'payroll_id': str(paylist.payroll_id) if paylist.payroll_id else None,
-                'location_id': paylist.location_id,
             }
             res = ApprovalService(self.user).request_approval(paylist, 'PAYMENT_APPROVAL', summary=summary)
             if not res.get('success'):
@@ -989,21 +1112,36 @@ class PaylistService:
 
     @check_authentication
     def submit(self, paylist_uuid: str) -> dict:
-        """
-        Move paylist from APPROVED → SUBMITTED and publish to GovESB.
-
-        """
+        """APPROVED → SUBMITTED. A MUSE paylist becomes SUBMITTED only once GovESB accepts
+        its message (or in RECORD_ONLY mode); otherwise it stays APPROVED."""
         try:
             paylist = Paylist.objects.get(uuid=paylist_uuid, is_deleted=False)
-            if paylist.status != PaylistStatus.APPROVED:
+            if paylist.status not in (PaylistStatus.APPROVED, PaylistStatus.REJECTED):
                 logger.info("PaylistService.submit: paylist %s is %s", paylist_uuid, paylist.status)
                 return {'success': False, 'error': _("tasaf_payment.error.paylist_not_approved")}
+            duplicates = paid_elsewhere(paylist).count()
+            if duplicates:
+                logger.warning("PaylistService.submit: paylist %s refused, %d benefit(s) paid elsewhere",
+                               paylist_uuid, duplicates)
+                return {'success': False, 'outcome': 'REFUSED',
+                        'error': f'{duplicates} payment(s) on this paylist are already paid, or being paid, '
+                                 f'on another paylist; submitting would pay them twice'}
+            if paylist.status == PaylistStatus.REJECTED:
+                _start_new_muse_attempt(paylist, self.user)
+
+            if paylist.destination == PaymentDestination.MUSE:
+                from tasaf_payment.muse_sender import MuseSender
+                result = MuseSender(self.user).send(paylist, self.GOVESB_TOPIC_PAYMENT_SUBMIT)
+                if not result.submitted:
+                    logger.info("PaylistService.submit: paylist=%s not submitted (%s): %s",
+                                paylist_uuid, result.outcome, result.message)
+                    return {'success': False, 'error': result.message, 'outcome': result.outcome}
+            else:
+                self._publish_paylist(paylist)
 
             paylist.status = PaylistStatus.SUBMITTED
             paylist.submitted_at = datetime.now(tz=timezone.utc)
-            paylist.save()
-
-            self._publish_paylist(paylist)
+            paylist.save(user=self.user)
 
             logger.info("PaylistService.submit: paylist=%s (user=%s)", paylist_uuid, self.user.username)
             return {'success': True, 'error': None}
@@ -1015,13 +1153,8 @@ class PaylistService:
             return output_exception(model_name="Paylist", method="submit", exception=exc)
 
     def _publish_paylist(self, paylist: Paylist) -> None:
-        """
-        Publish the approved paylist to MUSE over the shared GovESB transport.
-
-        Fail-soft (see :func:`_govesb_publish`): when GovESB is unavailable or
-        disabled the paylist still moves to SUBMITTED; the batch is simply not
-        transmitted until ESB credentials are configured.
-        """
+        """GePG only: the flat payload over GovESB, fail-soft. MUSE paylists go through
+        ``muse_sender.MuseSender``."""
         items = list(paylist.items.select_related('payment_account').all())
         payload = {
             'paylist_uuid':   str(paylist.uuid),
@@ -1054,9 +1187,150 @@ class PaylistService:
         )
 
 
+GENERATION_FSP_TYPES = {'BANK': 'BANK', 'MNO': 'MOBILE'}
+
+
+def eligible_accounts(individual_ids, fsp_type):
+    """{individual_id: PaymentAccount} — the account a benefit may be paid to: the household's
+    primary account of this channel, VERIFIED, pre-audit PASSED, and for mobile a valid number.
+    The one rule, shared by generation and its preview."""
+    qs = PaymentAccount.objects.filter(
+        group_beneficiary__group__groupindividuals__individual_id__in=individual_ids,
+        group_beneficiary__group__groupindividuals__is_deleted=False,
+        verification_status=VerificationStatus.VERIFIED,
+        pre_audit_status=PreAuditStatus.PASSED,
+        is_primary=True,
+        is_deleted=False,
+        fsp_type=fsp_type,
+    )
+    if fsp_type == 'MOBILE':
+        from tasaf_payment.msisdn import MSISDN_DB_PATTERN
+        qs = qs.filter(account_number__regex=MSISDN_DB_PATTERN)
+    rows = list(qs.values_list('id', 'group_beneficiary__group__groupindividuals__individual_id'))
+    accounts = PaymentAccount.objects.select_related('group_beneficiary__group').in_bulk({a for a, _ in rows})
+    return {individual: accounts[account] for account, individual in rows}
+
+
+def payable_pairs(benefits, fsp_type):
+    """[(benefit, account)] in a stable order (account number, then benefit)."""
+    account_map = eligible_accounts([b.individual_id for b in benefits], fsp_type)
+    pairs = [(b, account_map[b.individual_id]) for b in benefits if b.individual_id in account_map]
+    pairs.sort(key=lambda p: ((p[1].account_number or ''), str(p[0].id)))
+    return pairs
+
+
+def exclusion_reasons(individual_ids, fsp_type):
+    """Why each individual has no payable account of this channel: the stage it is closest to."""
+    rows = PaymentAccount.objects.filter(
+        group_beneficiary__group__groupindividuals__individual_id__in=individual_ids,
+        group_beneficiary__group__groupindividuals__is_deleted=False,
+        is_primary=True, is_deleted=False,
+    ).values_list('group_beneficiary__group__groupindividuals__individual_id', 'fsp_type',
+                  'verification_status', 'pre_audit_status', 'account_number')
+    by_individual = {}
+    for individual, account_type, verification, pre_audit, number in rows:
+        by_individual.setdefault(individual, []).append((account_type, verification, pre_audit, number))
+    reasons = {}
+    for individual in individual_ids:
+        accounts = by_individual.get(individual, [])
+        own = [a for a in accounts if a[0] == fsp_type]
+        if not accounts:
+            reasons[individual] = 'NO_ACCOUNT'
+        elif not own:
+            reasons[individual] = 'OTHER_CHANNEL'
+        elif any(v == VerificationStatus.VERIFIED and p == PreAuditStatus.PASSED for _, v, p, _ in own):
+            reasons[individual] = 'INVALID_MOBILE_NUMBER'
+        elif any(v == VerificationStatus.VERIFIED for _, v, _, _ in own):
+            reasons[individual] = 'PRE_AUDIT_NOT_PASSED'
+        else:
+            reasons[individual] = 'NOT_VERIFIED'
+    return reasons
+
+
+def benefits_on_a_paylist():
+    """Benefit ids already on a live paylist. A benefit is paid from one paylist only; a batch
+    rejected at approval releases its benefits."""
+    return PaylistItem.objects.filter(
+        is_deleted=False, paylist__is_deleted=False, benefit_consumption__isnull=False,
+    ).exclude(paylist__status=PaylistStatus.REJECTED_AT_APPROVAL).values('benefit_consumption_id')
+
+
+def paid_elsewhere(paylist):
+    """Items of *paylist* whose benefit is already paid (PROCESSED), or being paid (on a paylist
+    still with MUSE), on another paylist. Submitting them would pay the benefit twice."""
+    others = PaylistItem.objects.filter(
+        is_deleted=False, paylist__is_deleted=False,
+        benefit_consumption_id__in=paylist.items.filter(is_deleted=False).values('benefit_consumption_id'),
+    ).exclude(paylist_id=paylist.id).filter(
+        Q(status=PaylistItemStatus.PROCESSED) | Q(paylist__status__in=PAYLIST_IN_FLIGHT_STATUSES))
+    return paylist.items.filter(is_deleted=False,
+                                benefit_consumption_id__in=others.values('benefit_consumption_id'))
+
+
+def settle_item(item, settled_at=None, reference=None):
+    """PENDING item -> PROCESSED (paid); closes the paylist once every item is terminal."""
+    with transaction.atomic():
+        item.status = PaylistItemStatus.PROCESSED
+        item.settled_at = _parse_dt(settled_at) or datetime.now(tz=timezone.utc)
+        if reference:
+            item.muse_reference = reference
+        item.save(user=_inbound_audit_user(item))
+        _close_paylist_if_complete(item.paylist)
+
+
+def unapply_item(item, reason_code=None, reason_description=None, reference=None):
+    """PENDING item -> UNAPPLIED, with the reason kept as ReturnFeedback. Terminal too."""
+    user = _inbound_audit_user(item)
+    with transaction.atomic():
+        ReturnFeedback(
+            paylist_item=item,
+            feedback_type=ReturnFeedbackType.UNAPPLIED,
+            reason_code=reason_code,
+            reason_description=reason_description,
+        ).save(user=user)
+        item.status = PaylistItemStatus.UNAPPLIED
+        item.return_reason = reason_description
+        if reference:
+            item.muse_reference = reference
+        item.save(user=user)
+        _close_paylist_if_complete(item.paylist)
+
+
+def _start_new_muse_attempt(paylist, user):
+    """A batch MUSE rejected goes back as a new message: next attempt number, new msgId and
+    timestamp. referenceNo stays — it is the same batch."""
+    ext = dict(paylist.json_ext or {})
+    ext['muse_attempt'] = int(ext.get('muse_attempt') or 1) + 1
+    ext.pop('muse_created_at', None)
+    paylist.json_ext = ext
+    paylist.muse_msg_id = None
+    paylist.save(user=user)
+
+
+MUSE_BATCH_ORDER = {s: i for i, s in enumerate(PAYLIST_IN_FLIGHT_STATUSES)}
+
+
+def apply_muse_batch_status(paylist, status, description=None, at=None, user=None) -> bool:
+    """Record a batch-level reply from MUSE (RECEIVED, ACCEPTED, SENT_TO_BANK, REJECTED).
+    Only moves forward; a repeat or an older reply is ignored. Returns True if applied."""
+    if paylist.status not in PAYLIST_IN_FLIGHT_STATUSES:
+        return False
+    if status == PaylistStatus.REJECTED:
+        if MUSE_BATCH_ORDER[paylist.status] > MUSE_BATCH_ORDER[PaylistStatus.RECEIVED]:
+            return False
+    elif status not in MUSE_BATCH_ORDER or MUSE_BATCH_ORDER[status] <= MUSE_BATCH_ORDER[paylist.status]:
+        return False
+    paylist.status = status
+    paylist.muse_status_desc = description
+    paylist.muse_status_at = at or datetime.now(tz=timezone.utc)
+    paylist.save(user=user or _inbound_audit_user(paylist))
+    logger.info("Paylist %s -> %s (%s)", paylist.uuid, status, description)
+    return True
+
+
 def _close_paylist_if_complete(paylist) -> bool:
-    """SUBMITTED -> CLOSED once every item is terminal. Idempotent."""
-    if paylist.status != PaylistStatus.SUBMITTED:
+    """In flight -> CLOSED once every item is terminal. Idempotent."""
+    if paylist.status not in PAYLIST_IN_FLIGHT_STATUSES:
         return False
     outstanding = paylist.items.filter(is_deleted=False).exclude(
         status__in=PAYLIST_ITEM_TERMINAL_STATUSES,
@@ -1072,29 +1346,16 @@ def _close_paylist_if_complete(paylist) -> bool:
 
 
 def _notify_payroll_if_all_closed(paylist) -> bool:
-    """Tell payroll the disbursement finished, once every paylist for it has closed.
-
-    Until this existed the two halves never spoke: TASAF marked items paid while
-    BenefitConsumption stayed ACCEPTED, bills stayed unreconciled and no PaymentInvoice
-    was ever written — the books never closed.
-
-    Calls payroll's own ``acknowledge_of_reponse_view``, which stores the result and
-    raises payroll's reconciliation task; completing that task fires ``reconcile_payroll``
-    on the strategy. We call payroll's public API and change nothing inside it.
-
-    Waits until nothing is still in flight -- no sibling left SUBMITTED -- so a MIXED run
-    raises one task, not one per batch. It deliberately does NOT wait for every paylist to
-    be CLOSED: a DRAFT, PENDING_APPROVAL or APPROVED batch was never dispatched, and an
-    abandoned one would otherwise block the payroll from ever reconciling.
-
-    Fail-soft: settlement must not be lost because the hand-off failed.
+    """Hand the payroll to payroll's reconciliation (``acknowledge_of_reponse_view``) once no
+    sibling paylist is still in flight, so a multi-batch run raises one task. Batches that were
+    never dispatched do not block it. Fail-soft: a failed hand-off never loses the settlement.
     """
     payroll_id = paylist.payroll_id
     if not payroll_id:
         return False
 
     siblings = Paylist.objects.filter(payroll_id=payroll_id, is_deleted=False)
-    if siblings.filter(status=PaylistStatus.SUBMITTED).exists():
+    if siblings.filter(status__in=PAYLIST_IN_FLIGHT_STATUSES).exists():
         return False
     dispatched = siblings.filter(status=PaylistStatus.CLOSED)
     if not dispatched.exists():
@@ -1121,7 +1382,7 @@ def _notify_payroll_if_all_closed(paylist) -> bool:
             'items': items.count(),
             'settled': settled.count(),
             'failed': items.filter(
-                status__in=[PaylistItemStatus.RETURNED, PaylistItemStatus.UNAPPLIED],
+                status=PaylistItemStatus.UNAPPLIED,
             ).count(),
             'settled_amount': str(
                 settled.aggregate(total=Sum('net_amount'))['total'] or 0,
@@ -1159,8 +1420,6 @@ class PaymentSettlementService:
     Batch form: ``{"items": [ {...}, {...} ]}`` — see :meth:`handle_batch_settlement`.
     """
 
-    GOVESB_TOPIC_SETTLEMENT = 'muse.payment.settlement'
-
     def handle_settlement(self, payload: dict) -> dict:
         """Mark one paylist item as successfully paid."""
         item_uuid = payload.get('paylist_item_uuid')
@@ -1170,7 +1429,7 @@ class PaymentSettlementService:
             logger.error("PaymentSettlementService: unknown paylist_item_uuid=%s", item_uuid)
             return {'success': False, 'error': f'PaylistItem {item_uuid} not found'}
 
-        if item.status in (PaylistItemStatus.RETURNED, PaylistItemStatus.UNAPPLIED):
+        if item.status == PaylistItemStatus.UNAPPLIED:
             return {
                 'success': False,
                 'error': f'Item {item_uuid} is {item.status}; settlement rejected',
@@ -1179,16 +1438,8 @@ class PaymentSettlementService:
         if item.status == PaylistItemStatus.PROCESSED:
             return {'success': True, 'error': None, 'already_settled': True}
 
-        settled_at = payload.get('settled_at')
         try:
-            with transaction.atomic():
-                item.status = PaylistItemStatus.PROCESSED
-                item.settled_at = _parse_dt(settled_at) or datetime.now(tz=timezone.utc)
-                if payload.get('muse_reference'):
-                    item.muse_reference = payload['muse_reference']
-                item.save(user=_inbound_audit_user(item))
-                _close_paylist_if_complete(item.paylist)
-
+            settle_item(item, payload.get('settled_at'), payload.get('muse_reference'))
             logger.info("PaymentSettlementService: item=%s settled", item_uuid)
             return {'success': True, 'error': None}
 
@@ -1232,7 +1483,7 @@ class PaymentSettlementService:
 
 class ReturnFeedbackService:
     """
-    Receives and stores return / unapplied feedback from MUSE via GovESB.
+    Receives and stores unapplied feedback from MUSE via GovESB (a bank return included).
 
     Called by:
     - The stub REST endpoint (POST /api/tasaf_payment/muse/return_feedback/)
@@ -1242,14 +1493,12 @@ class ReturnFeedbackService:
     Expected payload:
     {
         "paylist_item_uuid": "...",
-        "feedback_type":     "UNAPPLIED" | "RETURNED" | "PARTIAL",
+        "feedback_type":     "UNAPPLIED",
         "reason_code":       "...",
         "reason_description": "...",
         "muse_reference":    "..."
     }
     """
-
-    GOVESB_TOPIC_RETURN_FEEDBACK = 'muse.payment.feedback'
 
     def handle_feedback(self, payload: dict) -> dict:
         item_uuid = payload.get('paylist_item_uuid')
@@ -1264,24 +1513,8 @@ class ReturnFeedbackService:
             return {'success': False, 'error': f'Unknown feedback_type: {feedback_type}'}
 
         try:
-            with transaction.atomic():
-                ReturnFeedback.objects.create(
-                    paylist_item=item,
-                    feedback_type=feedback_type,
-                    reason_code=payload.get('reason_code'),
-                    reason_description=payload.get('reason_description'),
-                )
-                item.status = (
-                    PaylistItemStatus.UNAPPLIED
-                    if feedback_type == 'UNAPPLIED'
-                    else PaylistItemStatus.RETURNED
-                )
-                item.return_reason = payload.get('reason_description')
-                if payload.get('muse_reference'):
-                    item.muse_reference = payload['muse_reference']
-                item.save(user=_inbound_audit_user(item))
-                # A failure is terminal too.
-                _close_paylist_if_complete(item.paylist)
+            unapply_item(item, payload.get('reason_code'), payload.get('reason_description'),
+                         payload.get('muse_reference'))
 
             logger.info(
                 "ReturnFeedbackService.handle_feedback: item=%s type=%s",

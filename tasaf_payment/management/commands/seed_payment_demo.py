@@ -51,7 +51,7 @@ FSPS = [
 # Present in the report spreadsheet but absent from tasaf_FspMapping.
 MISSING_MAPPINGS = [('IDB Bank', 'IDB'), ('PBZ Bank', 'PBZ'), ('TTCL Pesa', 'TTCL')]
 
-STATUS_WEIGHTS = [('PROCESSED', 85), ('RETURNED', 7), ('UNAPPLIED', 5), ('PENDING', 3)]
+STATUS_WEIGHTS = [('PROCESSED', 85), ('UNAPPLIED', 12), ('PENDING', 3)]
 
 VERIFICATION_WEIGHTS = [(1, 78), (2, 14), (0, 8)]   # VERIFIED / FAILED / PENDING
 
@@ -137,7 +137,7 @@ class Command(BaseCommand):
         from core.models import User
         from tasaf_payment.models import (
             FspMapping, Paylist, PaylistItem, PaylistItemStatus, PaylistStatus,
-            PaymentAccount, PaymentDestination, ReturnFeedback, VerificationStatus,
+            PaymentAccount, PaymentDestination, ReturnFeedback,
         )
 
         user = User.objects.first()
@@ -171,19 +171,22 @@ class Command(BaseCommand):
                 return
 
             now = timezone.now()
-            paylist = _create(
-                Paylist, user,
-                batch_type='MIXED',
-                destination=PaymentDestination.MUSE,
-                status=PaylistStatus.SUBMITTED,
-                generated_at=now - timedelta(days=21),
-                approved_at=now - timedelta(days=20),
-                submitted_at=now - timedelta(days=19),
-                batch_group=uuid.uuid4(),
-                batch_sequence=1,
-                batch_total=1,
-                json_ext={'_seed': SEED_TAG},
-            )
+            paylists = {
+                batch_type: _create(
+                    Paylist, user,
+                    batch_type=batch_type,
+                    destination=PaymentDestination.MUSE,
+                    status=PaylistStatus.SUBMITTED,
+                    generated_at=now - timedelta(days=21),
+                    approved_at=now - timedelta(days=20),
+                    submitted_at=now - timedelta(days=19),
+                    batch_group=uuid.uuid4(),
+                    batch_sequence=1,
+                    batch_total=1,
+                    json_ext={'_seed': SEED_TAG},
+                )
+                for batch_type in ('BANK', 'MNO')
+            }
 
             created_accounts = created_items = 0
             status_tally = {}
@@ -232,7 +235,7 @@ class Command(BaseCommand):
 
                 item = _create(
                     PaylistItem, user,
-                    paylist=paylist,
+                    paylist=paylists['MNO' if fsp_type == 'MOBILE' else 'BANK'],
                     payment_account=account,
                     benefit_consumption=benefit,
                     net_amount=net,
@@ -247,7 +250,7 @@ class Command(BaseCommand):
                 )
                 created_items += 1
 
-                if status in ('RETURNED', 'UNAPPLIED'):
+                if status == 'UNAPPLIED':
                     code, description = rng.choice(RETURN_REASONS)
                     _create(
                         ReturnFeedback, user,
@@ -261,7 +264,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(
             f"Seeded {created_accounts} account(s), {created_items} paylist item(s) "
-            f"in paylist {paylist.uuid}."
+            f"in paylists {', '.join(str(p.uuid) for p in paylists.values())}."
         ))
         for status, count in sorted(status_tally.items()):
             self.stdout.write(f"  {status:10s} {count}")

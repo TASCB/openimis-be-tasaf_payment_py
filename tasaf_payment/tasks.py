@@ -60,6 +60,8 @@ def _build_account_queryset(filters: dict):
         benefit_plan_id:     int        — all accounts in this benefit plan
         verification_status: int        — filter by status (default: PENDING)
         fsp_type:            str        — 'BANK' or 'MOBILE'
+        fsp_name_icontains:  str        — FSP name contains (the list's FSP filter)
+        account_number_icontains: str   — account number contains (the list's filter)
         location_id:         int        — households in this PAA (or below it)
         rerun:               bool       — if True, also include FAILED accounts
     """
@@ -88,11 +90,31 @@ def _build_account_queryset(filters: dict):
     if filters.get('fsp_type'):
         qs = qs.filter(fsp_type=filters['fsp_type'])
 
+    if filters.get('fsp_name_icontains'):
+        qs = qs.filter(fsp_name__icontains=filters['fsp_name_icontains'])
+
+    if filters.get('account_number_icontains'):
+        qs = qs.filter(account_number__icontains=filters['account_number_icontains'])
+
     if filters.get('location_id'):
         from tasaf_payment.services import location_descendants_q
         qs = qs.filter(location_descendants_q(filters['location_id']))
 
     return qs
+
+
+def verification_batches(accounts):
+    """Split (id, fsp_name) pairs into single-FSP groups of at most
+    ``verification_batch_max_rows``: one chunk, one MUSE message.
+    """
+    from tasaf_payment.apps import TasafPaymentConfig
+    from tasaf_payment.charges import resolve_fsp_code
+
+    size = int(TasafPaymentConfig.verification_batch_max_rows or 0) or _CHUNK_SIZE
+    by_fsp = {}
+    for account_id, fsp_name in accounts:
+        by_fsp.setdefault(resolve_fsp_code(fsp_name) or 'UNMAPPED', []).append(account_id)
+    return [(code, chunk) for code, ids in sorted(by_fsp.items()) for chunk in _chunks(ids, size)]
 
 
 def _build_pre_audit_queryset(filters: dict):
@@ -161,20 +183,20 @@ def run_batch_verification_task(self, filters: dict, user_id: int):
     """
     try:
         qs = _build_account_queryset(filters)
-        account_ids = list(qs.values_list('id', flat=True))
-        total = len(account_ids)
+        accounts = list(qs.values_list('id', 'fsp_name'))
+        total = len(accounts)
 
         if total == 0:
             logger.info("run_batch_verification_task: no accounts match filters %s", filters)
             return {'queued': 0}
 
-        chunks = list(_chunks(account_ids, _CHUNK_SIZE))
+        chunks = verification_batches(accounts)
         logger.info(
-            "run_batch_verification_task: %d accounts → %d chunks (user=%s, filters=%s)",
-            total, len(chunks), user_id, filters,
+            "run_batch_verification_task: %d accounts → %d single-FSP chunks (%s) user=%s filters=%s",
+            total, len(chunks), ', '.join(f"{c}:{len(ids)}" for c, ids in chunks), user_id, filters,
         )
 
-        for i, chunk in enumerate(chunks, start=1):
+        for i, (_code, chunk) in enumerate(chunks, start=1):
             dispatch_verification_chunk.delay(chunk, user_id, chunk_index=i)
 
         return {'queued': total, 'chunks': len(chunks)}
@@ -226,8 +248,7 @@ def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_ind
     name='tasaf_payment.generate_paylists_task',
 )
 def generate_paylists_task(self, user_id, payroll_id, batch_type,
-                           payment_cycle_id=None, location_id=None,
-                           destination=None):
+                           payment_cycle_id=None, destination=None):
     """
     Build a payroll's Paylists (and bulk-create their items) off the request
     thread. Used for large payrolls (see PaylistService.generate dispatcher).
@@ -241,7 +262,7 @@ def generate_paylists_task(self, user_id, payroll_id, batch_type,
 
         user = User.objects.get(id=user_id)
         result = PaylistService(user)._generate_sync(
-            payroll_id, batch_type, payment_cycle_id, location_id, destination,
+            payroll_id, batch_type, payment_cycle_id, destination,
         )
         logger.info(
             "generate_paylists_task: payroll=%s → %s paylist(s), %s item(s)",

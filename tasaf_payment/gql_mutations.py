@@ -12,7 +12,7 @@ from core.gql.gql_mutations.base_mutation import (
 from core.schema import OpenIMISMutation
 from tasaf_payment.apps import TasafPaymentConfig
 from tasaf_payment.models import (
-    PaymentAccount, VerificationStatus, WithdrawalCharge, FspMapping, PaymentDestination,
+    PaymentAccount, WithdrawalCharge, FspMapping, PaymentDestination, BatchType,
 )
 
 
@@ -64,6 +64,9 @@ class ApprovePaymentAccountsInputType(OpenIMISMutation.Input):
 class RunBatchVerificationInputType(OpenIMISMutation.Input):
     benefit_plan_id = graphene.UUID(required=False)
     fsp_type        = graphene.String(required=False)
+    # The Verification list's own filters, so "Verify all matching" sends exactly that list.
+    fsp_name_icontains = graphene.String(required=False)
+    account_number_icontains = graphene.String(required=False)
     location_id     = graphene.Int(required=False)
     rerun           = graphene.Boolean(required=False)
     account_uuids   = graphene.List(graphene.UUID, required=False)
@@ -84,9 +87,8 @@ class RunBatchPreAuditInputType(OpenIMISMutation.Input):
 class GeneratePaylistInputType(OpenIMISMutation.Input):
     # Payroll / PaymentCycle are HistoryModels with UUID primary keys.
     payroll_id       = graphene.UUID(required=True)
-    batch_type       = graphene.String(required=True)   # BANK / MNO / MIXED
+    batch_type       = graphene.String(required=True)   # BANK / MNO
     payment_cycle_id = graphene.UUID(required=False)
-    location_id      = graphene.Int(required=False)      # Location uses a legacy integer PK
     destination      = graphene.String(required=False)   # MUSE / GEPG — defaults to MUSE
 
 
@@ -229,6 +231,8 @@ class RunBatchVerificationMutation(BaseMutation):
         has_filter = any([
             data.get('benefit_plan_id'),
             data.get('fsp_type'),
+            (data.get('fsp_name_icontains') or '').strip(),
+            (data.get('account_number_icontains') or '').strip(),
             data.get('location_id'),
             data.get('account_uuids'),
         ])
@@ -247,6 +251,9 @@ class RunBatchVerificationMutation(BaseMutation):
             filters['benefit_plan_id'] = str(data['benefit_plan_id'])
         if data.get('fsp_type'):
             filters['fsp_type'] = data['fsp_type']
+        for key in ('fsp_name_icontains', 'account_number_icontains'):
+            if (data.get(key) or '').strip():
+                filters[key] = data[key].strip()
         if data.get('location_id'):
             filters['location_id'] = int(data['location_id'])
         if data.get('rerun'):
@@ -347,7 +354,7 @@ class GeneratePaylistMutation(BaseMutation):
         _require_perms(user, TasafPaymentConfig.gql_generate_paylist_perms)
         if not data.get('payroll_id'):
             raise ValidationError(_("tasaf_payment.validation.payroll_id_required"))
-        if data.get('batch_type') not in ('BANK', 'MNO', 'MIXED'):
+        if data.get('batch_type') not in BatchType.values:
             raise ValidationError(_("tasaf_payment.validation.invalid_batch_type"))
         destination = data.get('destination')
         if destination and destination not in PaymentDestination.values:
@@ -362,7 +369,6 @@ class GeneratePaylistMutation(BaseMutation):
             payroll_id=data['payroll_id'],
             batch_type=data['batch_type'],
             payment_cycle_id=data.get('payment_cycle_id'),
-            location_id=data.get('location_id'),
             destination=data.get('destination'),
         )
         if not result.get('success'):
@@ -676,6 +682,125 @@ class SaveFspChargesMutation(OpenIMISMutation):
             })
             if not result.get('success'):
                 return [{'message': result.get('detail') or _("Could not queue the change")}]
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class SaveFspProfileInputType(OpenIMISMutation.Input):
+    fsp_code = graphene.String(required=True)
+    bank_name = graphene.String(required=True)
+    fsp_type = graphene.String(required=True)
+    bic = graphene.String(required=True)
+
+
+class SaveFspProfileMutation(OpenIMISMutation):
+    """Propose MUSE routing data (bank name, channel, BIC) for one FSP; applied on approval."""
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SaveFspProfileMutation"
+
+    class Input(SaveFspProfileInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.muse_setup import propose_profile
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
+            propose_profile(user, data['fsp_code'], data['bank_name'], data['fsp_type'], data['bic'])
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class SaveMuseSettingsInputType(OpenIMISMutation.Input):
+    institution_code = graphene.String(required=False)
+    payer_account = graphene.String(required=False)
+    sub_budget_class = graphene.Int(required=False)
+    unapplied_sub_budget_class = graphene.Int(required=False)
+    payment_desc = graphene.String(required=False)
+    is_stp = graphene.Boolean(required=False)
+    gl_accounts = graphene.JSONString(required=False)
+
+
+class SaveMuseSettingsMutation(OpenIMISMutation):
+    """Propose the accounting values MUSE supplies; applied on approval. Blank values are
+    allowed while waiting for MUSE; the readiness check reports what is still missing."""
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SaveMuseSettingsMutation"
+
+    class Input(SaveMuseSettingsInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.muse_setup import propose_settings
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
+            data.pop('client_mutation_id', None)
+            data.pop('client_mutation_label', None)
+            propose_settings(user, data)
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class MuseChangeInputType(OpenIMISMutation.Input):
+    change_id = graphene.UUID(required=True)
+    comment = graphene.String(required=False)
+
+
+class ApproveMuseChangeMutation(OpenIMISMutation):
+    """Approve a proposed MUSE settings / FSP routing change. Not by its requester."""
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "ApproveMuseChangeMutation"
+
+    class Input(MuseChangeInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.muse_setup import decide
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_muse_settings_approve_perms)
+            decide(user, data['change_id'], True, data.get('comment'))
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class RejectMuseChangeMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "RejectMuseChangeMutation"
+
+    class Input(MuseChangeInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.muse_setup import decide
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_muse_settings_approve_perms)
+            decide(user, data['change_id'], False, data.get('comment'))
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class CancelMuseChangeMutation(OpenIMISMutation):
+    """Withdraw a proposed change: its requester, or the engine's cancel right."""
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "CancelMuseChangeMutation"
+
+    class Input(MuseChangeInputType):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.muse_setup import cancel
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
+            cancel(user, data['change_id'], data.get('comment'))
             return None
         except Exception as exc:
             return [{'message': str(exc)}]

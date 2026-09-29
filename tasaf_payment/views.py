@@ -17,7 +17,6 @@ import logging
 from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
 from django.utils.decorators import method_decorator
 from django.views import View
 
@@ -116,7 +115,7 @@ class MuseReturnFeedbackView(View):
     verified business payload (``esbBody``) has the shape:
     {
         "paylist_item_uuid":  "<uuid>",
-        "feedback_type":      "UNAPPLIED" | "RETURNED" | "PARTIAL",
+        "feedback_type":      "UNAPPLIED",
         "reason_code":        "...",
         "reason_description": "...",
         "muse_reference":     "..."
@@ -203,3 +202,29 @@ class MuseSettlementView(View):
         )
         result = service.handle_settlement(payload)
         return JsonResponse(result, status=200 if result.get('success') else 400)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MuseMessageView(View):
+    """
+    POST /api/tasaf_payment/muse/message/
+
+    Any message MUSE sends, in MUSE's own format: ``{"message": {messageHeader, messageSummary |
+    messageDetails}, "digitalSignature"}`` inside the signed GovESB envelope. Answers with TASAF's
+    ACK (HTTP 200), or 400 (malformed), 404 (unknown msgId / endToEndId), 409 (conflicts).
+    """
+
+    def post(self, request, *args, **kwargs):
+        from tasaf_payment.muse_inbound import handle
+
+        payload, error = _parse_json_body(request)
+        if error:
+            return JsonResponse({'success': False, 'error': f'Invalid JSON: {error}'}, status=400)
+
+        payload, verr = _verify_inbound(payload)
+        if verr:
+            logger.warning("[GovESB] inbound MUSE message rejected: %s", verr)
+            return JsonResponse({'success': False, 'error': verr}, status=401)
+
+        status, body = handle(payload)
+        return JsonResponse(body, status=status)

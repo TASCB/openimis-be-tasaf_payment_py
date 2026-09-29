@@ -4,7 +4,7 @@ from django.db.models import Sum
 from graphene_django import DjangoObjectType
 from graphene_django.filter import TypedFilter
 
-from core import prefix_filterset, ExtendedConnection
+from core import ExtendedConnection
 from tasaf_payment.models import (
     PaylistItemStatus,
     WithdrawalCharge,
@@ -146,7 +146,7 @@ class PaylistGQLType(DjangoObjectType):
     def resolve_failed_count(root, info):
         return root.items.filter(
             is_deleted=False,
-            status__in=[PaylistItemStatus.RETURNED, PaylistItemStatus.UNAPPLIED],
+            status=PaylistItemStatus.UNAPPLIED,
         ).count()
 
     def resolve_pending_count(root, info):
@@ -172,7 +172,7 @@ class PaylistGQLType(DjangoObjectType):
         settled = sum(1 for c in counts if c == PaylistItemStatus.PROCESSED)
         failed = sum(
             1 for c in counts
-            if c in (PaylistItemStatus.RETURNED, PaylistItemStatus.UNAPPLIED)
+            if c == PaylistItemStatus.UNAPPLIED
         )
         if settled + failed < total:
             return 'PENDING'
@@ -193,7 +193,6 @@ class PaylistItemGQLType(DjangoObjectType):
             "id": ["exact"],
             "status": ["exact"],
             "muse_reference": ["exact", "icontains"],
-            "final_status": ["exact"],
             "is_deleted": ["exact"],
             "paylist__id": ["exact"],
             "payment_account__id": ["exact"],
@@ -209,7 +208,6 @@ class ReturnFeedbackGQLType(DjangoObjectType):
         interfaces = (graphene.relay.Node,)
         filter_fields = {
             "id": ["exact"],
-            "feedback_type": ["exact"],
             "reason_code": ["exact", "icontains"],
             "received_at": ["exact", "lt", "lte", "gt", "gte"],
             "is_deleted": ["exact"],
@@ -298,3 +296,38 @@ class KnownFspGQLType(graphene.ObjectType):
     fsp_name = graphene.String()
     on_accounts = graphene.Boolean()
     has_bands = graphene.Boolean()
+
+
+class FspProviderGQLType(graphene.ObjectType):
+    """One FSP on the charges page: MUSE routing data plus the names that map to it."""
+    uuid = graphene.String()
+    fsp_code = graphene.String()
+    bank_name = graphene.String()
+    fsp_type = graphene.String()
+    bic = graphene.String()
+    names = graphene.List(graphene.String)
+    has_bands = graphene.Boolean()
+    accounts = graphene.Int()
+    missing = graphene.List(graphene.String)
+    pending = graphene.Boolean()
+
+
+class MuseSettingsGQLType(graphene.ObjectType):
+    institution_code = graphene.String()
+    payer_account = graphene.String()
+    sub_budget_class = graphene.Int()
+    unapplied_sub_budget_class = graphene.Int()
+    payment_desc = graphene.String()
+    is_stp = graphene.Boolean()
+    gl_accounts = graphene.JSONString()
+    environment = graphene.String()
+    date_updated = graphene.DateTime()
+
+
+class MuseReadinessGQLType(graphene.ObjectType):
+    ready = graphene.Boolean()
+    settings_missing = graphene.List(graphene.String)
+    providers_missing = graphene.List(graphene.String)
+    server_environment = graphene.String()
+    settings_environment = graphene.String()
+    environment_mismatch = graphene.Boolean()

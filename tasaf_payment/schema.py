@@ -13,6 +13,11 @@ from tasaf_payment.gql_mutations import (
     DeleteWithdrawalChargeMutation,
     ImportWithdrawalChargesMutation,
     SaveFspMappingMutation,
+    SaveFspProfileMutation,
+    SaveMuseSettingsMutation,
+    ApproveMuseChangeMutation,
+    RejectMuseChangeMutation,
+    CancelMuseChangeMutation,
     DeleteFspMappingMutation,
     SeedFspMappingsMutation,
     SaveFspChargesMutation,
@@ -35,6 +40,9 @@ from tasaf_payment.gql_queries import (
     FspMappingGQLType,
     UnmappedFspGQLType,
     KnownFspGQLType,
+    FspProviderGQLType,
+    MuseSettingsGQLType,
+    MuseReadinessGQLType,
     PaymentAccountGQLType,
     VerificationRecordGQLType,
     MuseVerificationRecordGQLType,
@@ -54,6 +62,8 @@ from tasaf_payment.models import (
     VerificationStatus,
     PaylistStatus,
     PaylistItemStatus,
+    PaymentDestination,
+    PAYLIST_IN_FLIGHT_STATUSES,
 )
 
 
@@ -75,7 +85,7 @@ class PaymentDashboardSummaryGQLType(graphene.ObjectType):
     paylists = graphene.List(DashboardPaylistStatGQLType)
     total_accounts = graphene.Int()
     total_paylists = graphene.Int()
-    in_process_amount = graphene.Float()   # amount on SUBMITTED paylists (sent to MUSE)
+    in_process_amount = graphene.Float()   # amount on paylists still with MUSE
     paid_amount = graphene.Float()         # amount on PROCESSED items (disbursed)
 
 
@@ -104,6 +114,33 @@ class EpaymentSummaryByFspGQLType(graphene.ObjectType):
 
 
 class Query(graphene.ObjectType):
+
+    verification_batch_preview = graphene.Field(
+        graphene.JSONString,
+        fsp_type=graphene.String(),
+        fsp_name_icontains=graphene.String(),
+        account_number_icontains=graphene.String(),
+        location_id=graphene.Int(),
+        sample_rows=graphene.Int(),
+        description="The GovESB messages 'Verify all matching' would publish for these filters. "
+                    "Read-only: nothing is sent and no account changes.",
+    )
+
+    paylist_generation_preview = graphene.Field(
+        graphene.JSONString,
+        payroll_id=graphene.UUID(required=True),
+        batch_type=graphene.String(required=True),
+        destination=graphene.String(),
+        description="What generating this batch would include, leave out and warn about. Read-only.",
+    )
+
+    paylist_muse_preview = graphene.Field(
+        graphene.JSONString,
+        paylist_uuid=graphene.UUID(required=True),
+        sample_rows=graphene.Int(),
+        description="The MUSE BULK_PAYMENT message a submit of this paylist would carry, and what "
+                    "MUSE's schema would reject in it. Read-only: nothing is sent.",
+    )
 
     epayment_fsp_items = OrderedDjangoFilterConnectionField(
         PaylistItemGQLType,
@@ -179,6 +216,10 @@ class Query(graphene.ObjectType):
     unmapped_fsps = graphene.List(UnmappedFspGQLType)
     # FSP options for pickers -- avoids hand-typing a code that then fails to match.
     known_fsps = graphene.List(KnownFspGQLType)
+    fsp_providers = graphene.List(FspProviderGQLType)
+    muse_settings = graphene.Field(MuseSettingsGQLType)
+    muse_readiness = graphene.Field(MuseReadinessGQLType)
+    muse_change_requests = graphene.Field(graphene.JSONString, status=graphene.String())
     # Current bands for one FSP, for the config editor.
     fsp_band_set = graphene.List(WithdrawalChargeGQLType, fsp_code=graphene.String(required=True))
 
@@ -203,7 +244,6 @@ class Query(graphene.ObjectType):
         ReturnFeedbackGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         paylist_uuid=graphene.UUID(),
-        # feedback_type handled by filter_fields
     )
 
     # ── Legacy (read-only audit trail) ────────────────────────────────────────
@@ -292,8 +332,6 @@ class Query(graphene.ObjectType):
 
         if kwargs.get("paylist_uuid"):
             filters.append(Q(paylist_item__paylist__uuid=kwargs["paylist_uuid"]))
-        if kwargs.get("feedback_type"):
-            filters.append(Q(feedback_type=kwargs["feedback_type"]))
 
         return gql_optimizer.query(ReturnFeedback.objects.filter(*filters), info)
 
@@ -435,7 +473,7 @@ class Query(graphene.ObjectType):
         # Headline totals.
         in_process = (
             PaylistItem.objects.filter(
-                is_deleted=False, paylist__is_deleted=False, paylist__status=PaylistStatus.SUBMITTED,
+                is_deleted=False, paylist__is_deleted=False, paylist__status__in=PAYLIST_IN_FLIGHT_STATUSES,
             ).aggregate(s=Sum("amount"))["s"] or 0
         )
         paid = (
@@ -483,6 +521,40 @@ class Query(graphene.ObjectType):
         from tasaf_payment.charges import unmapped_fsp_names
         return [UnmappedFspGQLType(**row) for row in unmapped_fsp_names()]
 
+    def resolve_fsp_providers(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_withdrawal_charge_search_perms)
+        from tasaf_payment.muse_setup import provider_list
+        return [FspProviderGQLType(**row) for row in provider_list()]
+
+    def resolve_muse_settings(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        from tasaf_payment.muse_setup import SETTINGS_FIELDS, get_settings
+        s = get_settings()
+        if s is None:
+            return None
+        return MuseSettingsGQLType(date_updated=s.date_updated, environment=s.environment,
+                                   **{f: getattr(s, f) for f in SETTINGS_FIELDS})
+
+    def resolve_muse_change_requests(self, info, status=None, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        from tasaf_payment.muse_setup import change_rows
+        user = info.context.user
+        rows = change_rows(status=status)
+        me = getattr(user, 'username', None)
+        can_approve = user.has_perms(TasafPaymentConfig.gql_muse_settings_approve_perms)
+        can_propose = user.has_perms(TasafPaymentConfig.gql_muse_settings_propose_perms)
+        for r in rows:
+            mine = r['requested_by'] == me
+            pending = r['status'] == 'PENDING'
+            r['can_decide'] = pending and can_approve and not mine
+            r['can_cancel'] = pending and can_propose and mine
+        return rows
+
+    def resolve_muse_readiness(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        from tasaf_payment.muse_setup import readiness
+        return MuseReadinessGQLType(**readiness())
+
     def resolve_known_fsps(self, info, **kwargs):
         Query._check_permissions(info.context.user,
                                  TasafPaymentConfig.gql_withdrawal_charge_search_perms)
@@ -496,6 +568,35 @@ class Query(graphene.ObjectType):
         return (WithdrawalCharge.objects
                 .filter(is_deleted=False, fsp_code=normalise_fsp(fsp_code))
                 .order_by('lower_amount'))
+
+    def resolve_paylist_generation_preview(self, info, payroll_id, batch_type, destination=None, **kwargs):
+        from tasaf_payment.services import PaylistService
+
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_generate_paylist_perms)
+        return PaylistService(info.context.user).preview_generation(payroll_id, batch_type, destination)
+
+    def resolve_paylist_muse_preview(self, info, paylist_uuid, sample_rows=20, **kwargs):
+        from tasaf_payment.muse_message import preview
+
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
+        paylist = Paylist.objects.filter(id=paylist_uuid, is_deleted=False).first()
+        if paylist is None:
+            raise ValueError(_("tasaf_payment.error.paylist_not_found"))
+        if paylist.destination != PaymentDestination.MUSE:
+            raise ValueError(_("tasaf_payment.error.muse_preview_not_muse"))
+        return preview(paylist, sample_rows=max(0, min(int(sample_rows or 0), 200)))
+
+    def resolve_verification_batch_preview(self, info, sample_rows=20, **kwargs):
+        from tasaf_payment.services import MuseVerificationDispatchService
+        from tasaf_payment.tasks import _build_account_queryset
+
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_run_verification_perms)
+        filters = {k: v for k, v in kwargs.items() if v not in (None, '')}
+        if not filters:
+            raise ValueError(_("tasaf_payment.validation.batch_verification_requires_filter"))
+        ids = list(_build_account_queryset(filters).values_list('id', flat=True))
+        return MuseVerificationDispatchService(info.context.user).preview(
+            ids, sample_rows=max(0, min(int(sample_rows or 0), 200)))
 
     @staticmethod
     def _check_permissions(user, perms):
@@ -521,6 +622,11 @@ class Mutation(graphene.ObjectType):
     delete_withdrawal_charge = DeleteWithdrawalChargeMutation.Field()
     import_withdrawal_charges = ImportWithdrawalChargesMutation.Field()
     save_fsp_mapping = SaveFspMappingMutation.Field()
+    save_fsp_profile = SaveFspProfileMutation.Field()
+    save_muse_settings = SaveMuseSettingsMutation.Field()
+    approve_muse_change = ApproveMuseChangeMutation.Field()
+    reject_muse_change = RejectMuseChangeMutation.Field()
+    cancel_muse_change = CancelMuseChangeMutation.Field()
     delete_fsp_mapping = DeleteFspMappingMutation.Field()
     seed_fsp_mappings = SeedFspMappingsMutation.Field()
     save_fsp_charges = SaveFspChargesMutation.Field()

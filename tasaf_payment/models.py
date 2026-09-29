@@ -31,7 +31,6 @@ class ActiveCheckStatus(models.TextChoices):
 class BatchType(models.TextChoices):
     BANK   = 'BANK',   _("BANK")
     MNO    = 'MNO',    _("MNO")
-    MIXED  = 'MIXED',  _("MIXED")
 
 
 class PaymentDestination(models.TextChoices):
@@ -41,23 +40,35 @@ class PaymentDestination(models.TextChoices):
 
 
 class PaylistStatus(models.TextChoices):
-    DRAFT            = 'DRAFT',            _("DRAFT")
     PENDING_APPROVAL = 'PENDING_APPROVAL', _("PENDING_APPROVAL")
     APPROVED         = 'APPROVED',         _("APPROVED")
     SUBMITTED        = 'SUBMITTED',        _("SUBMITTED")
+    RECEIVED         = 'RECEIVED',         _("RECEIVED")
+    ACCEPTED         = 'ACCEPTED',         _("ACCEPTED")
+    SENT_TO_BANK     = 'SENT_TO_BANK',     _("SENT_TO_BANK")
+    REJECTED         = 'REJECTED',         _("REJECTED")
     CLOSED           = 'CLOSED',           _("CLOSED")
+    # Payment approval rejected or cancelled: final; its benefits may be generated again.
+    REJECTED_AT_APPROVAL = 'REJECTED_AT_APPROVAL', _("REJECTED_AT_APPROVAL")
+
+
+# Sent and not yet finished: MUSE may still report on these, in this order.
+PAYLIST_IN_FLIGHT_STATUSES = (
+    PaylistStatus.SUBMITTED,
+    PaylistStatus.RECEIVED,
+    PaylistStatus.ACCEPTED,
+    PaylistStatus.SENT_TO_BANK,
+)
 
 
 class PaylistItemStatus(models.TextChoices):
     PENDING    = 'PENDING',    _("PENDING")
     PROCESSED  = 'PROCESSED',  _("PROCESSED")
-    RETURNED   = 'RETURNED',   _("RETURNED")
     UNAPPLIED  = 'UNAPPLIED',  _("UNAPPLIED")
 
 
 PAYLIST_ITEM_TERMINAL_STATUSES = (
     PaylistItemStatus.PROCESSED,
-    PaylistItemStatus.RETURNED,
     PaylistItemStatus.UNAPPLIED,
 )
 
@@ -76,8 +87,6 @@ class MuseVerificationType(models.TextChoices):
 
 class ReturnFeedbackType(models.TextChoices):
     UNAPPLIED = 'UNAPPLIED', _("UNAPPLIED")
-    RETURNED  = 'RETURNED',  _("RETURNED")
-    PARTIAL   = 'PARTIAL',   _("PARTIAL")
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +152,12 @@ class PaymentAccount(HistoryBusinessModel):
                 name='tasaf_pa_guard_idx',
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.fsp_type == 'MOBILE':
+            from tasaf_payment.msisdn import normalise
+            self.account_number = normalise(self.account_number)
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.account_number} ({self.fsp_name}) [{self.get_verification_status_display()}]"
@@ -262,14 +277,7 @@ class Paylist(HistoryBusinessModel):
     status = models.CharField(
         max_length=20,
         choices=PaylistStatus.choices,
-        default=PaylistStatus.DRAFT,
-    )
-    location = models.ForeignKey(
-        'location.Location',
-        on_delete=models.DO_NOTHING,
-        null=True,
-        blank=True,
-        related_name='paylists',
+        default=PaylistStatus.PENDING_APPROVAL,
     )
     generated_at = models.DateTimeField(null=True, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)
@@ -277,6 +285,11 @@ class Paylist(HistoryBusinessModel):
     # Set when every item is terminal.
     closed_at = models.DateTimeField(null=True, blank=True)
     muse_batch_reference = models.CharField(max_length=100, null=True, blank=True)
+    # MUSE msgId, fixed at the first send so every resend carries the same id.
+    muse_msg_id = models.CharField(max_length=32, null=True, blank=True, db_index=True)
+    # MUSE's last batch-level reply (RECEIVED / ACCEPTED / SENT_TO_BANK / REJECTED).
+    muse_status_desc = models.TextField(null=True, blank=True)
+    muse_status_at = models.DateTimeField(null=True, blank=True)
     batch_group = models.UUIDField(null=True, blank=True, db_index=True)
     batch_sequence = models.IntegerField(null=True, blank=True)
     batch_total = models.IntegerField(null=True, blank=True)
@@ -331,7 +344,6 @@ class PaylistItem(HistoryModel):
     )
     muse_reference = models.CharField(max_length=100, null=True, blank=True)
     return_reason = models.TextField(null=True, blank=True)
-    final_status = models.CharField(max_length=50, null=True, blank=True)
     # Set when the gateway confirms the money landed.
     settled_at = models.DateTimeField(null=True, blank=True)
 
@@ -453,3 +465,74 @@ class FspMapping(HistoryModel):
 
     def __str__(self):
         return f"{self.fsp_name} -> {self.fsp_code}"
+
+
+class FspProfile(HistoryModel):
+    """What MUSE needs to route a payment to one FSP: the bank name it expects, the channel
+    and the BIC. One row per fsp_code; the display-name variants on accounts stay in
+    FspMapping, so the charges page shows one list with both."""
+    fsp_code = models.CharField(max_length=50, db_index=True)
+    bank_name = models.CharField(max_length=100, blank=True, default='')
+    fsp_type = models.CharField(max_length=20, blank=True, default='')
+    bic = models.CharField(max_length=11, blank=True, default='')
+
+    class Meta:
+        db_table = 'tasaf_FspProfile'
+
+    def save(self, *args, **kwargs):
+        from tasaf_payment.charges import normalise_fsp
+        self.fsp_code = normalise_fsp(self.fsp_code)
+        self.bic = (self.bic or '').strip().upper()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.fsp_code} {self.bic or '(no BIC)'}"
+
+
+class MuseSettings(HistoryModel):
+    """MUSE accounting data for the payment message. One live row; MUSE supplies the values
+    and they are entered from the MUSE tab, applied only after a second person approves."""
+    institution_code = models.CharField(max_length=50, blank=True, default='')
+    payer_account = models.CharField(max_length=50, blank=True, default='')
+    sub_budget_class = models.IntegerField(null=True, blank=True)
+    # MUSE's own unapplied example uses a different class from the original payment.
+    unapplied_sub_budget_class = models.IntegerField(null=True, blank=True)
+    payment_desc = models.CharField(max_length=255, blank=True, default='')
+    is_stp = models.BooleanField(default=False)
+    # Optional: [{"glaccount": "...", "glaccountDesc": "...", "grantName": "..."}]
+    gl_accounts = models.JSONField(default=list, blank=True)
+
+    # Server label (MUSE_ENVIRONMENT) when the values were approved; a mismatch means the row
+    # came from another server's database.
+    environment = models.CharField(max_length=20, blank=True, default='')
+
+    class Meta:
+        db_table = 'tasaf_MuseSettings'
+
+
+class MuseChangeKind(models.TextChoices):
+    SETTINGS    = 'SETTINGS',    _("SETTINGS")
+    FSP_PROFILE = 'FSP_PROFILE', _("FSP_PROFILE")
+
+
+class MuseChangeStatus(models.TextChoices):
+    PENDING   = 'PENDING',   _("PENDING")
+    APPROVED  = 'APPROVED',  _("APPROVED")
+    REJECTED  = 'REJECTED',  _("REJECTED")
+    CANCELLED = 'CANCELLED', _("CANCELLED")
+
+
+class MuseChangeRequest(HistoryModel):
+    """A proposed change to MUSE settings or to one FSP's routing data. Nothing is applied until
+    someone other than the requester approves it in the approval engine."""
+    kind = models.CharField(max_length=20, choices=MuseChangeKind.choices)
+    fsp_code = models.CharField(max_length=50, blank=True, default='')
+    proposed = models.JSONField(default=dict)
+    current = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=20, choices=MuseChangeStatus.choices,
+                              default=MuseChangeStatus.PENDING)
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'tasaf_MuseChangeRequest'
+        indexes = [models.Index(fields=['status', 'kind'], name='tasaf_musechg_status_idx')]

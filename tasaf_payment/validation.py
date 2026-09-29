@@ -1,4 +1,5 @@
 from django.utils.translation import gettext as _
+from django.core.exceptions import ValidationError
 
 from core.validation import BaseModelValidation
 from tasaf_payment.models import WithdrawalCharge, PaymentAccount
@@ -14,6 +15,7 @@ class PaymentAccountValidation(BaseModelValidation):
             *validate_required_field(data, 'fsp_type'),
             *validate_required_field(data, 'fsp_name'),
             *validate_fsp_type(data),
+            *validate_mobile_number(data),
         ]
         if errors:
             from django.core.exceptions import ValidationError
@@ -22,8 +24,10 @@ class PaymentAccountValidation(BaseModelValidation):
 
     @classmethod
     def validate_update(cls, user, **data):
+        existing = PaymentAccount.objects.filter(id=data.get('id'), is_deleted=False).first() if data.get('id') else None
         errors = [
             *validate_fsp_type(data),
+            *validate_mobile_number(data, existing),
         ]
         if errors:
             from django.core.exceptions import ValidationError
@@ -38,6 +42,17 @@ class PaymentAccountValidation(BaseModelValidation):
 def validate_required_field(data, field):
     if not data.get(field):
         return [{"message": _("tasaf_payment.validation.%s_required" % field)}]
+    return []
+
+
+def validate_mobile_number(data, existing=None):
+    from tasaf_payment import msisdn
+    if existing is not None and 'account_number' not in data and 'fsp_type' not in data:
+        return []
+    fsp_type = data.get('fsp_type') or getattr(existing, 'fsp_type', None)
+    number = data.get('account_number') or getattr(existing, 'account_number', None)
+    if fsp_type == 'MOBILE' and number and not msisdn.is_valid(msisdn.normalise(number)):
+        return [{"message": _("tasaf_payment.validation.mobile_number_invalid")}]
     return []
 
 
