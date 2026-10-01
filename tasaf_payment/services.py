@@ -1082,6 +1082,9 @@ class PaylistService:
                 logger.info("PaylistService.approve: paylist %s is %s", paylist_uuid, paylist.status)
                 return {'success': False,
                         'error': _("tasaf_payment.error.paylist_not_pending_approval")}
+            refusal = _wrong_type_refusal(paylist)
+            if refusal:
+                return refusal
 
             appr = self._engine_request_for(paylist)
             if appr:
@@ -1119,6 +1122,9 @@ class PaylistService:
             if paylist.status not in (PaylistStatus.APPROVED, PaylistStatus.REJECTED):
                 logger.info("PaylistService.submit: paylist %s is %s", paylist_uuid, paylist.status)
                 return {'success': False, 'error': _("tasaf_payment.error.paylist_not_approved")}
+            refusal = _wrong_type_refusal(paylist)
+            if refusal:
+                return refusal
             duplicates = paid_elsewhere(paylist).count()
             if duplicates:
                 logger.warning("PaylistService.submit: paylist %s refused, %d benefit(s) paid elsewhere",
@@ -1265,6 +1271,23 @@ def paid_elsewhere(paylist):
         Q(status=PaylistItemStatus.PROCESSED) | Q(paylist__status__in=PAYLIST_IN_FLIGHT_STATUSES))
     return paylist.items.filter(is_deleted=False,
                                 benefit_consumption_id__in=others.values('benefit_consumption_id'))
+
+
+def wrong_type_items(paylist):
+    """Items whose account type does not match the paylist's batch type (BANK vs MNO/MOBILE)."""
+    fsp_type = GENERATION_FSP_TYPES.get(paylist.batch_type)
+    return paylist.items.filter(is_deleted=False).exclude(payment_account__fsp_type=fsp_type)
+
+
+def _wrong_type_refusal(paylist):
+    count = wrong_type_items(paylist).count()
+    if not count:
+        return None
+    logger.warning("Paylist %s refused: %d item(s) do not match batch type %s",
+                   paylist.uuid, count, paylist.batch_type)
+    return {'success': False, 'outcome': 'REFUSED',
+            'error': f'{count} payment(s) on this {paylist.batch_type} paylist use an account of another '
+                     f'type; a paylist must hold only {GENERATION_FSP_TYPES.get(paylist.batch_type)} accounts'}
 
 
 def settle_item(item, settled_at=None, reference=None):
