@@ -713,6 +713,24 @@ class SaveFspProfileMutation(OpenIMISMutation):
             return [{'message': str(exc)}]
 
 
+class DeleteFspMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "DeleteFspMutation"
+
+    class Input(OpenIMISMutation.Input):
+        fsp_code = graphene.String(required=True)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.muse_setup import delete_fsp
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
+            delete_fsp(user, data['fsp_code'])
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
 class SaveMuseSettingsInputType(OpenIMISMutation.Input):
     institution_code = graphene.String(required=False)
     payer_account = graphene.String(required=False)

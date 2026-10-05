@@ -224,7 +224,7 @@ class Command(BaseCommand):
                     json_ext={
                         '_seed': SEED_TAG,
                         'pct_breakdown': breakdown,
-                        'benefit_plan_code': '002',
+                        'benefit_plan_code': 'PCT',
                         'beneficiary_group_id': str(beneficiary.group_id),
                     },
                 )
@@ -325,7 +325,7 @@ class Command(BaseCommand):
                 benefit_dirty = True
                 breakdown = household_breakdown(rng)
                 ext['pct_breakdown'] = breakdown
-                ext.setdefault('benefit_plan_code', '002')
+                ext.setdefault('benefit_plan_code', 'PCT')
                 gb = getattr(item.payment_account, 'group_beneficiary', None)
                 if gb is not None and getattr(gb, 'group_id', None):
                     ext['beneficiary_group_id'] = str(gb.group_id)

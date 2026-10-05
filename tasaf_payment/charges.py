@@ -69,26 +69,6 @@ def seed_fsp_mappings(user):
     return created
 
 
-def unmapped_fsp_names():
-    """FSP names on payment accounts that resolve to a code with no configured bands.
-    Surfacing these is what makes 'add a new FSP' a visible task rather than a surprise."""
-    from tasaf_payment.models import FspMapping, PaymentAccount
-    names = (PaymentAccount.objects.filter(is_deleted=False)
-             .values_list('fsp_name', flat=True).distinct())
-    known = set(WithdrawalCharge.objects.filter(is_deleted=False)
-                .values_list('fsp_code', flat=True).distinct())
-    out = []
-    for n in names:
-        if not n:
-            continue
-        key = normalise_fsp(n)
-        code = (FspMapping.objects.filter(is_deleted=False, fsp_name_key=key)
-                .values_list('fsp_code', flat=True).first()) or key
-        if code not in known:
-            out.append({'fsp_name': n, 'resolved_code': code})
-    return out
-
-
 def lookup_charge(fsp_code, net_amount, on_date=None):
     """Charge for a NET amount. Banding on the net terminates; banding on the gross is
     circular because adding the charge can push the amount into a higher band.

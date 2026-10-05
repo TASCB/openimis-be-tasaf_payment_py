@@ -74,6 +74,16 @@ class PaymentAccountGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
     client_mutation_id = graphene.String()
     last_failure_reason = graphene.String()
+    paid_at = graphene.DateTime()
+    payment_in_flight = graphene.Boolean()
+
+    def resolve_paid_at(root, info):
+        from tasaf_payment.services import account_paid_at
+        return account_paid_at(root.id)
+
+    def resolve_payment_in_flight(root, info):
+        from tasaf_payment.services import account_payment_in_flight
+        return account_payment_in_flight(root.id)
 
     def resolve_last_failure_reason(root, info):
         record = (root.muse_verification_records
@@ -257,18 +267,6 @@ class ChargeGapGQLType(graphene.ObjectType):
     range_to = graphene.String()
 
 
-class FspCoverageGQLType(graphene.ObjectType):
-    """Configured vs unconfigured ranges, so gaps are filled deliberately rather than
-    discovered when a payment underpays."""
-    fsp_code = graphene.String()
-    bands = graphene.Int()
-    lowest = graphene.String()
-    highest = graphene.String()
-    covers_from_zero = graphene.Boolean()
-    gaps = graphene.List(ChargeGapGQLType)
-    overlaps = graphene.List(ChargeGapGQLType)
-
-
 class FspMappingGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
     client_mutation_id = graphene.String()
@@ -284,24 +282,12 @@ class FspMappingGQLType(DjangoObjectType):
         }
 
 
-class UnmappedFspGQLType(graphene.ObjectType):
-    """An FSP present on payment accounts that has no configured tariff bands."""
-    fsp_name = graphene.String()
-    resolved_code = graphene.String()
-
-
-class KnownFspGQLType(graphene.ObjectType):
-    """An FSP the UI can offer: seen on payment accounts, or already holding tariff bands."""
-    fsp_code = graphene.String()
-    fsp_name = graphene.String()
-    on_accounts = graphene.Boolean()
-    has_bands = graphene.Boolean()
-
-
 class FspProviderGQLType(graphene.ObjectType):
     """One FSP on the charges page: MUSE routing data plus the names that map to it."""
     uuid = graphene.String()
     fsp_code = graphene.String()
+    name = graphene.String()
+    band_count = graphene.Int()
     bank_name = graphene.String()
     fsp_type = graphene.String()
     bic = graphene.String()

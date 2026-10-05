@@ -13,7 +13,7 @@ from tasaf_payment.gql_mutations import (
     DeleteWithdrawalChargeMutation,
     ImportWithdrawalChargesMutation,
     SaveFspMappingMutation,
-    SaveFspProfileMutation,
+    SaveFspProfileMutation, DeleteFspMutation,
     SaveMuseSettingsMutation,
     ApproveMuseChangeMutation,
     RejectMuseChangeMutation,
@@ -35,11 +35,8 @@ from tasaf_payment.gql_mutations import (
 )
 from tasaf_payment.gql_queries import (
     WithdrawalChargeGQLType,
-    FspCoverageGQLType,
     ChargeGapGQLType,
     FspMappingGQLType,
-    UnmappedFspGQLType,
-    KnownFspGQLType,
     FspProviderGQLType,
     MuseSettingsGQLType,
     MuseReadinessGQLType,
@@ -205,17 +202,11 @@ class Query(graphene.ObjectType):
         WithdrawalChargeGQLType,
         orderBy=graphene.List(of_type=graphene.String),
     )
-    # Configured vs unconfigured ranges per FSP; drives the coverage view.
-    fsp_coverage = graphene.List(FspCoverageGQLType, fsp_code=graphene.String())
     # FSP display-name -> tariff-code map, editable so a new FSP can be onboarded in the UI.
     fsp_mapping = OrderedDjangoFilterConnectionField(
         FspMappingGQLType,
         orderBy=graphene.List(of_type=graphene.String),
     )
-    # FSPs on accounts that have no bands yet -- makes onboarding a visible task.
-    unmapped_fsps = graphene.List(UnmappedFspGQLType)
-    # FSP options for pickers -- avoids hand-typing a code that then fails to match.
-    known_fsps = graphene.List(KnownFspGQLType)
     fsp_providers = graphene.List(FspProviderGQLType)
     muse_settings = graphene.Field(MuseSettingsGQLType)
     muse_readiness = graphene.Field(MuseReadinessGQLType)
@@ -495,31 +486,10 @@ class Query(graphene.ObjectType):
                                  TasafPaymentConfig.gql_withdrawal_charge_search_perms)
         return WithdrawalCharge.objects.filter(is_deleted=False)
 
-    def resolve_fsp_coverage(self, info, fsp_code=None, **kwargs):
-        Query._check_permissions(info.context.user,
-                                 TasafPaymentConfig.gql_withdrawal_charge_search_perms)
-        from tasaf_payment.charges import coverage
-        codes = ([fsp_code] if fsp_code else sorted(
-            WithdrawalCharge.objects.filter(is_deleted=False)
-            .values_list('fsp_code', flat=True).distinct()))
-        return [FspCoverageGQLType(
-            fsp_code=c['fsp_code'], bands=c['bands'], lowest=c['lowest'],
-            highest=c['highest'], covers_from_zero=c['covers_from_zero'],
-            gaps=[ChargeGapGQLType(range_from=g['from'], range_to=g['to']) for g in c['gaps']],
-            overlaps=[ChargeGapGQLType(range_from=g['from'], range_to=g['to'])
-                      for g in c['overlaps']],
-        ) for c in (coverage(code) for code in codes)]
-
     def resolve_fsp_mapping(self, info, **kwargs):
         Query._check_permissions(info.context.user,
                                  TasafPaymentConfig.gql_withdrawal_charge_search_perms)
         return FspMapping.objects.filter(is_deleted=False)
-
-    def resolve_unmapped_fsps(self, info, **kwargs):
-        Query._check_permissions(info.context.user,
-                                 TasafPaymentConfig.gql_withdrawal_charge_search_perms)
-        from tasaf_payment.charges import unmapped_fsp_names
-        return [UnmappedFspGQLType(**row) for row in unmapped_fsp_names()]
 
     def resolve_fsp_providers(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_withdrawal_charge_search_perms)
@@ -554,12 +524,6 @@ class Query(graphene.ObjectType):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
         from tasaf_payment.muse_setup import readiness
         return MuseReadinessGQLType(**readiness())
-
-    def resolve_known_fsps(self, info, **kwargs):
-        Query._check_permissions(info.context.user,
-                                 TasafPaymentConfig.gql_withdrawal_charge_search_perms)
-        from tasaf_payment.charges import known_fsps
-        return [KnownFspGQLType(**row) for row in known_fsps()]
 
     def resolve_fsp_band_set(self, info, fsp_code, **kwargs):
         Query._check_permissions(info.context.user,
@@ -623,6 +587,7 @@ class Mutation(graphene.ObjectType):
     import_withdrawal_charges = ImportWithdrawalChargesMutation.Field()
     save_fsp_mapping = SaveFspMappingMutation.Field()
     save_fsp_profile = SaveFspProfileMutation.Field()
+    delete_fsp = DeleteFspMutation.Field()
     save_muse_settings = SaveMuseSettingsMutation.Field()
     approve_muse_change = ApproveMuseChangeMutation.Field()
     reject_muse_change = RejectMuseChangeMutation.Field()

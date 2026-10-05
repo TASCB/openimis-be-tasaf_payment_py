@@ -28,6 +28,7 @@ class PaymentAccountValidation(BaseModelValidation):
         errors = [
             *validate_fsp_type(data),
             *validate_mobile_number(data, existing),
+            *validate_paid_account_lock(data, existing),
         ]
         if errors:
             from django.core.exceptions import ValidationError
@@ -102,3 +103,14 @@ class WithdrawalChargeValidation(BaseModelValidation):
     @classmethod
     def validate_delete(cls, user, **data):
         return []
+
+
+def validate_paid_account_lock(data, existing):
+    if existing is None:
+        return []
+    from tasaf_payment.services import LOCKED_PAYMENT_FIELDS, account_paid_at
+    changed = [f for f in LOCKED_PAYMENT_FIELDS if f in data and data[f] != getattr(existing, f)]
+    if changed and account_paid_at(existing.id):
+        return [{'message': f"This account has been paid, so {', '.join(changed)} can only be changed through "
+                            "Case Management > Correct payment details (reason and approval)."}]
+    return []

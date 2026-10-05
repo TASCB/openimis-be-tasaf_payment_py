@@ -20,17 +20,23 @@ class SetupError(ValueError):
     pass
 
 
+def main_fsp_name(row, bank_name=''):
+    if row['usage']:
+        return max(row['usage'], key=row['usage'].get)
+    return (sorted(row['names']) or [bank_name or row['fsp_code']])[0]
+
+
 def provider_list():
     """One row per FSP code: its MUSE routing data, the account display names that map to
     it, whether it has charge bands, how many accounts use it, and what is still missing."""
     from tasaf_payment.charges import known_fsps, normalise_fsp, resolve_fsp_code
-    from tasaf_payment.models import FspMapping, FspProfile, PaymentAccount
+    from tasaf_payment.models import FspMapping, FspProfile, PaymentAccount, WithdrawalCharge
 
     rows = {r['fsp_code']: {'fsp_code': r['fsp_code'], 'names': [], 'has_bands': r['has_bands'],
-                            'accounts': 0, 'account_types': set()} for r in known_fsps()}
+                            'accounts': 0, 'account_types': set(), 'usage': {}} for r in known_fsps()}
     for m in FspMapping.objects.filter(is_deleted=False):
         rows.setdefault(m.fsp_code, {'fsp_code': m.fsp_code, 'names': [], 'has_bands': False,
-                                     'accounts': 0, 'account_types': set()})
+                                     'accounts': 0, 'account_types': set(), 'usage': {}})
         rows[m.fsp_code]['names'].append(m.fsp_name)
     usage = (PaymentAccount.objects.filter(is_deleted=False)
              .values('fsp_name', 'fsp_type').annotate(n=Count('id')))
@@ -39,14 +45,17 @@ def provider_list():
             continue
         code = resolve_fsp_code(u['fsp_name']) or normalise_fsp(u['fsp_name'])
         row = rows.setdefault(code, {'fsp_code': code, 'names': [], 'has_bands': False,
-                                     'accounts': 0, 'account_types': set()})
+                                     'accounts': 0, 'account_types': set(), 'usage': {}})
         row['accounts'] += u['n']
+        row['usage'][u['fsp_name']] = row['usage'].get(u['fsp_name'], 0) + u['n']
         if u['fsp_type']:
             row['account_types'].add(u['fsp_type'])
         if u['fsp_name'] not in row['names']:
             row['names'].append(u['fsp_name'])
 
     profiles = {p.fsp_code: p for p in FspProfile.objects.filter(is_deleted=False)}
+    band_counts = dict(WithdrawalCharge.objects.filter(is_deleted=False).values('fsp_code')
+                       .annotate(n=Count('id')).values_list('fsp_code', 'n'))
     pending = set(pending_fsp_codes())
     out = []
     for code, row in sorted(rows.items()):
@@ -59,7 +68,8 @@ def provider_list():
         missing = [f for f, v in (('bankName', bank_name), ('bic', bic), ('fspType', fsp_type)) if not v]
         out.append({
             'uuid': str(p.uuid) if p else None,
-            'fsp_code': code, 'bank_name': bank_name, 'fsp_type': fsp_type, 'bic': bic,
+            'fsp_code': code, 'name': main_fsp_name(row, bank_name), 'band_count': band_counts.get(code, 0),
+            'bank_name': bank_name, 'fsp_type': fsp_type, 'bic': bic,
             'names': sorted(row['names']), 'has_bands': row['has_bands'],
             'accounts': row['accounts'], 'missing': missing, 'pending': code in pending,
         })
@@ -191,6 +201,29 @@ def propose(user, kind, proposed, fsp_code=''):
 def propose_settings(user, data):
     from tasaf_payment.models import MuseChangeKind
     return propose(user, MuseChangeKind.SETTINGS, normalise_settings(data))
+
+
+def delete_fsp(user, fsp_code):
+    from tasaf_payment.charges import normalise_fsp
+    from tasaf_payment.models import (
+        FspMapping, FspProfile, MuseChangeKind, MuseChangeRequest, MuseChangeStatus, WithdrawalCharge,
+    )
+
+    code = normalise_fsp(fsp_code or '')
+    row = next((r for r in provider_list() if r['fsp_code'] == code), None)
+    if row is None:
+        raise SetupError(f'No FSP {code}')
+    if row['accounts']:
+        raise SetupError(f'{code} is used by {row["accounts"]} payment account(s) and cannot be deleted')
+    if MuseChangeRequest.objects.filter(is_deleted=False, kind=MuseChangeKind.FSP_PROFILE, fsp_code=code,
+                                        status=MuseChangeStatus.PENDING).exists():
+        raise SetupError(f'{code} has a MUSE change awaiting approval; decide it first')
+    with transaction.atomic():
+        for model in (FspMapping, WithdrawalCharge, FspProfile):
+            for obj in model.objects.filter(is_deleted=False, fsp_code=code):
+                obj.is_deleted = True
+                obj.save(username=user.username)
+    return code
 
 
 def propose_profile(user, fsp_code, bank_name, fsp_type, bic):

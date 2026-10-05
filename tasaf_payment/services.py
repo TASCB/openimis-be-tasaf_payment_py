@@ -1261,6 +1261,23 @@ def benefits_on_a_paylist():
     ).exclude(paylist__status=PaylistStatus.REJECTED_AT_APPROVAL).values('benefit_consumption_id')
 
 
+LOCKED_PAYMENT_FIELDS = ('account_number', 'fsp_name', 'fsp_type', 'account_name')
+PAYLIST_FINISHED_STATUSES = (PaylistStatus.CLOSED, PaylistStatus.REJECTED_AT_APPROVAL)
+
+
+def account_paid_at(account_id):
+    item = (PaylistItem.objects.filter(payment_account_id=account_id, is_deleted=False,
+                                       status=PaylistItemStatus.PROCESSED)
+            .order_by('-settled_at', '-date_updated').first())
+    return (item.settled_at or item.date_updated) if item else None
+
+
+def account_payment_in_flight(account_id):
+    return (PaylistItem.objects.filter(payment_account_id=account_id, is_deleted=False,
+                                       status=PaylistItemStatus.PENDING, paylist__is_deleted=False)
+            .exclude(paylist__status__in=PAYLIST_FINISHED_STATUSES).exists())
+
+
 def paid_elsewhere(paylist):
     """Items of *paylist* whose benefit is already paid (PROCESSED), or being paid (on a paylist
     still with MUSE), on another paylist. Submitting them would pay the benefit twice."""
