@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from tasaf_payment.muse_setup import BIC_RE, CURRENCY
+from tasaf_payment.payee_code import PayeeCodeError, decode_payee_code, encode_hhid
 
 SENDER = 'TASAF MIS'
 RECEIVER = 'MUSE'
@@ -60,7 +61,12 @@ def message_time(paylist):
 
 
 def payee_code(group):
-    return getattr(group, 'code', None) or ''
+    """The household's HHID encoded for MUSE; empty when it is not a P3 HHID, which ``check``
+    reports. The raw HHID is never sent."""
+    try:
+        return encode_hhid(getattr(group, 'code', None))
+    except PayeeCodeError:
+        return ''
 
 
 def financial_year(when):
@@ -205,7 +211,15 @@ def _problem(section, field, rule, message, value=None, index=None, payee=None):
         out['index'] = index
         out['endToEndId'] = (payee or {}).get('endToEndId')
         out['payeeCode'] = (payee or {}).get('payeeCode')
+        out['hhid'] = hhid_of(out['payeeCode'])
     return out
+
+
+def hhid_of(code):
+    try:
+        return decode_payee_code(code)
+    except PayeeCodeError:
+        return None
 
 
 def _missing(value):
@@ -271,7 +285,9 @@ def check(body):
         for field in PAYEE_REQUIRED:
             value = payee.get(field)
             if _missing(value):
-                problems.append(_problem('payList', field, 'required', 'Required',
+                problems.append(_problem('payList', field, 'required',
+                                         'No P3 HHID (P3-#########-########) to encode'
+                                         if field == 'payeeCode' else 'Required',
                                          index=index, payee=payee))
                 continue
             if field in PATTERNS and not PATTERNS[field][0].match(str(value)):

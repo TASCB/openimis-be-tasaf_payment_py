@@ -91,6 +91,15 @@ def _freeze_ids(paylist, body, user):
         paylist.save(user=user)
 
 
+def _log_payees(body):
+    """HHID next to payeeCode for every payee, for audit and reconciliation."""
+    msg_id = body['message']['messageHeader']['msgId']
+    for payee in body['message'].get('payList') or []:
+        logger.info("MUSE payee msgId=%s endToEndId=%s hhid=%s payeeCode=%s", msg_id,
+                    payee.get('endToEndId'), muse_message.hhid_of(payee.get('payeeCode')),
+                    payee.get('payeeCode'))
+
+
 def _remember(paylist, user, result):
     ext = dict(paylist.json_ext or {})
     ext['muse_last_send'] = {
@@ -138,6 +147,7 @@ class MuseSender:
 
         _freeze_ids(paylist, body, self.user)
         body = muse_message.build(paylist)
+        _log_payees(body)
         max_attempts = max(1, int(_config('muse_send_max_attempts', 3)))
         backoff = float(_config('muse_send_backoff_seconds', 2))
         result = None

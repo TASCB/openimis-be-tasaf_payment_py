@@ -104,12 +104,39 @@ def _find_item(end_to_end_id, org_msg_id):
         benefit_consumption__code=end_to_end_id, is_deleted=False,
         paylist__is_deleted=False, paylist__destination=PaymentDestination.MUSE,
         paylist__muse_msg_id__isnull=False,
-    ).exclude(paylist__muse_msg_id='').select_related('paylist')
+    ).exclude(paylist__muse_msg_id='').select_related('paylist', 'payment_account__group_beneficiary__group')
     if org_msg_id:
         items = items.filter(paylist__muse_msg_id=org_msg_id)
     return (items.filter(paylist__status__in=PAYLIST_IN_FLIGHT_STATUSES, status=PaylistItemStatus.PENDING)
             .order_by('-date_created').first()
             or items.order_by('-date_created').first())
+
+
+def _payee_problem(details, item):
+    """MUSE's spec matches payments on endToEndId only. If a payeeCode comes along anyway, it
+    must decode to an existing HHID, the one this payment was sent for; otherwise the message is
+    refused and nothing is applied. The decoded HHID is what we log; payeeCode is never stored."""
+    from individual.models import Group
+    from tasaf_payment.payee_code import PayeeCodeError, decode_payee_code
+
+    if 'payeeCode' not in details:
+        return None
+    code = details.get('payeeCode')
+    try:
+        hhid = decode_payee_code(code)
+    except PayeeCodeError as exc:
+        logger.error("MUSE inbound payeeCode refused: %s", exc)
+        return _error(400, str(exc), 'FAILED')
+    if not Group.objects.filter(code=hhid, is_deleted=False).exists():
+        logger.error("MUSE inbound payeeCode %s decodes to unknown household %s", code, hhid)
+        return _error(404, f"No household {hhid} for payeeCode {code}", 'REJECTED')
+    group = getattr(getattr(item.payment_account, 'group_beneficiary', None), 'group', None)
+    if getattr(group, 'code', None) != hhid:
+        logger.error("MUSE inbound payeeCode %s (household %s) does not match payment %s",
+                     code, hhid, item.benefit_consumption_id)
+        return _error(409, f"payeeCode {code} is household {hhid}, not the household this "
+                           f"payment was sent for", 'REJECTED')
+    return None
 
 
 def _payment(message_type, header, details):
@@ -125,6 +152,9 @@ def _payment(message_type, header, details):
         return None, end_to_end_id, _error(404, f"No MUSE payment with endToEndId {end_to_end_id!r}", 'REJECTED')
 
     paylist = item.paylist
+    refused = _payee_problem(details, item)
+    if refused:
+        return paylist, end_to_end_id, refused
     wanted = PaylistItemStatus.PROCESSED if status == 'SETTLED' else PaylistItemStatus.UNAPPLIED
     if item.status == wanted:
         return paylist, end_to_end_id, Reply(200, _acknowledge(message_type, header, paylist), 'SUCCESS',
