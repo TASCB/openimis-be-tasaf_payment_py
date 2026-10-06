@@ -145,8 +145,8 @@ class MuseSender:
         for attempt in range(1, max_attempts + 1):
             entry = _log(paylist, body, attempt, 'PENDING')
             try:
-                response = GovESBProducer().publish(topic, body,
-                                                    user_id=getattr(self.user, 'username', None))
+                # No user_id: it would wrap esbBody as {"Payload": ...} and break MUSE's schema.
+                response = GovESBProducer().publish(topic, body)
             except ESBConfigurationError as exc:
                 _close_log(entry, 'FAILED', error_message=str(exc)[:2000])
                 result = SendResult(FAILED, f'GovESB is misconfigured: {exc}', attempts=attempt)
