@@ -166,6 +166,46 @@ def server_environment():
 
 # ── Change requests ─────────────────────────────────────────────────────────
 
+FIELD_LABELS = {
+    'institution_code': 'Institution code', 'payer_account': 'Payer account',
+    'sub_budget_class': 'Sub-budget class', 'unapplied_sub_budget_class': 'Sub-budget class (unapplied)',
+    'payment_desc': 'Payment description', 'is_stp': 'Straight-through processing',
+    'gl_accounts': 'GL accounts', 'bank_name': 'Bank name', 'fsp_type': 'Channel', 'bic': 'BIC',
+}
+CHANGE_EFFECT = ('Applies to every paylist submitted to MUSE from this server once approved. '
+                 'Paylists already sent are not affected.')
+
+
+def _readable(value):
+    if value is None or value == '' or value == []:
+        return None
+    if isinstance(value, bool):
+        return 'Yes' if value else 'No'
+    if isinstance(value, list):
+        return '; '.join(' — '.join(p for p in (line.get('glaccount'), line.get('glaccountDesc'),
+                                               line.get('grantName')) if p)
+                         for line in value if isinstance(line, dict))
+    return str(value)
+
+
+def describe_change(kind, fsp_code, current, proposed, reason=''):
+    """The approval summary a person can read: what changes from what to what, and why."""
+    current = current or {}
+    if kind == 'SETTINGS':
+        title = 'MUSE settings'
+    else:
+        name = proposed.get('bank_name') or current.get('bank_name')
+        title = f'FSP routing: {name} ({fsp_code})' if name else f'FSP routing: {fsp_code}'
+    changes = []
+    for field, value in proposed.items():
+        before, after = _readable(current.get(field)), _readable(value)
+        changes.append({'label': FIELD_LABELS.get(field, field.replace('_', ' ').capitalize()),
+                        'before': before, 'after': after, 'changed': before != after})
+    changes.sort(key=lambda c: not c['changed'])
+    return {'title': title, 'changes': changes, 'reason': (reason or '').strip() or None,
+            'effect': CHANGE_EFFECT}
+
+
 def pending_fsp_codes():
     from tasaf_payment.models import MuseChangeKind, MuseChangeRequest, MuseChangeStatus
     return (MuseChangeRequest.objects
@@ -173,7 +213,7 @@ def pending_fsp_codes():
             .values_list('fsp_code', flat=True))
 
 
-def propose(user, kind, proposed, fsp_code=''):
+def propose(user, kind, proposed, fsp_code='', reason=''):
     """Record a change and open its approval. Applies nothing."""
     from approval.services import ApprovalService
     from tasaf_payment.apps import TasafPaymentConfig
@@ -187,20 +227,20 @@ def propose(user, kind, proposed, fsp_code=''):
                 is_deleted=False, kind=kind, fsp_code=fsp_code,
                 status=MuseChangeStatus.PENDING).exists():
             raise SetupError('A change is already awaiting approval; approve, reject or cancel it first')
-        change = MuseChangeRequest(kind=kind, fsp_code=fsp_code, proposed=proposed, current=current)
+        change = MuseChangeRequest(kind=kind, fsp_code=fsp_code, proposed=proposed, current=current,
+                                   json_ext={'reason': (reason or '').strip()} if (reason or '').strip() else {})
         change.save(username=user.username)
         result = ApprovalService(user).request_approval(
             change, TasafPaymentConfig.muse_change_approval_flow,
-            summary={'kind': kind, 'fsp_code': fsp_code,
-                     'fields': sorted(k for k, v in proposed.items() if current.get(k) != v)})
+            summary=describe_change(kind, fsp_code, current, proposed, reason))
         if not result.get('success'):
             raise SetupError(result.get('detail') or result.get('message') or 'Approval could not be opened')
     return change
 
 
-def propose_settings(user, data):
+def propose_settings(user, data, reason=''):
     from tasaf_payment.models import MuseChangeKind
-    return propose(user, MuseChangeKind.SETTINGS, normalise_settings(data))
+    return propose(user, MuseChangeKind.SETTINGS, normalise_settings(data), reason=reason)
 
 
 def delete_fsp(user, fsp_code):
@@ -226,10 +266,10 @@ def delete_fsp(user, fsp_code):
     return code
 
 
-def propose_profile(user, fsp_code, bank_name, fsp_type, bic):
+def propose_profile(user, fsp_code, bank_name, fsp_type, bic, reason=''):
     from tasaf_payment.models import MuseChangeKind
     code, values = normalise_profile(fsp_code, bank_name, fsp_type, bic)
-    return propose(user, MuseChangeKind.FSP_PROFILE, values, fsp_code=code)
+    return propose(user, MuseChangeKind.FSP_PROFILE, values, fsp_code=code, reason=reason)
 
 
 def _apply(change, user):
@@ -345,6 +385,7 @@ def change_rows(status=None, limit=50):
             'decided_by': getattr(getattr(decision, 'approver', None), 'username', None),
             'decided_at': c.decided_at.isoformat() if c.decided_at else None,
             'comment': getattr(decision, 'comment', None),
+            'reason': (c.json_ext or {}).get('reason'),
         })
     return rows
 

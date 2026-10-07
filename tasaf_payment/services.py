@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from django.db import transaction
 from django.utils.translation import gettext as _
-from django.db.models import Q, Sum
+from django.db.models import Count, Q, Sum
 
 from core.services import BaseService
 from core.signals import register_service_signal
@@ -1048,12 +1048,7 @@ class PaylistService:
             logger.warning("tasaf_payment: approval engine unavailable (%s)", exc)
             return
         try:
-            summary = {
-                'batch_type': paylist.batch_type,
-                'batch_sequence': paylist.batch_sequence,
-                'batch_total': paylist.batch_total,
-                'payroll_id': str(paylist.payroll_id) if paylist.payroll_id else None,
-            }
+            summary = describe_paylist(paylist)
             res = ApprovalService(self.user).request_approval(paylist, 'PAYMENT_APPROVAL', summary=summary)
             if not res.get('success'):
                 logger.warning("tasaf_payment: paylist approval start failed: %s", res)
@@ -1270,6 +1265,57 @@ def account_paid_at(account_id):
                                        status=PaylistItemStatus.PROCESSED)
             .order_by('-settled_at', '-date_updated').first())
     return (item.settled_at or item.date_updated) if item else None
+
+
+CHANNEL_LABELS = {'BANK': 'Bank', 'MNO': 'Mobile money'}
+
+
+def _tzs(amount):
+    return f'TZS {amount or 0:,.2f}'.replace('.00', '')
+
+
+def describe_paylist(paylist):
+    """The approval summary of a paylist in words: what is paid, to whom, how much, through what."""
+    from tasaf_payment.models import PaylistItem
+
+    payroll = paylist.payroll
+    cycle = paylist.payment_cycle
+    plan = getattr(payroll, 'payment_plan', None)
+    programme = None
+    if plan is not None and plan.benefit_plan_id:
+        try:
+            programme = getattr(plan.benefit_plan, 'name', None)
+        except Exception:
+            programme = None
+    items = PaylistItem.objects.filter(paylist=paylist, is_deleted=False)
+    totals = items.aggregate(count=Count('id'), net=Sum('net_amount'), charges=Sum('charge_amount'),
+                             total=Sum('amount'))
+    fsps = sorted(set(items.values_list('payment_account__fsp_name', flat=True)) - {None, ''})
+    channel = CHANNEL_LABELS.get(paylist.batch_type, paylist.batch_type)
+    destination = paylist.get_destination_display() if paylist.destination else 'MUSE'
+    title = ' · '.join(p for p in (getattr(payroll, 'name', None), channel) if p) or 'Paylist'
+    if (paylist.batch_total or 1) > 1:
+        title += f' (batch {paylist.batch_sequence} of {paylist.batch_total})'
+    details = [
+        ('Programme', programme),
+        ('Payroll', getattr(payroll, 'name', None)),
+        ('Payment cycle', f'{cycle.code} ({cycle.start_date:%d %b %Y} – {cycle.end_date:%d %b %Y})'
+         if cycle and cycle.start_date and cycle.end_date else getattr(cycle, 'code', None)),
+        ('Channel', channel),
+        ('Payments', f"{totals['count']:,}"),
+        ('Total to pay', _tzs(totals['total'])),
+        ('Paid to beneficiaries', _tzs(totals['net']) if totals['charges'] else None),
+        ('Withdrawal charges', _tzs(totals['charges']) if totals['charges'] else None),
+        ('Payment providers', ', '.join(fsps[:6]) + (f' and {len(fsps) - 6} more' if len(fsps) > 6 else '')
+         if fsps else None),
+        ('Sent to', destination),
+        ('Generated', f'{paylist.generated_at:%d %b %Y %H:%M}' if paylist.generated_at else None),
+    ]
+    return {
+        'title': title,
+        'details': [{'label': label, 'value': value} for label, value in details if value],
+        'effect': f'Once every step approves, the paylist can be submitted to {destination} for payment.',
+    }
 
 
 def account_payment_in_flight(account_id):

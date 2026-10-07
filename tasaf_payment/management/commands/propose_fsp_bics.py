@@ -50,7 +50,8 @@ class Command(BaseCommand):
                 self.stdout.write(f'{code:12} would propose {bank_name} / {fsp_type} / {bic}')
                 continue
             try:
-                change = propose_profile(maker, code, bank_name, fsp_type, bic)
+                change = propose_profile(maker, code, bank_name, fsp_type, bic,
+                                         reason="From MUSE's FSP BIC list received on 2026-10-01")
                 self.stdout.write(self.style.SUCCESS(f'{code:12} proposed {bank_name} / {bic} (change {change.id})'))
             except SetupError as exc:
                 self.stdout.write(self.style.WARNING(f'{code:12} not proposed: {exc}'))

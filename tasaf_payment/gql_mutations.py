@@ -692,6 +692,7 @@ class SaveFspProfileInputType(OpenIMISMutation.Input):
     bank_name = graphene.String(required=True)
     fsp_type = graphene.String(required=True)
     bic = graphene.String(required=True)
+    reason = graphene.String(required=False)
 
 
 class SaveFspProfileMutation(OpenIMISMutation):
@@ -707,7 +708,8 @@ class SaveFspProfileMutation(OpenIMISMutation):
         from tasaf_payment.muse_setup import propose_profile
         try:
             _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
-            propose_profile(user, data['fsp_code'], data['bank_name'], data['fsp_type'], data['bic'])
+            propose_profile(user, data['fsp_code'], data['bank_name'], data['fsp_type'], data['bic'],
+                            reason=data.get('reason') or '')
             return None
         except Exception as exc:
             return [{'message': str(exc)}]
@@ -739,6 +741,7 @@ class SaveMuseSettingsInputType(OpenIMISMutation.Input):
     payment_desc = graphene.String(required=False)
     is_stp = graphene.Boolean(required=False)
     gl_accounts = graphene.JSONString(required=False)
+    reason = graphene.String(required=False)
 
 
 class SaveMuseSettingsMutation(OpenIMISMutation):
@@ -757,7 +760,8 @@ class SaveMuseSettingsMutation(OpenIMISMutation):
             _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
             data.pop('client_mutation_id', None)
             data.pop('client_mutation_label', None)
-            propose_settings(user, data)
+            reason = data.pop('reason', None) or ''
+            propose_settings(user, data, reason=reason)
             return None
         except Exception as exc:
             return [{'message': str(exc)}]
