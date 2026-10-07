@@ -51,6 +51,17 @@ class MuseSenderTest(SimpleTestCase):
         result, _ = self.send({**OK, 'esb_body': ACK})
         self.assertEqual(result.reply, ACK)
 
+    def test_sends_a_normal_request_by_default(self):
+        from coremis_app_integration.esb_client import ESBRequestType
+        _, producer = self.send(OK)
+        self.assertEqual(producer.publish.call_args.kwargs['request_type'], ESBRequestType.NORMAL)
+
+    def test_push_when_configured(self):
+        from coremis_app_integration.esb_client import ESBRequestType
+        with mock.patch.object(ms, '_config', side_effect=lambda name, default: 'push' if name == 'muse_request_type' else default):
+            _, producer = self.send(OK)
+        self.assertEqual(producer.publish.call_args.kwargs['request_type'], ESBRequestType.PUSH)
+
     def test_transport_error_is_retried_then_sent(self):
         result, _ = self.send(ESBRequestError('timeout'), OK)
         self.assertEqual((result.outcome, result.attempts), (ms.SENT, 2))

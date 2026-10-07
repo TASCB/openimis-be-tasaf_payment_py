@@ -123,6 +123,12 @@ def apply_reply(result):
         return None
 
 
+def request_type():
+    from coremis_app_integration.esb_client import ESBRequestType
+    name = str(_config('muse_request_type', 'NORMAL')).upper()
+    return ESBRequestType.PUSH if name == 'PUSH' else ESBRequestType.NORMAL
+
+
 def _remember(paylist, user, result):
     ext = dict(paylist.json_ext or {})
     ext['muse_last_send'] = {
@@ -179,7 +185,7 @@ class MuseSender:
             entry = _log(paylist, body, attempt, 'PENDING')
             try:
                 # No user_id: it would wrap esbBody as {"Payload": ...} and break MUSE's schema.
-                response = GovESBProducer().publish(topic, body)
+                response = GovESBProducer().publish(topic, body, request_type=request_type())
             except ESBConfigurationError as exc:
                 _close_log(entry, 'FAILED', error_message=str(exc)[:2000])
                 result = SendResult(FAILED, f'GovESB is misconfigured: {exc}', attempts=attempt)

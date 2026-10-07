@@ -330,6 +330,14 @@ def summarise(problems):
 
 # ── Preview ─────────────────────────────────────────────────────────────────
 
+def _request_type_name():
+    try:
+        from tasaf_payment.muse_sender import request_type
+        return request_type().name
+    except ImportError:
+        return 'NORMAL'
+
+
 def preview(paylist, sample_rows=20, max_problems=100):
     """The message a MUSE submit of this paylist would carry and what MUSE would reject in
     it. Read-only; payList and problems are trimmed for display, counts are not."""
@@ -366,7 +374,7 @@ def preview(paylist, sample_rows=20, max_problems=100):
         'api_code_mapped': bool(api_code) and api_code != topic,
         'govesb_enabled': enabled,
         'esb_url': ((getattr(django_settings, 'ESB', None) or {}).get('ENGINE_URL') if enabled else None),
-        'request_type': 'PUSH',
+        'request_type': _request_type_name(),
         'msg_id': message['messageHeader']['msgId'],
         'reference_no': message['paymentSummary']['referenceNo'],
         'attempt': attempt(paylist),

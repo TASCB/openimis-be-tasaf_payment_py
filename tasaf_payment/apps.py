@@ -39,6 +39,8 @@ DEFAULT_CONFIG = {
     "muse_submit_mode": "SEND",
     "muse_send_max_attempts": 3,
     "muse_send_backoff_seconds": 2,
+    # NORMAL: request to MUSE's own End Point (apiCode). PUSH: our push End Point (pushCode).
+    "muse_request_type": "NORMAL",
     # Also push TASAF's ACKs over GovESB (they are always returned in the HTTP response).
     "muse_ack_push": False,
 
@@ -106,6 +108,7 @@ class TasafPaymentConfig(AppConfig):
     muse_submit_mode = None
     muse_send_max_attempts = None
     muse_send_backoff_seconds = None
+    muse_request_type = None
     muse_ack_push = None
     fsp_code_aliases = {}
     batch_inline_fallback_limit = 1000
