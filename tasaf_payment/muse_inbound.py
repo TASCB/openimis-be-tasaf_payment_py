@@ -105,6 +105,8 @@ def _batch(message_type, header, summary):
 
 
 def _find_item(end_to_end_id, org_msg_id):
+    """orgMsgId narrows the search only when it names one of our batches; MUSE's spec also
+    sends null or the payment's own reference there."""
     from tasaf_payment.models import (
         PAYLIST_IN_FLIGHT_STATUSES, PaylistItem, PaylistItemStatus, PaymentDestination,
     )
@@ -113,7 +115,7 @@ def _find_item(end_to_end_id, org_msg_id):
         paylist__is_deleted=False, paylist__destination=PaymentDestination.MUSE,
         paylist__muse_msg_id__isnull=False,
     ).exclude(paylist__muse_msg_id='').select_related('paylist', 'payment_account__group_beneficiary__group')
-    if org_msg_id:
+    if org_msg_id and items.filter(paylist__muse_msg_id=org_msg_id).exists():
         items = items.filter(paylist__muse_msg_id=org_msg_id)
     return (items.filter(paylist__status__in=PAYLIST_IN_FLIGHT_STATUSES, status=PaylistItemStatus.PENDING)
             .order_by('-date_created').first()

@@ -101,3 +101,28 @@ class MuseMessageViewTest(SimpleTestCase):
         response = self._post({'message': {'messageHeader': {'msgId': 'MU1'}}}, tamper=True)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self._verified_data(response), {'success': False, 'message': 'Invalid GovESB signature'})
+
+
+class FindItemOrgMsgIdTest(SimpleTestCase):
+    """MUSE's spec sends orgMsgId as null, our msgId, or the payment's own reference."""
+
+    def _run(self, matches_our_batch):
+        from unittest import mock
+        items, narrowed = mock.MagicMock(name='items'), mock.MagicMock(name='narrowed')
+        narrowed.exists.return_value = matches_our_batch
+        items.filter.side_effect = lambda **kw: narrowed if 'paylist__muse_msg_id' in kw else items
+        narrowed.filter.side_effect = lambda **kw: narrowed
+        with mock.patch('tasaf_payment.models.PaylistItem.objects') as objects:
+            objects.filter.return_value.exclude.return_value.select_related.return_value = items
+            mi._find_item('P84E20274', 'P84E20274')
+        return items, narrowed
+
+    def test_reference_that_is_not_our_msg_id_does_not_narrow(self):
+        items, narrowed = self._run(False)
+        self.assertTrue(items.order_by.called)
+        self.assertFalse(narrowed.order_by.called)
+
+    def test_our_msg_id_narrows(self):
+        items, narrowed = self._run(True)
+        self.assertTrue(narrowed.order_by.called)
+        self.assertFalse(items.order_by.called)
