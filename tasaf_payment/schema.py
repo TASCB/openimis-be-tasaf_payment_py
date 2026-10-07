@@ -227,7 +227,12 @@ class Query(graphene.ObjectType):
         PaylistItemGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         paylist_uuid=graphene.UUID(),
-        # status handled by filter_fields
+        account_number=graphene.String(),
+        fsp_name=graphene.String(),
+        benefit_code=graphene.String(),
+        hhid=graphene.String(),
+        location_id=graphene.Int(),
+        # status, muse_reference handled by filter_fields
     )
 
     # ── Return feedback ───────────────────────────────────────────────────────
@@ -314,6 +319,18 @@ class Query(graphene.ObjectType):
             filters.append(Q(paylist__uuid=kwargs["paylist_uuid"]))
         if kwargs.get("status"):
             filters.append(Q(status=kwargs["status"]))
+        if kwargs.get("account_number"):
+            filters.append(Q(payment_account__account_number__icontains=kwargs["account_number"].strip()))
+        if kwargs.get("fsp_name"):
+            filters.append(Q(payment_account__fsp_name__icontains=kwargs["fsp_name"].strip()))
+        if kwargs.get("benefit_code"):
+            filters.append(Q(benefit_consumption__code__icontains=kwargs["benefit_code"].strip()))
+        if kwargs.get("hhid"):
+            filters.append(Q(payment_account__group_beneficiary__group__code__icontains=kwargs["hhid"].strip()))
+        if kwargs.get("location_id"):
+            from tasaf_payment.services import location_descendants_q
+            filters.append(location_descendants_q(
+                kwargs["location_id"], base='payment_account__group_beneficiary__group__location'))
 
         return gql_optimizer.query(PaylistItem.objects.filter(*filters), info)
 
