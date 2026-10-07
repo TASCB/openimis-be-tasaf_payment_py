@@ -1112,6 +1112,13 @@ class PaylistService:
     def submit(self, paylist_uuid: str) -> dict:
         """APPROVED → SUBMITTED. A MUSE paylist becomes SUBMITTED only once GovESB accepts
         its message (or in RECORD_ONLY mode); otherwise it stays APPROVED."""
+        result = self._submit(paylist_uuid)
+        if result.get('error') in SUBMIT_ERROR_TEXT:
+            result['error'] = SUBMIT_ERROR_TEXT[result['error']]
+        _record_submit(paylist_uuid, self.user, result)
+        return result
+
+    def _submit(self, paylist_uuid: str) -> dict:
         try:
             paylist = Paylist.objects.get(uuid=paylist_uuid, is_deleted=False)
             if paylist.status not in (PaylistStatus.APPROVED, PaylistStatus.REJECTED):
@@ -1343,6 +1350,34 @@ def wrong_type_items(paylist):
     """Items whose account type does not match the paylist's batch type (BANK vs MNO/MOBILE)."""
     fsp_type = GENERATION_FSP_TYPES.get(paylist.batch_type)
     return paylist.items.filter(is_deleted=False).exclude(payment_account__fsp_type=fsp_type)
+
+
+SUBMIT_ERROR_TEXT = {
+    'tasaf_payment.error.paylist_not_approved':
+        'Only an approved paylist, or one rejected by MUSE, can be submitted',
+    'tasaf_payment.error.paylist_not_found': 'Paylist not found',
+}
+
+
+def _record_submit(paylist_uuid, user, result):
+    error = result.get('error')
+    if isinstance(error, dict):
+        error = error.get('detail') or error.get('message')
+    note = {
+        'at': datetime.now(tz=timezone.utc).isoformat(),
+        'by': getattr(user, 'username', None),
+        'success': bool(result.get('success')),
+        'outcome': result.get('outcome') or ('SENT' if result.get('success') else 'FAILED'),
+        'message': str(error or result.get('detail') or result.get('message') or '')[:1000],
+        'ack': result.get('muse_ack'),
+    }
+    try:
+        ext = Paylist.objects.filter(uuid=paylist_uuid).values_list('json_ext', flat=True).first()
+        if ext is None and not Paylist.objects.filter(uuid=paylist_uuid).exists():
+            return
+        Paylist.objects.filter(uuid=paylist_uuid).update(json_ext={**(ext or {}), 'muse_last_submit': note})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not record the submit result on paylist %s: %s", paylist_uuid, exc)
 
 
 def _wrong_type_refusal(paylist):

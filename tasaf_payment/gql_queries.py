@@ -1,6 +1,6 @@
 import django_filters
 import graphene
-from django.db.models import Sum
+from django.db.models import Count, Sum
 from graphene_django import DjangoObjectType
 from graphene_django.filter import TypedFilter
 
@@ -129,6 +129,8 @@ class PaylistGQLType(DjangoObjectType):
     pending_count = graphene.Int()
     settled_amount = graphene.Float()
     outcome = graphene.String()
+    summary = graphene.JSONString()
+    last_submit = graphene.JSONString()
 
     class Meta:
         model = Paylist
@@ -149,6 +151,23 @@ class PaylistGQLType(DjangoObjectType):
 
     def resolve_item_count(root, info):
         return root.items.filter(is_deleted=False).count()
+
+    def resolve_summary(root, info):
+        rows = (root.items.filter(is_deleted=False).values('status')
+                .annotate(count=Count('id'), amount=Sum('amount'), net=Sum('net_amount'),
+                          charge=Sum('charge_amount')))
+        money = lambda v: float(v or 0)  # noqa: E731
+        by_status = {r['status']: {'count': r['count'], 'amount': money(r['amount'])} for r in rows}
+        return {
+            'payees': sum(r['count'] for r in rows),
+            'amount': sum(money(r['amount']) for r in rows),
+            'net_amount': sum(money(r['net']) for r in rows),
+            'charge_amount': sum(money(r['charge']) for r in rows),
+            'by_status': by_status,
+        }
+
+    def resolve_last_submit(root, info):
+        return (root.json_ext or {}).get('muse_last_submit')
 
     def resolve_settled_count(root, info):
         return root.items.filter(is_deleted=False, status=PaylistItemStatus.PROCESSED).count()
@@ -308,6 +327,23 @@ class MuseSettingsGQLType(graphene.ObjectType):
     gl_accounts = graphene.JSONString()
     environment = graphene.String()
     date_updated = graphene.DateTime()
+
+
+class MuseLogEntryGQLType(graphene.ObjectType):
+    created_at = graphene.DateTime()
+    direction = graphene.String()
+    transaction_type = graphene.String()
+    status = graphene.String()
+    attempt_number = graphene.Int()
+    msg_id = graphene.String()
+    muse_reference = graphene.String()
+    esb_request_id = graphene.String()
+    http_status_code = graphene.Int()
+    item_count = graphene.Int()
+    amount = graphene.Float()
+    benefit_code = graphene.String()
+    error_message = graphene.String()
+    response_body = graphene.String()
 
 
 class MuseReadinessGQLType(graphene.ObjectType):

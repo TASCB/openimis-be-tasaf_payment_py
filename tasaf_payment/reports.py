@@ -205,3 +205,70 @@ def export_epayment_summary_by_fsp(user, **filters):
     export.save()
     logger.info("export_epayment_summary_by_fsp: %s (%d row(s))", filename, len(records))
     return export.name
+
+
+PAYLIST_ITEM_EXPORT_COLUMNS = [
+    'HHID', 'Payee', 'Payment Ref', 'Account Number', 'Account Name', 'FSP', 'FSP Type',
+    'Region', 'District', 'Ward', 'Village',
+    'Gross Amount', 'Net Amount', 'Charge', 'Status', 'MUSE Reference', 'Return Reason', 'Settled At',
+]
+
+
+def _location_names(location):
+    chain = []
+    while location is not None and len(chain) < 4:
+        chain.insert(0, location.name)
+        location = location.parent
+    return (chain + [''] * 4)[:4]
+
+
+def export_paylist_items(user, items):
+    import uuid as _uuid
+
+    from django.core.files.base import ContentFile
+    from pandas import DataFrame
+    from core.models import ExportableQueryModel
+    from individual.models import GroupIndividual
+
+    items = list(items.select_related(
+        'benefit_consumption', 'payment_account__group_beneficiary__group__location__parent__parent__parent',
+    ).order_by('date_created', 'id'))
+    group_ids = {i.payment_account.group_beneficiary.group_id for i in items
+                 if i.payment_account.group_beneficiary_id}
+    names = {}
+    for group_id, first, last in (GroupIndividual.objects
+                                  .filter(group_id__in=group_ids, is_deleted=False, recipient_type='PRIMARY')
+                                  .values_list('group_id', 'individual__first_name', 'individual__last_name')):
+        names.setdefault(group_id, f"{first or ''} {last or ''}".strip())
+
+    def amount(value):
+        return float(value) if value is not None else None
+
+    records = []
+    for item in items:
+        account = item.payment_account
+        group = account.group_beneficiary.group if account.group_beneficiary_id else None
+        records.append(dict(zip(PAYLIST_ITEM_EXPORT_COLUMNS, [
+            group.code if group else '',
+            names.get(group.id, '') if group else '',
+            item.benefit_consumption.code if item.benefit_consumption_id else '',
+            account.account_number, account.account_name or '', account.fsp_name, account.fsp_type,
+            *_location_names(group.location if group else None),
+            amount(item.amount), amount(item.net_amount), amount(item.charge_amount),
+            item.status, item.muse_reference or '', item.return_reason or '',
+            item.settled_at.strftime('%Y-%m-%d %H:%M') if item.settled_at else '',
+        ])))
+    frame = DataFrame.from_records(records, columns=PAYLIST_ITEM_EXPORT_COLUMNS)
+
+    filename = f"{_uuid.uuid4()}.csv"
+    export = ExportableQueryModel(
+        name=filename,
+        model='PaylistItem',
+        content=ContentFile(frame.to_csv(index=False), filename),
+        user=user,
+        sql_query='tasaf_payment.reports.export_paylist_items',
+        file_format=ExportableQueryModel.FileFormat.CSV,
+    )
+    export.save()
+    logger.info("export_paylist_items: %s (%d row(s))", filename, len(records))
+    return export.name

@@ -394,7 +394,7 @@ class ApprovePaylistMutation(BaseMutation):
         data.pop('client_mutation_label', None)
         result = PaylistService(user).approve(str(data['paylist_uuid']))
         if not result.get('success'):
-            raise Exception(result.get('error', 'Paylist approval failed'))
+            raise Exception(result.get('error') or result.get('detail') or 'Paylist approval failed')
 
     class Input(ApprovePaylistInputType):
         pass
@@ -416,7 +416,7 @@ class SubmitPaylistMutation(BaseMutation):
         data.pop('client_mutation_label', None)
         result = PaylistService(user).submit(str(data['paylist_uuid']))
         if not result.get('success'):
-            raise Exception(result.get('error', 'Paylist submission failed'))
+            raise Exception(result.get('error') or result.get('detail') or 'Paylist submission failed')
 
     class Input(SubmitPaylistInputType):
         pass

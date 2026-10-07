@@ -45,6 +45,7 @@ from tasaf_payment.gql_queries import (
     MuseVerificationRecordGQLType,
     PaylistGQLType,
     PaylistItemGQLType,
+    MuseLogEntryGQLType,
     ReturnFeedbackGQLType,
 )
 from tasaf_payment.models import (
@@ -108,6 +109,29 @@ class EpaymentFspRowGQLType(graphene.ObjectType):
 class EpaymentSummaryByFspGQLType(graphene.ObjectType):
     rows = graphene.List(EpaymentFspRowGQLType)
     totals = graphene.Field(EpaymentFspRowGQLType)
+
+
+def paylist_item_filters(**kwargs):
+    filters = []
+    if kwargs.get("paylist_uuid"):
+        filters.append(Q(paylist__uuid=kwargs["paylist_uuid"]))
+    if kwargs.get("status"):
+        filters.append(Q(status=kwargs["status"]))
+    if kwargs.get("muse_reference__icontains"):
+        filters.append(Q(muse_reference__icontains=kwargs["muse_reference__icontains"].strip()))
+    if kwargs.get("account_number"):
+        filters.append(Q(payment_account__account_number__icontains=kwargs["account_number"].strip()))
+    if kwargs.get("fsp_name"):
+        filters.append(Q(payment_account__fsp_name__icontains=kwargs["fsp_name"].strip()))
+    if kwargs.get("benefit_code"):
+        filters.append(Q(benefit_consumption__code__icontains=kwargs["benefit_code"].strip()))
+    if kwargs.get("hhid"):
+        filters.append(Q(payment_account__group_beneficiary__group__code__icontains=kwargs["hhid"].strip()))
+    if kwargs.get("location_id"):
+        from tasaf_payment.services import location_descendants_q
+        filters.append(location_descendants_q(
+            kwargs["location_id"], base='payment_account__group_beneficiary__group__location'))
+    return filters
 
 
 class Query(graphene.ObjectType):
@@ -234,6 +258,24 @@ class Query(graphene.ObjectType):
         location_id=graphene.Int(),
         # status, muse_reference handled by filter_fields
     )
+    paylist_items_export = graphene.String(
+        paylist_uuid=graphene.UUID(required=True),
+        account_number=graphene.String(),
+        fsp_name=graphene.String(),
+        benefit_code=graphene.String(),
+        hhid=graphene.String(),
+        location_id=graphene.Int(),
+        status=graphene.String(),
+        muse_reference=graphene.String(),
+        description="The paylist's items matching the filters as CSV; returns the export name for "
+                    "core's /api/core/fetch_export.",
+    )
+    paylist_muse_log = graphene.List(
+        MuseLogEntryGQLType,
+        paylist_uuid=graphene.UUID(required=True),
+        limit=graphene.Int(),
+        description="Send attempts and MUSE's messages for one paylist, newest first.",
+    )
 
     # ── Return feedback ───────────────────────────────────────────────────────
     return_feedback = OrderedDjangoFilterConnectionField(
@@ -315,24 +357,38 @@ class Query(graphene.ObjectType):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
         filters = [Q(is_deleted=False)]
 
-        if kwargs.get("paylist_uuid"):
-            filters.append(Q(paylist__uuid=kwargs["paylist_uuid"]))
-        if kwargs.get("status"):
-            filters.append(Q(status=kwargs["status"]))
-        if kwargs.get("account_number"):
-            filters.append(Q(payment_account__account_number__icontains=kwargs["account_number"].strip()))
-        if kwargs.get("fsp_name"):
-            filters.append(Q(payment_account__fsp_name__icontains=kwargs["fsp_name"].strip()))
-        if kwargs.get("benefit_code"):
-            filters.append(Q(benefit_consumption__code__icontains=kwargs["benefit_code"].strip()))
-        if kwargs.get("hhid"):
-            filters.append(Q(payment_account__group_beneficiary__group__code__icontains=kwargs["hhid"].strip()))
-        if kwargs.get("location_id"):
-            from tasaf_payment.services import location_descendants_q
-            filters.append(location_descendants_q(
-                kwargs["location_id"], base='payment_account__group_beneficiary__group__location'))
-
+        filters.extend(paylist_item_filters(**kwargs))
         return gql_optimizer.query(PaylistItem.objects.filter(*filters), info)
+
+    def resolve_paylist_items_export(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
+        from tasaf_payment.reports import export_paylist_items
+        if kwargs.get("muse_reference"):
+            kwargs["muse_reference__icontains"] = kwargs.pop("muse_reference")
+        items = PaylistItem.objects.filter(*paylist_item_filters(**kwargs), is_deleted=False)
+        return export_paylist_items(info.context.user, items)
+
+    def resolve_paylist_muse_log(self, info, paylist_uuid, limit=None):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
+        try:
+            from muse_payment_adaptor.models import MuseTransactionLog
+        except ImportError:
+            return []
+        paylist = Paylist.objects.filter(uuid=paylist_uuid).first()
+        if not paylist:
+            return []
+        match = Q(paylist_uuid=str(paylist.uuid))
+        if paylist.muse_msg_id:
+            match |= Q(msg_id=paylist.muse_msg_id)
+        rows = MuseTransactionLog.objects.filter(match).order_by('-created_at', '-id')[:min(limit or 100, 500)]
+        return [MuseLogEntryGQLType(
+            created_at=r.created_at, direction=r.direction, transaction_type=r.transaction_type,
+            status=r.status, attempt_number=r.attempt_number, msg_id=r.msg_id,
+            muse_reference=r.muse_reference, esb_request_id=r.esb_request_id,
+            http_status_code=r.http_status_code, item_count=r.item_count,
+            amount=float(r.amount) if r.amount is not None else None, benefit_code=r.benefit_code,
+            error_message=r.error_message, response_body=(r.response_body or '')[:2000],
+        ) for r in rows]
 
     def resolve_return_feedback(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
