@@ -1,5 +1,6 @@
 """MUSE's messages to TASAF MIS — ACK / RESPONSE (batch) and PAYMENT_STATUS (per payment):
-matched to our paylist or item, applied, logged, and answered with TASAF's ACK."""
+matched to our paylist or item, applied, logged, and answered with TASAF's ACK
+(REJECTED with the reason when refused)."""
 import json
 import logging
 import re
@@ -29,14 +30,14 @@ def bank_reference(text):
     return match.group(1) if match else None
 
 
-def ack_message(org_message_type, org_msg_id, desc='Received Successfully'):
+def ack_message(org_message_type, org_msg_id, desc='Received Successfully', status='RECEIVED'):
     from tasaf_payment.muse_message import DATE_FORMAT, RECEIVER, SENDER
     return {'message': {
         'messageHeader': {'sender': SENDER, 'receiver': RECEIVER,
                           'msgId': f"TA{uuid.uuid4().hex[:14].upper()}",
                           'messageType': 'ACK', 'createdAt': datetime.now().strftime(DATE_FORMAT)},
         'messageSummary': {'orgMessageType': org_message_type, 'orgMsgId': org_msg_id,
-                           'status': 'RECEIVED', 'statusDesc': desc},
+                           'status': status, 'statusDesc': desc},
     }}
 
 
@@ -75,6 +76,13 @@ def _acknowledge(message_type, header, paylist):
         return {'success': True, 'received': header.get('msgId')}
     ack = ack_message(message_type, header.get('msgId'))
     _push_ack(ack, paylist)
+    return ack
+
+
+def _reject(message_type, header, paylist, reason):
+    ack = ack_message(message_type, header.get('msgId'), reason, status='REJECTED')
+    if message_type != 'ACK':
+        _push_ack(ack, paylist)
     return ack
 
 
@@ -175,12 +183,13 @@ def _payment(message_type, header, details):
 
 
 def handle(payload):
-    """One MUSE message (the verified GovESB business payload) -> (http_status, response_body)."""
+    """One MUSE message (the verified GovESB business payload) -> (success, esbBody or message).
+    success=False only for non-MUSE input and our own failures."""
     message = payload.get('message') if isinstance(payload, dict) else None
     header = (message or {}).get('messageHeader') if isinstance(message, dict) else None
     if not isinstance(header, dict):
         _log('ACK', 'FAILED', payload, 'Not a MUSE message: no message.messageHeader')
-        return 400, {'success': False, 'error': 'Not a MUSE message: no message.messageHeader'}
+        return False, 'Not a MUSE message: no message.messageHeader'
 
     message_type = str(header.get('messageType') or '').strip().upper()
     paylist, end_to_end_id = None, ''
@@ -198,6 +207,10 @@ def handle(payload):
         reply = _error(500, f'Could not process the message: {exc}', 'FAILED')
 
     _log(message_type, reply.log_status, payload, reply.note, paylist, end_to_end_id, header.get('msgId'))
-    logger.info("MUSE inbound %s msgId=%s -> HTTP %s %s", message_type, header.get('msgId'),
+    logger.info("MUSE inbound %s msgId=%s -> %s %s", message_type, header.get('msgId'),
                 reply.http, reply.note)
-    return reply.http, reply.body
+    if reply.http == 200:
+        return True, reply.body
+    if reply.http == 500:
+        return False, 'Could not process the message; please resend later'
+    return True, _reject(message_type, header, paylist, reply.note)

@@ -15,7 +15,7 @@ admin-override with bare JSON payloads — see ``govesb_inbound`` for the policy
 import logging
 
 from django.conf import settings
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -33,7 +33,7 @@ def _parse_json_body(request):
         return None, str(exc)
 
 
-def _verify_inbound(payload):
+def _verify_inbound(payload, raw=None):
     """
     Verify an inbound GovESB push and return ``(business_payload, error)``.
 
@@ -50,7 +50,7 @@ def _verify_inbound(payload):
             return None, "GovESB inbound verification module unavailable"
         return payload, None
 
-    business, verified, error = verify_inbound(payload)
+    business, verified, error = verify_inbound(payload, raw)
     if error:
         return None, error
     if verified:
@@ -81,7 +81,7 @@ class MuseVerificationResultView(View):
         if error:
             return JsonResponse({'success': False, 'error': f'Invalid JSON: {error}'}, status=400)
 
-        payload, verr = _verify_inbound(payload)
+        payload, verr = _verify_inbound(payload, request.body)
         if verr:
             logger.warning("[GovESB] inbound verification result rejected: %s", verr)
             return JsonResponse({'success': False, 'error': verr}, status=401)
@@ -127,7 +127,7 @@ class MuseReturnFeedbackView(View):
         if error:
             return JsonResponse({'success': False, 'error': f'Invalid JSON: {error}'}, status=400)
 
-        payload, verr = _verify_inbound(payload)
+        payload, verr = _verify_inbound(payload, request.body)
         if verr:
             logger.warning("[GovESB] inbound return feedback rejected: %s", verr)
             return JsonResponse({'success': False, 'error': verr}, status=401)
@@ -178,7 +178,7 @@ class MuseSettlementView(View):
         if error:
             return JsonResponse({'success': False, 'error': f'Invalid JSON: {error}'}, status=400)
 
-        payload, verr = _verify_inbound(payload)
+        payload, verr = _verify_inbound(payload, request.body)
         if verr:
             logger.warning("[GovESB] inbound settlement rejected: %s", verr)
             return JsonResponse({'success': False, 'error': verr}, status=401)
@@ -210,21 +210,28 @@ class MuseMessageView(View):
     POST /api/tasaf_payment/muse/message/
 
     Any message MUSE sends, in MUSE's own format: ``{"message": {messageHeader, messageSummary |
-    messageDetails}, "digitalSignature"}`` inside the signed GovESB envelope. Answers with TASAF's
-    ACK (HTTP 200), or 400 (malformed), 404 (unknown msgId / endToEndId), 409 (conflicts).
+    messageDetails}, "digitalSignature"}`` inside the signed GovESB envelope.
+    Always HTTP 200 with a signed reply: success + TASAF's ACK, or success=false + message.
     """
 
     def post(self, request, *args, **kwargs):
+        from coremis_app_integration.govesb_inbound import signed_reply
         from tasaf_payment.muse_inbound import handle
+
+        def reply(success, body):
+            if success:
+                text = signed_reply(True, esb_body=body)
+            else:
+                text = signed_reply(False, message=body)
+            return HttpResponse(text, content_type='application/json', status=200)
 
         payload, error = _parse_json_body(request)
         if error:
-            return JsonResponse({'success': False, 'error': f'Invalid JSON: {error}'}, status=400)
+            return reply(False, f'Invalid JSON: {error}')
 
-        payload, verr = _verify_inbound(payload)
+        payload, verr = _verify_inbound(payload, request.body)
         if verr:
             logger.warning("[GovESB] inbound MUSE message rejected: %s", verr)
-            return JsonResponse({'success': False, 'error': verr}, status=401)
+            return reply(False, verr)
 
-        status, body = handle(payload)
-        return JsonResponse(body, status=status)
+        return reply(*handle(payload))
