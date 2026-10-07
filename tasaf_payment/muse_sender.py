@@ -23,12 +23,13 @@ RETRYABLE_HTTP = (429, 500, 502, 503, 504)
 
 
 class SendResult:
-    def __init__(self, outcome, message='', problems=None, attempts=0, request_id=None):
+    def __init__(self, outcome, message='', problems=None, attempts=0, request_id=None, reply=None):
         self.outcome = outcome
         self.message = message
         self.problems = problems or []
         self.attempts = attempts
         self.request_id = request_id
+        self.reply = reply
 
     @property
     def submitted(self):
@@ -98,6 +99,28 @@ def _log_payees(body):
         logger.info("MUSE payee msgId=%s endToEndId=%s hhid=%s payeeCode=%s", msg_id,
                     payee.get('endToEndId'), muse_message.hhid_of(payee.get('payeeCode')),
                     payee.get('payeeCode'))
+
+
+def muse_reply(esb_body):
+    """MUSE's own message (its ACK) when it came back as the reply to our send, else None."""
+    message = esb_body.get('message') if isinstance(esb_body, dict) else None
+    if isinstance(message, dict) and isinstance(message.get('messageHeader'), dict):
+        return esb_body
+    return None
+
+
+def apply_reply(result):
+    """Run MUSE's reply ACK through the inbound handler, once the paylist is SUBMITTED.
+    Returns the ACK status (RECEIVED / REJECTED) or None; never raises."""
+    if not result or not result.reply:
+        return None
+    try:
+        from tasaf_payment.muse_inbound import handle
+        handle(result.reply)
+        return str(((result.reply['message'].get('messageSummary') or {}).get('status')) or '') or None
+    except Exception as exc:  # noqa: BLE001 — the batch is sent; a reply problem must not undo that
+        logger.warning("Could not apply MUSE's reply ACK: %s", exc)
+        return None
 
 
 def _remember(paylist, user, result):
@@ -186,7 +209,8 @@ class MuseSender:
                 _close_log(entry, 'SUCCESS', http_status_code=status_code, response_body=response_text,
                            esb_request_id=str(response.get('request_id') or ''))
                 result = SendResult(SENT, 'Sent to MUSE', attempts=attempt,
-                                    request_id=response.get('request_id'))
+                                    request_id=response.get('request_id'),
+                                    reply=muse_reply(response.get('esb_body')))
                 break
             error = str(response.get('error') or f'HTTP {status_code}')
             if status_code in RETRYABLE_HTTP and attempt < max_attempts:

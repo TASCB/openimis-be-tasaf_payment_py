@@ -1130,6 +1130,7 @@ class PaylistService:
             if paylist.status == PaylistStatus.REJECTED:
                 _start_new_muse_attempt(paylist, self.user)
 
+            result = None
             if paylist.destination == PaymentDestination.MUSE:
                 from tasaf_payment.muse_sender import MuseSender
                 result = MuseSender(self.user).send(paylist, self.GOVESB_TOPIC_PAYMENT_SUBMIT)
@@ -1144,8 +1145,10 @@ class PaylistService:
             paylist.submitted_at = datetime.now(tz=timezone.utc)
             paylist.save(user=self.user)
 
-            logger.info("PaylistService.submit: paylist=%s (user=%s)", paylist_uuid, self.user.username)
-            return {'success': True, 'error': None}
+            from tasaf_payment.muse_sender import apply_reply
+            ack = apply_reply(result)
+            logger.info("PaylistService.submit: paylist=%s (user=%s) ack=%s", paylist_uuid, self.user.username, ack)
+            return {'success': True, 'error': None, 'muse_ack': ack}
 
         except Paylist.DoesNotExist:
             return {'success': False, 'error': _("tasaf_payment.error.paylist_not_found")}

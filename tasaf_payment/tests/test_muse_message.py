@@ -35,6 +35,8 @@ class MuseMessageBuildTest(SimpleTestCase):
         self.assertEqual(summary['noOfTransaction'], 2)
         self.assertEqual(body['message']['messageHeader']['createdAt'], '2026-01-08 18:18:06')
         self.assertNotIn('glList', body['message'])
+        self.assertEqual(summary['institutioncode'], summary['institutionCode'])
+        self.assertEqual(body['digitalSignature'], '')
 
     def test_ids_are_deterministic_and_fit_the_rules(self):
         paylist = SimpleNamespace(uuid=uuid.UUID('a0f744fc-42a6-4765-a505-24c14f39d353'),

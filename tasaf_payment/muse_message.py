@@ -102,6 +102,8 @@ def assemble(ids, settings, payees, now):
     stamp = now.strftime(DATE_FORMAT)
     summary = {
         'institutionCode': settings['institutionCode'],
+        # The spec's schema spells it institutioncode, its example institutionCode; send both.
+        'institutioncode': settings['institutionCode'],
         'referenceNo': ids['referenceNo'],
         'paymentDesc': settings['paymentDesc'],
         'currencyCode': settings['currencyCode'],
@@ -131,7 +133,8 @@ def assemble(ids, settings, payees, now):
             'amount': money(total) if len(gl) == 1 else None,
             'grantName': line.get('grantName', ''),
         } for line in gl]
-    return {'message': message}
+    # Required by the spec's schema; empty until MUSE says what to sign and with which key.
+    return {'message': message, 'digitalSignature': ''}
 
 
 def _representative_names(paylist):
@@ -373,5 +376,5 @@ def preview(paylist, sample_rows=20, max_problems=100):
         'problem_count': len(problems),
         'problem_summary': summarise(problems),
         'problems': problems[:max_problems],
-        'body': {'requestdata': {'message': shown}},
+        'body': {'requestdata': {'message': shown, 'digitalSignature': body.get('digitalSignature', '')}},
     }

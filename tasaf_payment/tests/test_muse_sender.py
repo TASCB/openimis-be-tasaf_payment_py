@@ -47,6 +47,10 @@ class MuseSenderTest(SimpleTestCase):
         self.assertEqual(producer.publish.call_args[0][1], BODY)
         self.assertEqual(self.logs, [['PENDING', 'SUCCESS']])
 
+    def test_muse_ack_in_the_reply_is_kept(self):
+        result, _ = self.send({**OK, 'esb_body': ACK})
+        self.assertEqual(result.reply, ACK)
+
     def test_transport_error_is_retried_then_sent(self):
         result, _ = self.send(ESBRequestError('timeout'), OK)
         self.assertEqual((result.outcome, result.attempts), (ms.SENT, 2))
@@ -95,3 +99,27 @@ class MuseSenderTest(SimpleTestCase):
         self.assertEqual((result.outcome, result.submitted), (ms.RECORDED, True))
         self.assertEqual(self.logs, [['NOT_SENT']])
         producer.publish.assert_not_called()
+
+
+ACK = {'message': {'messageHeader': {'msgId': 'PA02002002', 'messageType': 'ACK', 'sender': 'MUSE'},
+                   'messageSummary': {'orgMessageType': 'BULK_PAYMENT', 'orgMsgId': 'TMA0F744FC42A601',
+                                      'status': 'REJECTED', 'statusDesc': 'payeeName invalid'}},
+       'digitalSignature': ''}
+
+
+class MuseReplyTest(SimpleTestCase):
+    def test_govesb_only_reply_is_not_a_muse_message(self):
+        for esb_body in ({}, None, {'message': 'Received'}, {'received': True}):
+            self.assertIsNone(ms.muse_reply(esb_body))
+
+    def test_apply_reply_runs_the_inbound_handler(self):
+        with mock.patch('tasaf_payment.muse_inbound.handle') as handle:
+            status = ms.apply_reply(ms.SendResult(ms.SENT, reply=ACK))
+        handle.assert_called_once_with(ACK)
+        self.assertEqual(status, 'REJECTED')
+
+    def test_apply_reply_never_raises(self):
+        with mock.patch('tasaf_payment.muse_inbound.handle', side_effect=RuntimeError('db down')):
+            self.assertIsNone(ms.apply_reply(ms.SendResult(ms.SENT, reply=ACK)))
+        self.assertIsNone(ms.apply_reply(ms.SendResult(ms.SENT)))
+        self.assertIsNone(ms.apply_reply(None))
