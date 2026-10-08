@@ -12,6 +12,7 @@ from core.services import BaseService
 from core.signals import register_service_signal
 from core.services.utils import output_exception, check_authentication
 from tasks_management.services import UpdateCheckerLogicServiceMixin
+from tasaf_payment.events import emit_muse_event
 from tasaf_payment.validation import WithdrawalChargeValidation
 from tasaf_payment.models import (
     WithdrawalCharge,
@@ -1417,6 +1418,7 @@ def unapply_item(item, reason_code=None, reason_description=None, reference=None
         if reference:
             item.muse_reference = reference
         item.save(user=user)
+        emit_muse_event(item.paylist, 'unapplied', description=reason_description)
         _close_paylist_if_complete(item.paylist)
 
 
@@ -1449,6 +1451,7 @@ def apply_muse_batch_status(paylist, status, description=None, at=None, user=Non
     paylist.muse_status_at = at or datetime.now(tz=timezone.utc)
     paylist.save(user=user or _inbound_audit_user(paylist))
     logger.info("Paylist %s -> %s (%s)", paylist.uuid, status, description)
+    emit_muse_event(paylist, 'batch_status', status=status, description=description)
     return True
 
 
@@ -1465,6 +1468,7 @@ def _close_paylist_if_complete(paylist) -> bool:
     paylist.closed_at = datetime.now(tz=timezone.utc)
     paylist.save(user=_inbound_audit_user(paylist))
     logger.info("Paylist %s closed — all items terminal", paylist.uuid)
+    emit_muse_event(paylist, 'closed', status=PaylistStatus.CLOSED)
     _notify_payroll_if_all_closed(paylist)
     return True
 

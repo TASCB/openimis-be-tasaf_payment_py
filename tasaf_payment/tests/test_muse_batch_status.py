@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest import mock
 
 from django.test import SimpleTestCase
 
@@ -14,8 +15,19 @@ def paylist(status, **extra):
 
 
 class MuseBatchStatusTest(SimpleTestCase):
+    def setUp(self):
+        patcher = mock.patch('tasaf_payment.services.emit_muse_event')
+        self.emitted = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def apply(self, p, status):
         return apply_muse_batch_status(p, status, 'desc', user=object())
+
+    def test_emits_only_when_applied(self):
+        p = paylist(S.SUBMITTED)
+        self.apply(p, S.RECEIVED)
+        self.apply(p, S.RECEIVED)
+        self.emitted.assert_called_once_with(p, 'batch_status', status=S.RECEIVED, description='desc')
 
     def test_moves_forward_through_the_flow(self):
         p = paylist(S.SUBMITTED)
