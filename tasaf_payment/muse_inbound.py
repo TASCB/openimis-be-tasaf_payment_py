@@ -154,12 +154,12 @@ def _payment(message_type, header, details):
     from tasaf_payment.services import settle_item, unapply_item
 
     status = str(details.get('status') or '').strip().upper()
-    end_to_end_id = str(details.get('endToEndId') or '').strip()
+    end_to_end_id = str(details.get('endtoEndId') or details.get('endToEndId') or '').strip()
     if status not in PAYMENT_STATUSES:
         return None, end_to_end_id, _error(400, f"Unknown payment status: {details.get('status')!r}", 'FAILED')
     item = _find_item(end_to_end_id, str(details.get('orgMsgId') or '').strip()) if end_to_end_id else None
     if not item:
-        return None, end_to_end_id, _error(404, f"No MUSE payment with endToEndId {end_to_end_id!r}", 'REJECTED')
+        return None, end_to_end_id, _error(404, f"No MUSE payment with endtoEndId {end_to_end_id!r}", 'REJECTED')
 
     paylist = item.paylist
     refused = _payee_problem(details, item)

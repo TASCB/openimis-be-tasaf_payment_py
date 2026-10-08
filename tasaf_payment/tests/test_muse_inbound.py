@@ -126,3 +126,17 @@ class FindItemOrgMsgIdTest(SimpleTestCase):
         items, narrowed = self._run(True)
         self.assertTrue(narrowed.order_by.called)
         self.assertFalse(items.order_by.called)
+
+
+class PaymentIdSpellingTest(SimpleTestCase):
+    def _matched_id(self, details):
+        from unittest import mock
+        with mock.patch.object(mi, '_find_item', return_value=None) as find:
+            mi._payment('PAYMENT_STATUS', {'msgId': 'M1'}, {'status': 'SETTLED', **details})
+        return find.call_args[0][0]
+
+    def test_muse_spelling(self):
+        self.assertEqual(self._matched_id({'endtoEndId': 'PCT2607001'}), 'PCT2607001')
+
+    def test_older_spelling_still_matched(self):
+        self.assertEqual(self._matched_id({'endToEndId': 'PCT2607002'}), 'PCT2607002')

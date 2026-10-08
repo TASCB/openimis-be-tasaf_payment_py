@@ -88,7 +88,7 @@ class InboundPayeeCodeTest(SimpleTestCase):
             return mi._payee_problem(details, item)
 
     def test_absent_payee_code_is_ignored(self):
-        self.assertIsNone(self._check({'endToEndId': 'X'}, self._item('P3-020410104-82239997')))
+        self.assertIsNone(self._check({'endtoEndId': 'X'}, self._item('P3-020410104-82239997')))
 
     def test_matching_payee_code_passes(self):
         self.assertIsNone(self._check({'payeeCode': 'TSFBN09LZ8JU9gj'}, self._item('P3-020410104-82239997')))

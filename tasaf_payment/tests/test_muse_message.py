@@ -8,7 +8,7 @@ from tasaf_payment import muse_message as mm
 
 NOW = datetime(2026, 1, 8, 18, 18, 6)
 SETTINGS = {'institutionCode': '000M0048', 'payerAccount': '9921473423', 'subBudgetClass': 202,
-            'paymentDesc': 'Malipo kwa walengwa', 'currencyCode': 'TZS', 'isStp': 'False',
+            'paymentDesc': 'Malipo kwa walengwa', 'currencyCode': 'TZS', 'isSTP': 'False',
             'gl_accounts': []}
 IDS = {'msgId': 'TMA0F744FC42A601', 'referenceNo': 'TP260904-A0F744FC'}
 
@@ -17,7 +17,7 @@ def payee(**overrides):
     row = {'payeeCode': 'PA16E50291', 'payeeName': 'Issa Hashimu Milanzi',
            'payeeAccountNumber': '712105032650', 'payeeAccountName': 'Issa Hashimu Milanzi',
            'payeeBankName': 'NMB', 'payeeBankBic': 'NMIBTZTZ', 'amount': 29,
-           'endToEndId': 'PA16E50291', 'paymentChannel': 'BANK'}
+           'endtoEndId': 'PA16E50291', 'paymentChannel': 'BANK'}
     row.update(overrides)
     return row
 
@@ -28,11 +28,11 @@ def fields(problems):
 
 class MuseMessageBuildTest(SimpleTestCase):
     def test_valid_message_has_no_problems(self):
-        body = mm.assemble(IDS, SETTINGS, [payee(), payee(endToEndId='PA16E50292', amount=50)], NOW)
+        body = mm.assemble(IDS, SETTINGS, [payee(), payee(endtoEndId='PA16E50292', amount=50)], NOW)
         self.assertEqual(mm.check(body), [])
         summary = body['message']['paymentSummary']
         self.assertEqual(summary['totalAmount'], 79)
-        self.assertEqual(summary['noOfTransaction'], 2)
+        self.assertEqual(summary['noofTransaction'], 2)
         self.assertEqual(body['message']['messageHeader']['createdAt'], '2026-01-08 18:18:06')
         self.assertNotIn('glList', body['message'])
         self.assertEqual(summary['institutioncode'], summary['institutionCode'])
@@ -72,10 +72,10 @@ class MuseMessageBuildTest(SimpleTestCase):
 class MuseMessageCheckTest(SimpleTestCase):
     def test_hhid_payee_code_and_uuid_end_to_end_id_fail(self):
         body = mm.assemble(IDS, SETTINGS, [payee(payeeCode='P3-020109102-33067946',
-                                                  endToEndId='DEMO-FDE4BD03AF')], NOW)
+                                                  endtoEndId='DEMO-FDE4BD03AF')], NOW)
         problems = mm.check(body)
         self.assertEqual(fields(problems), {('payList', 'payeeCode', 'pattern'),
-                                            ('payList', 'endToEndId', 'pattern')})
+                                            ('payList', 'endtoEndId', 'pattern')})
         self.assertEqual(problems[0]['index'], 0)
 
     def test_missing_settings_and_bic(self):
@@ -99,18 +99,18 @@ class MuseMessageCheckTest(SimpleTestCase):
     def test_duplicate_end_to_end_id_and_totals(self):
         body = mm.assemble(IDS, SETTINGS, [payee(), payee()], NOW)
         body['message']['paymentSummary']['totalAmount'] = 1
-        body['message']['paymentSummary']['noOfTransaction'] = 5
+        body['message']['paymentSummary']['noofTransaction'] = 5
         found = fields(mm.check(body))
-        self.assertIn(('payList', 'endToEndId', 'duplicate'), found)
+        self.assertIn(('payList', 'endtoEndId', 'duplicate'), found)
         self.assertIn(('paymentSummary', 'totalAmount', 'mismatch'), found)
-        self.assertIn(('paymentSummary', 'noOfTransaction', 'mismatch'), found)
+        self.assertIn(('paymentSummary', 'noofTransaction', 'mismatch'), found)
 
     def test_empty_paylist(self):
         body = mm.assemble(IDS, SETTINGS, [], NOW)
         self.assertIn(('payList', 'payList', 'required'), fields(mm.check(body)))
 
     def test_summarise_groups_identical_failures(self):
-        rows = [payee(payeeCode='P3-020109102-3306794%d' % i, endToEndId='E%d' % i) for i in range(5)]
+        rows = [payee(payeeCode='P3-020109102-3306794%d' % i, endtoEndId='E%d' % i) for i in range(5)]
         summary = mm.summarise(mm.check(mm.assemble(IDS, SETTINGS, rows, NOW)))
         self.assertEqual(summary, [{'section': 'payList', 'field': 'payeeCode', 'rule': 'pattern',
                                     'message': 'letters and digits only, at most 15', 'count': 5}])

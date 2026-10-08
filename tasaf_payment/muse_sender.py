@@ -54,7 +54,7 @@ def _log(paylist, body, attempt, status, **fields):
             transaction_type='BULK_PAYMENT', direction='OUT', status=status,
             attempt_number=attempt, msg_id=header['msgId'],
             batch_reference=summary['referenceNo'], paylist_uuid=str(paylist.uuid),
-            item_count=summary['noOfTransaction'], amount=Decimal(str(summary['totalAmount'])), **fields)
+            item_count=summary['noofTransaction'], amount=Decimal(str(summary['totalAmount'])), **fields)
     except Exception as exc:  # noqa: BLE001 — the audit row must never stop a send
         logger.warning("Could not write MuseTransactionLog: %s", exc)
         return None
@@ -96,8 +96,8 @@ def _log_payees(body):
     """HHID next to payeeCode for every payee, for audit and reconciliation."""
     msg_id = body['message']['messageHeader']['msgId']
     for payee in body['message'].get('payList') or []:
-        logger.info("MUSE payee msgId=%s endToEndId=%s hhid=%s payeeCode=%s", msg_id,
-                    payee.get('endToEndId'), muse_message.hhid_of(payee.get('payeeCode')),
+        logger.info("MUSE payee msgId=%s endtoEndId=%s hhid=%s payeeCode=%s", msg_id,
+                    payee.get('endtoEndId'), muse_message.hhid_of(payee.get('payeeCode')),
                     payee.get('payeeCode'))
 
 

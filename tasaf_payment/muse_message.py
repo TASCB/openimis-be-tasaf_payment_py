@@ -20,9 +20,9 @@ MAX_AMOUNT = Decimal('999999999999999.99')
 
 HEADER_REQUIRED = ('sender', 'receiver', 'msgId', 'messageType', 'paymentType', 'createdAt')
 SUMMARY_REQUIRED = ('institutionCode', 'referenceNo', 'paymentDesc', 'currencyCode', 'applyDate',
-                    'totalAmount', 'noOfTransaction', 'isStp', 'subBudgetClass', 'payerAccount')
+                    'totalAmount', 'noofTransaction', 'isSTP', 'subBudgetClass', 'payerAccount')
 PAYEE_REQUIRED = ('payeeCode', 'payeeName', 'payeeAccountNumber', 'payeeAccountName',
-                  'payeeBankName', 'payeeBankBic', 'amount', 'endToEndId', 'paymentChannel')
+                  'payeeBankName', 'payeeBankBic', 'amount', 'endtoEndId', 'paymentChannel')
 
 NAME_RE = re.compile(r"^[0-9a-zA-Z.,/\-' ]{1,150}$")
 PATTERNS = {
@@ -32,7 +32,7 @@ PATTERNS = {
     'payeeAccountName': (NAME_RE, 'at most 150 letters, digits, spaces and . , / - \''),
     'payeeAccountNumber': (re.compile(r'^[0-9a-zA-Z]{6,35}$'), '6 to 35 letters and digits'),
     'payeeBankBic': (BIC_RE, 'Tanzanian BIC, e.g. NMIBTZTZ'),
-    'endToEndId': (re.compile(r'^[0-9A-Za-z]{1,16}$'), 'letters and digits only, at most 16'),
+    'endtoEndId': (re.compile(r'^[0-9A-Za-z]{1,16}$'), 'letters and digits only, at most 16'),
 }
 
 
@@ -84,14 +84,14 @@ def money(value):
 def settings_values(settings):
     if settings is None:
         return {'institutionCode': '', 'payerAccount': '', 'subBudgetClass': None,
-                'paymentDesc': '', 'currencyCode': CURRENCY, 'isStp': 'False', 'gl_accounts': []}
+                'paymentDesc': '', 'currencyCode': CURRENCY, 'isSTP': 'False', 'gl_accounts': []}
     return {
         'institutionCode': settings.institution_code,
         'payerAccount': settings.payer_account,
         'subBudgetClass': settings.sub_budget_class,
         'paymentDesc': settings.payment_desc,
         'currencyCode': CURRENCY,
-        'isStp': 'True' if settings.is_stp else 'False',
+        'isSTP': 'True' if settings.is_stp else 'False',
         'gl_accounts': settings.gl_accounts or [],
     }
 
@@ -109,8 +109,8 @@ def assemble(ids, settings, payees, now):
         'currencyCode': settings['currencyCode'],
         'applyDate': stamp,
         'totalAmount': money(total),
-        'noOfTransaction': len(payees),
-        'isStp': settings['isStp'],
+        'noofTransaction': len(payees),
+        'isSTP': settings['isSTP'],
         'subBudgetClass': settings['subBudgetClass'],
         'payerAccount': settings['payerAccount'],
     }
@@ -192,7 +192,7 @@ def payee_rows(paylist):
             'payeeBankName': profile.bank_name if profile else '',
             'payeeBankBic': profile.bic if profile else '',
             'amount': money(item.amount),
-            'endToEndId': benefit.code if benefit else '',
+            'endtoEndId': benefit.code if benefit else '',
             'paymentChannel': ((profile.fsp_type if profile else '') or account.fsp_type or '').upper(),
         })
     return rows
@@ -212,7 +212,7 @@ def _problem(section, field, rule, message, value=None, index=None, payee=None):
     out = {'section': section, 'field': field, 'rule': rule, 'message': message, 'value': value}
     if index is not None:
         out['index'] = index
-        out['endToEndId'] = (payee or {}).get('endToEndId')
+        out['endtoEndId'] = (payee or {}).get('endtoEndId')
         out['payeeCode'] = (payee or {}).get('payeeCode')
         out['hhid'] = hhid_of(out['payeeCode'])
     return out
@@ -264,16 +264,16 @@ def check(body):
     if not _missing(currency) and not PATTERNS['currencyCode'][0].match(str(currency)):
         problems.append(_problem('paymentSummary', 'currencyCode', 'pattern',
                                  PATTERNS['currencyCode'][1], currency))
-    if not isinstance(summary.get('isStp'), str):
-        problems.append(_problem('paymentSummary', 'isStp', 'type', 'Must be a string',
-                                 summary.get('isStp')))
+    if not isinstance(summary.get('isSTP'), str):
+        problems.append(_problem('paymentSummary', 'isSTP', 'type', 'Must be a string',
+                                 summary.get('isSTP')))
 
     if not payees:
         problems.append(_problem('payList', 'payList', 'required', 'The paylist has no payments'))
-    if summary.get('noOfTransaction') != len(payees):
-        problems.append(_problem('paymentSummary', 'noOfTransaction', 'mismatch',
+    if summary.get('noofTransaction') != len(payees):
+        problems.append(_problem('paymentSummary', 'noofTransaction', 'mismatch',
                                  f'Does not match the {len(payees)} payments in payList',
-                                 summary.get('noOfTransaction')))
+                                 summary.get('noofTransaction')))
     try:
         total = sum((Decimal(str(p.get('amount'))) for p in payees), Decimal('0'))
         if Decimal(str(summary.get('totalAmount'))) != total:
@@ -283,7 +283,7 @@ def check(body):
     except (InvalidOperation, TypeError, ValueError):
         pass
 
-    seen = Counter(p.get('endToEndId') for p in payees if not _missing(p.get('endToEndId')))
+    seen = Counter(p.get('endtoEndId') for p in payees if not _missing(p.get('endtoEndId')))
     for index, payee in enumerate(payees):
         for field in PAYEE_REQUIRED:
             value = payee.get(field)
@@ -305,10 +305,10 @@ def check(body):
         if not _missing(channel) and channel not in CHANNELS:
             problems.append(_problem('payList', 'paymentChannel', 'choice', 'BANK or MOBILE',
                                      channel, index, payee))
-        if seen.get(payee.get('endToEndId'), 0) > 1:
-            problems.append(_problem('payList', 'endToEndId', 'duplicate',
+        if seen.get(payee.get('endtoEndId'), 0) > 1:
+            problems.append(_problem('payList', 'endtoEndId', 'duplicate',
                                      'Used by more than one payment in this batch',
-                                     payee.get('endToEndId'), index, payee))
+                                     payee.get('endtoEndId'), index, payee))
 
     for index, line in enumerate(message.get('glList') or []):
         if _missing(line.get('glaccount')):

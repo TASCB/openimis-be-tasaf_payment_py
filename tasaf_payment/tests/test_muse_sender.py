@@ -9,7 +9,7 @@ from coremis_app_integration.esb_client.exceptions import (
 from tasaf_payment import muse_sender as ms
 
 BODY = {'message': {'messageHeader': {'msgId': 'TMA0F744FC42A601', 'createdAt': '2026-09-28 10:00:00'},
-                    'paymentSummary': {'referenceNo': 'TP260904-A0F744FC', 'noOfTransaction': 2,
+                    'paymentSummary': {'referenceNo': 'TP260904-A0F744FC', 'noofTransaction': 2,
                                        'totalAmount': 79}}}
 OK = {'published': True, 'ok': True, 'status_code': 200, 'request_id': 'R1', 'esb_body': {}}
 
