@@ -13,7 +13,7 @@ class MuseInboundPureTest(SimpleTestCase):
     def test_ack_follows_muses_shape(self):
         ack = mi.ack_message('PAYMENT_STATUS', 'SP84E202745958')['message']
         self.assertEqual({k: ack['messageHeader'][k] for k in ('sender', 'receiver', 'messageType')},
-                         {'sender': 'TASAF MIS', 'receiver': 'MUSE', 'messageType': 'ACK'})
+                         {'sender': 'TASAFMIS', 'receiver': 'MUSE', 'messageType': 'ACK'})
         self.assertRegex(ack['messageHeader']['msgId'], r'^TA[0-9A-F]{14}$')
         self.assertEqual(ack['messageSummary'], {'orgMessageType': 'PAYMENT_STATUS', 'orgMsgId': 'SP84E202745958',
                                                  'status': 'RECEIVED', 'statusDesc': 'Received Successfully'})

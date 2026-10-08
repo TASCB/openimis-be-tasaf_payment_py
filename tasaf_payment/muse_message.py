@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from tasaf_payment.muse_setup import BIC_RE, CURRENCY
 from tasaf_payment.payee_code import PayeeCodeError, decode_payee_code, encode_hhid
 
-SENDER = 'TASAF MIS'
+SENDER = 'TASAFMIS'
 RECEIVER = 'MUSE'
 MESSAGE_TYPE = 'BULK_PAYMENT'
 PAYMENT_TYPE = 'PAYMENT'
