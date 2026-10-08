@@ -30,6 +30,29 @@ def bank_reference(text):
     return match.group(1) if match else None
 
 
+_FEEDBACK_RE = re.compile(r'"status"\s*:\s*"([^"]*)"(?:.*?"statusDesc"\s*:\s*"([^"]*)")?', re.DOTALL)
+
+
+def muse_feedback(body):
+    from tasaf_payment.muse_message import SENDER
+    try:
+        message = (json.loads(body) or {}).get('message')
+    except (TypeError, ValueError, AttributeError):
+        if not body or '"message' not in body or f'"sender": "{SENDER}"' in body:
+            return None
+        match = _FEEDBACK_RE.search(body)
+        return ' — '.join(p for p in match.groups() if p) if match else None
+    if not isinstance(message, dict) or not isinstance(message.get('messageHeader'), dict):
+        return None
+    if message['messageHeader'].get('sender') == SENDER:
+        return None
+    verdict = message.get('messageSummary') or message.get('messageDetails')
+    if not isinstance(verdict, dict):
+        return None
+    parts = [str(verdict.get(k) or '').strip() for k in ('status', 'statusDesc')]
+    return ' — '.join(p for p in parts if p) or None
+
+
 def ack_message(org_message_type, org_msg_id, desc='Received Successfully', status='RECEIVED'):
     from tasaf_payment.muse_message import DATE_FORMAT, RECEIVER, SENDER
     return {'message': {
@@ -195,9 +218,13 @@ def handle(payload):
 
     message_type = str(header.get('messageType') or '').strip().upper()
     paylist, end_to_end_id = None, ''
+    details = message.get('messageDetails')
     try:
-        if isinstance(message.get('messageDetails'), dict):
-            paylist, end_to_end_id, reply = _payment('PAYMENT_STATUS', header, message['messageDetails'])
+        if isinstance(details, dict) and not (details.get('endtoEndId') or details.get('endToEndId')):
+            paylist, reply = _batch('RESPONSE', header, details)
+            message_type = 'RESPONSE'
+        elif isinstance(details, dict):
+            paylist, end_to_end_id, reply = _payment('PAYMENT_STATUS', header, details)
             message_type = 'PAYMENT_STATUS'
         elif isinstance(message.get('messageSummary'), dict):
             paylist, reply = _batch(message_type if message_type in ('ACK', 'RESPONSE') else 'RESPONSE',

@@ -45,6 +45,37 @@ class MuseInboundReplyTest(SimpleTestCase):
                          {'orgMessageType': 'RESPONSE', 'orgMsgId': 'MU1', 'status': 'REJECTED',
                           'statusDesc': "Unknown batch status: 'LOST'"})
 
+    def test_batch_status_in_message_details_goes_to_the_batch(self):
+        from unittest import mock
+        details = {'statusDesc': 'Accepted Successfully in MUSE', 'orgMsgId': 'TM75BE9E7575C401',
+                   'orgReferenceNo': 'TP261008-75BE9E75', 'endToEndId': None, 'status': 'Accepted'}
+        with mock.patch.object(mi, '_batch', return_value=(None, mi.Reply(200, {'ok': 1}))) as batch, \
+                mock.patch.object(mi, '_payment') as payment, mock.patch.object(mi, '_log'):
+            self.assertEqual(mi.handle({'message': {
+                'messageHeader': {'msgId': 'MU1', 'messageType': 'BULK_PAYMENT_STATUS'},
+                'messageDetails': details}}), (True, {'ok': 1}))
+        batch.assert_called_once_with('RESPONSE', mock.ANY, details)
+        payment.assert_not_called()
+
+    def test_feedback_reads_musess_verdict_from_summary_or_details(self):
+        import json
+        summary = {'message': {'messageHeader': {'sender': 'MUSE'},
+                               'messageSummary': {'status': 'REJECTED', 'statusDesc': 'Payee Bank BIC does not exist!'}}}
+        details = {'message': {'messageHeader': {'sender': 'MUSE'},
+                               'messageDetails': {'status': 'Accepted', 'statusDesc': 'Accepted Successfully in MUSE',
+                                                  'endToEndId': None}}}
+        self.assertEqual(mi.muse_feedback(json.dumps(summary)), 'REJECTED — Payee Bank BIC does not exist!')
+        self.assertEqual(mi.muse_feedback(json.dumps(details)), 'Accepted — Accepted Successfully in MUSE')
+        self.assertEqual(mi.muse_feedback(json.dumps(details)[:-20]), 'Accepted — Accepted Successfully in MUSE')
+
+    def test_feedback_ignores_our_own_ack_and_non_muse_bodies(self):
+        import json
+        ours = mi.ack_message('RESPONSE', 'MU1')
+        self.assertIsNone(mi.muse_feedback(json.dumps(ours)))
+        self.assertIsNone(mi.muse_feedback(json.dumps(ours)[:-10]))
+        for body in ('{"demo": true}', '', None, 'HTTP 502 Bad Gateway'):
+            self.assertIsNone(mi.muse_feedback(body))
+
     def test_message_without_summary_or_details_is_rejected(self):
         ok, body = mi.handle(self._message())
         self.assertTrue(ok)

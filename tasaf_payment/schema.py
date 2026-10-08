@@ -375,6 +375,7 @@ class Query(graphene.ObjectType):
             from muse_payment_adaptor.models import MuseTransactionLog
         except ImportError:
             return []
+        from tasaf_payment.muse_inbound import muse_feedback
         paylist = Paylist.objects.filter(uuid=paylist_uuid).first()
         if not paylist:
             return []
@@ -389,6 +390,7 @@ class Query(graphene.ObjectType):
             http_status_code=r.http_status_code, item_count=r.item_count,
             amount=float(r.amount) if r.amount is not None else None, benefit_code=r.benefit_code,
             error_message=r.error_message, response_body=(r.response_body or '')[:2000],
+            muse_feedback=muse_feedback(r.response_body),
         ) for r in rows]
 
     def resolve_return_feedback(self, info, **kwargs):

@@ -344,6 +344,7 @@ class MuseLogEntryGQLType(graphene.ObjectType):
     benefit_code = graphene.String()
     error_message = graphene.String()
     response_body = graphene.String()
+    muse_feedback = graphene.String(description="MUSE's status and statusDesc read from the body")
 
 
 class MuseReadinessGQLType(graphene.ObjectType):
