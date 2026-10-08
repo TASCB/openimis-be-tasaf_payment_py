@@ -214,6 +214,12 @@ class PaylistGQLType(DjangoObjectType):
 
 class PaylistItemGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
+    payee_code = graphene.String(description="The household's HHID as MUSE knows it")
+
+    def resolve_payee_code(self, info):
+        from tasaf_payment.muse_message import payee_code
+        beneficiary = getattr(self.payment_account, 'group_beneficiary', None)
+        return payee_code(getattr(beneficiary, 'group', None)) or None
 
     class Meta:
         model = PaylistItem

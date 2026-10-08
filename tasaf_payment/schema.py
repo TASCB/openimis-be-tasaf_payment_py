@@ -111,6 +111,33 @@ class EpaymentSummaryByFspGQLType(graphene.ObjectType):
     totals = graphene.Field(EpaymentFspRowGQLType)
 
 
+def _fsp_code_q(fsp_code, paylist_uuid=None):
+    from tasaf_payment.charges import ChargeError, normalise_fsp, resolve_fsp_code
+    accounts = PaymentAccount.objects.filter(is_deleted=False)
+    if paylist_uuid:
+        accounts = accounts.filter(paylist_items__paylist__uuid=paylist_uuid)
+    code, names = normalise_fsp(fsp_code), []
+    for name in accounts.values_list('fsp_name', flat=True).distinct():
+        try:
+            resolved = resolve_fsp_code(name)
+        except ChargeError:
+            continue
+        if resolved == code:
+            names.append(name)
+    return Q(payment_account__fsp_name__in=names)
+
+
+def _payee_name_q(text):
+    from django.db.models import Exists, OuterRef
+    from individual.models import GroupIndividual
+    match = Q()
+    for word in text.split():
+        match &= Q(individual__first_name__icontains=word) | Q(individual__last_name__icontains=word)
+    return Q(Exists(GroupIndividual.objects.filter(
+        match, group_id=OuterRef('payment_account__group_beneficiary__group_id'),
+        is_deleted=False, recipient_type='PRIMARY')))
+
+
 def paylist_item_filters(**kwargs):
     filters = []
     if kwargs.get("paylist_uuid"):
@@ -123,10 +150,21 @@ def paylist_item_filters(**kwargs):
         filters.append(Q(payment_account__account_number__icontains=kwargs["account_number"].strip()))
     if kwargs.get("fsp_name"):
         filters.append(Q(payment_account__fsp_name__icontains=kwargs["fsp_name"].strip()))
+    if kwargs.get("fsp_code"):
+        filters.append(_fsp_code_q(kwargs["fsp_code"], kwargs.get("paylist_uuid")))
+    if kwargs.get("payee_name"):
+        filters.append(_payee_name_q(kwargs["payee_name"]))
     if kwargs.get("benefit_code"):
         filters.append(Q(benefit_consumption__code__icontains=kwargs["benefit_code"].strip()))
     if kwargs.get("hhid"):
         filters.append(Q(payment_account__group_beneficiary__group__code__icontains=kwargs["hhid"].strip()))
+    if kwargs.get("payee_code"):
+        from tasaf_payment.payee_code import PayeeCodeError, decode_payee_code
+        try:
+            filters.append(Q(payment_account__group_beneficiary__group__code=decode_payee_code(
+                kwargs["payee_code"].strip())))
+        except PayeeCodeError:
+            filters.append(Q(pk__in=[]))
     if kwargs.get("location_id"):
         from tasaf_payment.services import location_descendants_q
         filters.append(location_descendants_q(
@@ -256,6 +294,9 @@ class Query(graphene.ObjectType):
         fsp_name=graphene.String(),
         benefit_code=graphene.String(),
         hhid=graphene.String(),
+        payee_code=graphene.String(),
+        payee_name=graphene.String(),
+        fsp_code=graphene.String(),
         location_id=graphene.Int(),
         # status, muse_reference handled by filter_fields
     )
@@ -265,12 +306,18 @@ class Query(graphene.ObjectType):
         fsp_name=graphene.String(),
         benefit_code=graphene.String(),
         hhid=graphene.String(),
+        payee_code=graphene.String(),
+        payee_name=graphene.String(),
+        fsp_code=graphene.String(),
         location_id=graphene.Int(),
         status=graphene.String(),
         muse_reference=graphene.String(),
         description="The paylist's items matching the filters as CSV; returns the export name for "
                     "core's /api/core/fetch_export.",
     )
+    paylist_fsp_options = graphene.List(
+        FspProviderGQLType, paylist_uuid=graphene.UUID(required=True),
+        description="The Charges-list FSPs present in one paylist, for its FSP filter.")
     paylist_muse_log = graphene.List(
         MuseLogEntryGQLType,
         paylist_uuid=graphene.UUID(required=True),
@@ -368,6 +415,11 @@ class Query(graphene.ObjectType):
             kwargs["muse_reference__icontains"] = kwargs.pop("muse_reference")
         items = PaylistItem.objects.filter(*paylist_item_filters(**kwargs), is_deleted=False)
         return export_paylist_items(info.context.user, items)
+
+    def resolve_paylist_fsp_options(self, info, paylist_uuid):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
+        from tasaf_payment.muse_setup import paylist_fsps
+        return [FspProviderGQLType(**row) for row in paylist_fsps(paylist_uuid)]
 
     def resolve_paylist_muse_log(self, info, paylist_uuid, limit=None):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)

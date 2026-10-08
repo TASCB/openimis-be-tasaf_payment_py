@@ -208,7 +208,7 @@ def export_epayment_summary_by_fsp(user, **filters):
 
 
 PAYLIST_ITEM_EXPORT_COLUMNS = [
-    'HHID', 'Payee', 'Payment Ref', 'Account Number', 'Account Name', 'FSP', 'FSP Type',
+    'HHID', 'Payee Code', 'Payee', 'Payment Ref', 'Account Number', 'Account Name', 'FSP', 'FSP Type',
     'Region', 'District', 'Ward', 'Village',
     'Gross Amount', 'Net Amount', 'Charge', 'Status', 'MUSE Reference', 'Return Reason', 'Settled At',
 ]
@@ -229,6 +229,7 @@ def export_paylist_items(user, items):
     from pandas import DataFrame
     from core.models import ExportableQueryModel
     from individual.models import GroupIndividual
+    from tasaf_payment.muse_message import payee_code
 
     items = list(items.select_related(
         'benefit_consumption', 'payment_account__group_beneficiary__group__location__parent__parent__parent',
@@ -250,6 +251,7 @@ def export_paylist_items(user, items):
         group = account.group_beneficiary.group if account.group_beneficiary_id else None
         records.append(dict(zip(PAYLIST_ITEM_EXPORT_COLUMNS, [
             group.code if group else '',
+            payee_code(group),
             names.get(group.id, '') if group else '',
             item.benefit_consumption.code if item.benefit_consumption_id else '',
             account.account_number, account.account_name or '', account.fsp_name, account.fsp_type,

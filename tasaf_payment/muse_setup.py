@@ -77,6 +77,34 @@ def provider_list():
 
 
 
+def paylist_fsps(paylist_uuid):
+    from tasaf_payment.charges import ChargeError, normalise_fsp, resolve_fsp_code
+    from tasaf_payment.models import FspProfile, PaylistItem
+
+    usage = (PaylistItem.objects.filter(paylist__uuid=paylist_uuid, is_deleted=False)
+             .values('payment_account__fsp_name').annotate(n=Count('id')))
+    rows = {}
+    for u in usage:
+        name = u['payment_account__fsp_name']
+        if not name:
+            continue
+        try:
+            code = resolve_fsp_code(name)
+        except ChargeError:
+            code = normalise_fsp(name)
+        row = rows.setdefault(code, {'fsp_code': code, 'names': {}, 'accounts': 0})
+        row['names'][name] = u['n']
+        row['accounts'] += u['n']
+    profiles = {p.fsp_code: p for p in FspProfile.objects.filter(is_deleted=False, fsp_code__in=rows)}
+    out = []
+    for code, row in rows.items():
+        p = profiles.get(code)
+        label = (p.bank_name if p and p.bank_name else max(row['names'], key=row['names'].get))
+        out.append({'fsp_code': code, 'name': label, 'names': sorted(row['names']),
+                    'accounts': row['accounts']})
+    return sorted(out, key=lambda r: r['name'].upper())
+
+
 def normalise_profile(fsp_code, bank_name, fsp_type, bic):
     from tasaf_payment.charges import normalise_fsp
 

@@ -104,3 +104,20 @@ class InboundPayeeCodeTest(SimpleTestCase):
     def test_unknown_household_refused(self):
         reply = self._check({'payeeCode': 'TSFBN09LZ8JU9gj'}, self._item('P3-020410104-82239997'), exists=False)
         self.assertEqual(reply.http, 404)
+
+
+class PaylistItemPayeeCodeFilterTest(SimpleTestCase):
+    def test_filter_decodes_to_the_exact_hhid(self):
+        from django.db.models import Q
+        from tasaf_payment.schema import paylist_item_filters
+        code = encode_hhid('P3-123456789-12345678')
+        self.assertEqual(paylist_item_filters(payee_code=f' {code} '),
+                         [Q(payment_account__group_beneficiary__group__code='P3-123456789-12345678')])
+
+    def test_partial_or_recased_code_matches_nothing_or_another_household(self):
+        from django.db.models import Q
+        from tasaf_payment.schema import paylist_item_filters
+        code = encode_hhid('P3-123456789-12345678')
+        self.assertEqual(paylist_item_filters(payee_code=code[:-1]), [Q(pk__in=[])])
+        self.assertNotEqual(paylist_item_filters(payee_code=code.upper()),
+                            paylist_item_filters(payee_code=code))
