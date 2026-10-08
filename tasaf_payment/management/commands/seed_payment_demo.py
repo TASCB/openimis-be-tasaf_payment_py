@@ -216,7 +216,7 @@ class Command(BaseCommand):
                 benefit = _create(
                     BenefitConsumption, user,
                     individual_id=self._an_individual(beneficiary),
-                    code=f"DEMO-{uuid.uuid4().hex[:10].upper()}",
+                    code=f"DEMO{uuid.uuid4().hex[:10].upper()}",
                     amount=net,
                     type='Cash Transfer',
                     date_due=(now - timedelta(days=25)).date(),
