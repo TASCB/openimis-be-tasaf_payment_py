@@ -694,6 +694,7 @@ class PaylistService:
         batch_type: str,
         payment_cycle_id=None,  # UUID — PaymentCycle PK
         destination: str = None,  # MUSE / GEPG — defaults to MUSE
+        fsp_code: str = None,
     ) -> dict:
         """
         Generate one or more Paylists from verified + pre-audited accounts.
@@ -748,6 +749,7 @@ class PaylistService:
                         batch_type,
                         str(payment_cycle_id) if payment_cycle_id else None,
                         destination,
+                        fsp_code,
                     )
                     logger.info(
                         "PaylistService.generate: queued async (benefits=%d > threshold=%d, payroll=%s)",
@@ -764,7 +766,7 @@ class PaylistService:
                         exc_info=True,
                     )
 
-            return self._generate_sync(payroll_id, batch_type, payment_cycle_id, destination)
+            return self._generate_sync(payroll_id, batch_type, payment_cycle_id, destination, fsp_code)
 
         except Exception as exc:
             logger.exception("PaylistService.generate failed")
@@ -776,6 +778,7 @@ class PaylistService:
         batch_type: str,
         payment_cycle_id=None,
         destination: str = None,
+        fsp_code: str = None,
     ) -> dict:
         """
         Build the Paylists + items (the heavy worker behind :meth:`generate`).
@@ -851,7 +854,7 @@ class PaylistService:
                     return {'success': False, 'error': _("tasaf_payment.error.benefits_already_on_paylists")}
 
                 for fsp_type, stored_type in fsp_targets:
-                    pairs = payable_pairs(benefits, fsp_type)
+                    pairs = only_fsp(payable_pairs(benefits, fsp_type), fsp_code)
                     if not pairs:
                         continue
 
@@ -922,12 +925,12 @@ class PaylistService:
 
     @check_authentication
 
-    def preview_generation(self, payroll_id, batch_type, destination=None):
+    def preview_generation(self, payroll_id, batch_type, destination=None, fsp_code=None):
         """What generating this batch would do, without writing anything: who is included (count,
         amounts, per FSP), who is left out and why, and what will cause trouble later."""
         from payroll.models import BenefitConsumption, BenefitConsumptionStatus, PayrollBenefitConsumption
         from tasaf_payment.apps import TasafPaymentConfig
-        from tasaf_payment.charges import ChargeError, gross_up, resolve_fsp_code
+        from tasaf_payment.charges import ChargeError, gross_up
         from tasaf_payment.models import FspProfile
 
         error = self._payroll_status_error(payroll_id)
@@ -945,28 +948,27 @@ class PaylistService:
         )
         accepted_count = accepted.count()
         benefits = list(accepted.exclude(id__in=benefits_on_a_paylist()))
-        pairs = payable_pairs(benefits, fsp_type)
-        paired = {b.id for b, _ in pairs}
+        all_pairs = payable_pairs(benefits, fsp_type)
+        codes = {}
+        fsp_codes = sorted({fsp_code_of(a.fsp_name, codes) for _, a in all_pairs})
+        pairs = only_fsp(all_pairs, fsp_code, codes)
+        paired = {b.id for b, _ in all_pairs}
         missing = [b for b in benefits if b.id not in paired]
         reasons = exclusion_reasons([b.individual_id for b in missing], fsp_type)
 
-        excluded = {'ALREADY_ON_PAYLIST': accepted_count - len(benefits)}
+        excluded = {'ALREADY_ON_PAYLIST': accepted_count - len(benefits),
+                    'OTHER_FSP': len(all_pairs) - len(pairs)}
         for b in missing:
             reason = reasons.get(b.individual_id, 'NO_ACCOUNT')
             excluded[reason] = excluded.get(reason, 0) + 1
 
         charges_on = bool(TasafPaymentConfig.apply_withdrawal_charges)
         profiles = {p.fsp_code: p for p in FspProfile.objects.filter(is_deleted=False)}
-        per_fsp, codes, no_band = {}, {}, {}
+        per_fsp, no_band = {}, {}
         net_total = gross_total = 0
         for benefit, account in pairs:
             name = account.fsp_name
-            if name not in codes:
-                try:
-                    codes[name] = resolve_fsp_code(name)
-                except ChargeError:
-                    codes[name] = name or '—'
-            code = codes[name]
+            code = fsp_code_of(name, codes)
             net, gross = benefit.amount or 0, benefit.amount or 0
             if charges_on:
                 try:
@@ -998,6 +1000,7 @@ class PaylistService:
             'charges_applied': charges_on,
             'per_fsp': sorted(({**r, 'gross': float(r['gross'])} for r in per_fsp.values()),
                               key=lambda r: -r['payments']),
+            'fsp_codes': fsp_codes,
             'excluded': {k: v for k, v in excluded.items() if v},
             'warnings': warnings,
         }
@@ -1229,6 +1232,23 @@ def payable_pairs(benefits, fsp_type):
     pairs = [(b, account_map[b.individual_id]) for b in benefits if b.individual_id in account_map]
     pairs.sort(key=lambda p: ((p[1].account_number or ''), str(p[0].id)))
     return pairs
+
+
+def fsp_code_of(fsp_name, cache):
+    from tasaf_payment.charges import ChargeError, resolve_fsp_code
+    if fsp_name not in cache:
+        try:
+            cache[fsp_name] = resolve_fsp_code(fsp_name)
+        except ChargeError:
+            cache[fsp_name] = fsp_name or '—'
+    return cache[fsp_name]
+
+
+def only_fsp(pairs, fsp_code, cache=None):
+    if not fsp_code:
+        return pairs
+    cache = {} if cache is None else cache
+    return [(b, a) for b, a in pairs if fsp_code_of(a.fsp_name, cache) == fsp_code]
 
 
 def exclusion_reasons(individual_ids, fsp_type):

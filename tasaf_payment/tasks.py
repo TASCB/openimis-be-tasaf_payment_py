@@ -248,7 +248,7 @@ def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_ind
     name='tasaf_payment.generate_paylists_task',
 )
 def generate_paylists_task(self, user_id, payroll_id, batch_type,
-                           payment_cycle_id=None, destination=None):
+                           payment_cycle_id=None, destination=None, fsp_code=None):
     """
     Build a payroll's Paylists (and bulk-create their items) off the request
     thread. Used for large payrolls (see PaylistService.generate dispatcher).
@@ -262,7 +262,7 @@ def generate_paylists_task(self, user_id, payroll_id, batch_type,
 
         user = User.objects.get(id=user_id)
         result = PaylistService(user)._generate_sync(
-            payroll_id, batch_type, payment_cycle_id, destination,
+            payroll_id, batch_type, payment_cycle_id, destination, fsp_code,
         )
         logger.info(
             "generate_paylists_task: payroll=%s → %s paylist(s), %s item(s)",

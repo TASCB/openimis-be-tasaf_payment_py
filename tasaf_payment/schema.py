@@ -152,6 +152,7 @@ class Query(graphene.ObjectType):
         payroll_id=graphene.UUID(required=True),
         batch_type=graphene.String(required=True),
         destination=graphene.String(),
+        fsp_code=graphene.String(),
         description="What generating this batch would include, leave out and warn about. Read-only.",
     )
 
@@ -606,11 +607,12 @@ class Query(graphene.ObjectType):
                 .filter(is_deleted=False, fsp_code=normalise_fsp(fsp_code))
                 .order_by('lower_amount'))
 
-    def resolve_paylist_generation_preview(self, info, payroll_id, batch_type, destination=None, **kwargs):
+    def resolve_paylist_generation_preview(self, info, payroll_id, batch_type, destination=None, fsp_code=None,
+                                           **kwargs):
         from tasaf_payment.services import PaylistService
 
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_generate_paylist_perms)
-        return PaylistService(info.context.user).preview_generation(payroll_id, batch_type, destination)
+        return PaylistService(info.context.user).preview_generation(payroll_id, batch_type, destination, fsp_code or None)
 
     def resolve_paylist_muse_preview(self, info, paylist_uuid, sample_rows=20, **kwargs):
         from tasaf_payment.muse_message import preview
