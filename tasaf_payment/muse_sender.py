@@ -54,7 +54,8 @@ def _log(paylist, body, attempt, status, **fields):
             transaction_type='BULK_PAYMENT', direction='OUT', status=status,
             attempt_number=attempt, msg_id=header['msgId'],
             batch_reference=summary['referenceNo'], paylist_uuid=str(paylist.uuid),
-            item_count=summary['noofTransaction'], amount=Decimal(str(summary['totalAmount'])), **fields)
+            item_count=summary['noofTransaction'], amount=Decimal(str(summary['totalAmount'])),
+            request_body=json.dumps(body, default=str) if attempt == 1 else None, **fields)
     except Exception as exc:  # noqa: BLE001 — the audit row must never stop a send
         logger.warning("Could not write MuseTransactionLog: %s", exc)
         return None

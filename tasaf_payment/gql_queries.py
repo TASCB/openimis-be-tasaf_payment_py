@@ -127,6 +127,9 @@ class PaylistGQLType(DjangoObjectType):
     settled_count = graphene.Int()
     failed_count = graphene.Int()
     pending_count = graphene.Int()
+    withdrawn_count = graphene.Int()
+    withdrawn_hold = graphene.JSONString()
+    muse_rejections = graphene.JSONString()
     settled_amount = graphene.Float()
     outcome = graphene.String()
     summary = graphene.JSONString()
@@ -181,6 +184,26 @@ class PaylistGQLType(DjangoObjectType):
     def resolve_pending_count(root, info):
         return root.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING).count()
 
+    def resolve_withdrawn_count(root, info):
+        return root.items.filter(is_deleted=False, status=PaylistItemStatus.WITHDRAWN).count()
+
+    def resolve_withdrawn_hold(root, info):
+        from tasaf_payment.services import withdrawn_awaiting_payment
+        from tasaf_payment.withdrawn_hold import LAPSED_KEY, deadline
+        withdrawn = list(root.items.filter(is_deleted=False, status=PaylistItemStatus.WITHDRAWN))
+        if not withdrawn:
+            return None
+        payroll = root.payroll
+        awaiting = (withdrawn_awaiting_payment(root.payroll_id).filter(paylist_id=root.id).count()
+                    if payroll else 0)
+        cut_off = max(deadline(payroll, i) for i in withdrawn) if payroll else None
+        return {'withdrawn': len(withdrawn), 'awaiting': awaiting,
+                'lapsed': sum(1 for i in withdrawn if LAPSED_KEY in (i.json_ext or {})),
+                'deadline': cut_off.isoformat() if cut_off else None}
+
+    def resolve_muse_rejections(root, info):
+        return (root.json_ext or {}).get('muse_rejections') or []
+
     def resolve_settled_amount(root, info):
         total = root.items.filter(
             is_deleted=False, status=PaylistItemStatus.PROCESSED,
@@ -194,7 +217,8 @@ class PaylistGQLType(DjangoObjectType):
         item came back. Anything still awaiting news is PENDING, so "no news" is never
         reported as success.
         """
-        counts = root.items.filter(is_deleted=False).values_list('status', flat=True)
+        counts = (root.items.filter(is_deleted=False).exclude(status=PaylistItemStatus.WITHDRAWN)
+                  .values_list('status', flat=True))
         total = len(counts)
         if total == 0:
             return 'PENDING'

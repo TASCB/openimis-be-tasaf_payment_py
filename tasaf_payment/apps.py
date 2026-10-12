@@ -4,6 +4,12 @@ from django.apps import AppConfig
 
 MODULE_NAME = 'tasaf_payment'
 
+MUSE_REJECTION_REASON_CLASSES = {
+    "MSISDN invalid": "DATA",
+    "The receiver number must be a customer number": "DATA",
+    "System internal error": "TRANSIENT",
+}
+
 DEFAULT_CONFIG = {
     "gql_payment_account_search_perms": ["270001"],
     "gql_payment_account_create_perms": ["270002"],
@@ -43,6 +49,10 @@ DEFAULT_CONFIG = {
     "muse_request_type": "NORMAL",
     # Also push TASAF's ACKs over GovESB (they are always returned in the HTTP response).
     "muse_ack_push": False,
+    "muse_rejection_reason_classes": MUSE_REJECTION_REASON_CLASSES,
+    "muse_transient_retry_limit": 2,
+    "withdrawn_hold_grace_days": 0,
+    "withdrawn_hold_days_without_cycle": 30,
 
     "fsp_code_aliases": {
         "Vodacom M-Pesa": "MPESA",
@@ -110,6 +120,10 @@ class TasafPaymentConfig(AppConfig):
     muse_send_backoff_seconds = None
     muse_request_type = None
     muse_ack_push = None
+    muse_rejection_reason_classes = MUSE_REJECTION_REASON_CLASSES
+    muse_transient_retry_limit = 2
+    withdrawn_hold_grace_days = 0
+    withdrawn_hold_days_without_cycle = 30
     fsp_code_aliases = {}
     batch_inline_fallback_limit = 1000
     verification_batch_max_rows = 50000

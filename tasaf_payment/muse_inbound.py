@@ -5,7 +5,9 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,7 @@ BATCH_STATUSES = {'RECEIVED': 'RECEIVED', 'REJECTED': 'REJECTED', 'ACCEPTED': 'A
 PAYMENT_STATUSES = ('SETTLED', 'UNAPPLIED')
 REFERENCE_RE = re.compile(r'Reference\s+([A-Za-z0-9-]+)', re.IGNORECASE)
 ACK_TOPIC = 'tasaf.payment.ack'
+MUSE_TZ = timezone(timedelta(hours=3), 'EAT')
 
 
 class Reply:
@@ -53,6 +56,17 @@ def muse_feedback(body):
     return ' — '.join(p for p in parts if p) or None
 
 
+def muse_time(value):
+    from django.utils.dateparse import parse_datetime
+    try:
+        parsed = parse_datetime(value) if isinstance(value, str) else None
+    except (TypeError, ValueError):
+        return None
+    if parsed is not None and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=MUSE_TZ)
+    return parsed
+
+
 def ack_message(org_message_type, org_msg_id, desc='Received Successfully', status='RECEIVED'):
     from tasaf_payment.muse_message import DATE_FORMAT, RECEIVER, SENDER
     return {'message': {
@@ -75,7 +89,7 @@ def _log(message_type, status, raw, note='', paylist=None, benefit_code='', thei
             msg_id=getattr(paylist, 'muse_msg_id', None) or '',
             batch_reference=getattr(paylist, 'muse_batch_reference', None) or '',
             paylist_uuid=str(paylist.uuid) if paylist else '',
-            response_body=json.dumps(raw, default=str)[:4000], error_message=note[:2000] or None)
+            response_body=json.dumps(raw, default=str), error_message=note[:2000] or None)
     except Exception as exc:  # noqa: BLE001 — the audit row must never lose the message
         logger.warning("Could not write inbound MuseTransactionLog: %s", exc)
 
@@ -111,7 +125,8 @@ def _reject(message_type, header, paylist, reason):
 
 def _batch(message_type, header, summary):
     from tasaf_payment.models import Paylist, PaymentDestination
-    from tasaf_payment.services import _parse_dt, apply_muse_batch_status
+    from tasaf_payment.muse_rejection import handle_batch_rejection
+    from tasaf_payment.services import apply_muse_batch_status
 
     status = BATCH_STATUSES.get(str(summary.get('status') or '').strip().upper().replace('_', ' '))
     if not status:
@@ -121,9 +136,15 @@ def _batch(message_type, header, summary):
                                      destination=PaymentDestination.MUSE).first() if org_msg_id else None
     if not paylist:
         return None, _error(404, f"No paylist was sent with msgId {org_msg_id!r}", 'REJECTED')
-    applied = apply_muse_batch_status(paylist, status, summary.get('statusDesc'),
-                                      _parse_dt(header.get('createdAt')))
+    with transaction.atomic():
+        applied = apply_muse_batch_status(paylist, status, summary.get('statusDesc'),
+                                          muse_time(header.get('createdAt')))
+        rejection = (handle_batch_rejection(paylist, summary.get('statusDesc'))
+                     if applied and status == 'REJECTED' else None)
     note = '' if applied else f'{status} not applied: paylist is {paylist.status}'
+    if rejection:
+        note = (f"{rejection['withdrawn']} payee(s) withdrawn, {rejection['kept']} kept, "
+                f"{rejection['needs_review']} need review")
     return paylist, Reply(200, _acknowledge(message_type, header, paylist), 'SUCCESS', note)
 
 
@@ -201,7 +222,7 @@ def _payment(message_type, header, details):
 
     desc = details.get('statusDesc')
     if status == 'SETTLED':
-        settle_item(item, header.get('createdAt'), bank_reference(desc))
+        settle_item(item, muse_time(header.get('createdAt')), bank_reference(desc))
     else:
         unapply_item(item, None, desc, bank_reference(desc))
     return paylist, end_to_end_id, Reply(200, _acknowledge(message_type, header, paylist))

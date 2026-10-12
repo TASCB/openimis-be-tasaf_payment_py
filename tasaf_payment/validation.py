@@ -108,9 +108,12 @@ class WithdrawalChargeValidation(BaseModelValidation):
 def validate_paid_account_lock(data, existing):
     if existing is None:
         return []
-    from tasaf_payment.services import LOCKED_PAYMENT_FIELDS, account_paid_at
+    from tasaf_payment.services import LOCKED_PAYMENT_FIELDS, account_paid_at, account_payment_in_flight
     changed = [f for f in LOCKED_PAYMENT_FIELDS if f in data and data[f] != getattr(existing, f)]
     if changed and account_paid_at(existing.id):
         return [{'message': f"This account has been paid, so {', '.join(changed)} can only be changed through "
                             "Case Management > Correct payment details (reason and approval)."}]
+    if changed and account_payment_in_flight(existing.id):
+        return [{'message': f"A payment to this account is on a paylist, so {', '.join(changed)} cannot be "
+                            "changed until it is paid or taken off the paylist."}]
     return []

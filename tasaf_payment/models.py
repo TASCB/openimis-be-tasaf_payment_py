@@ -65,12 +65,15 @@ class PaylistItemStatus(models.TextChoices):
     PENDING    = 'PENDING',    _("PENDING")
     PROCESSED  = 'PROCESSED',  _("PROCESSED")
     UNAPPLIED  = 'UNAPPLIED',  _("UNAPPLIED")
+    WITHDRAWN  = 'WITHDRAWN',  _("WITHDRAWN")
 
 
 PAYLIST_ITEM_TERMINAL_STATUSES = (
     PaylistItemStatus.PROCESSED,
     PaylistItemStatus.UNAPPLIED,
+    PaylistItemStatus.WITHDRAWN,
 )
+
 
 
 class MuseVerificationResult(models.TextChoices):
@@ -87,6 +90,7 @@ class MuseVerificationType(models.TextChoices):
 
 class ReturnFeedbackType(models.TextChoices):
     UNAPPLIED = 'UNAPPLIED', _("UNAPPLIED")
+    REJECTED_IN_BATCH = 'REJECTED_IN_BATCH', _("REJECTED_IN_BATCH")
 
 
 # ---------------------------------------------------------------------------

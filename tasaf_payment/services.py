@@ -1138,6 +1138,18 @@ class PaylistService:
                 return {'success': False, 'outcome': 'REFUSED',
                         'error': f'{duplicates} payment(s) on this paylist are already paid, or being paid, '
                                  f'on another paylist; submitting would pay them twice'}
+            pending = paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING)
+            if not pending.exists():
+                return {'success': False, 'outcome': 'REFUSED',
+                        'error': 'No payee is left on this paylist to send; every payee was taken out '
+                                 'after MUSE rejected the batch'}
+            unpayable = unpayable_items(paylist).count()
+            if unpayable:
+                logger.warning("PaylistService.submit: paylist %s refused, %d account(s) not cleared",
+                               paylist_uuid, unpayable)
+                return {'success': False, 'outcome': 'REFUSED',
+                        'error': f'{unpayable} payment(s) on this paylist go to an account that is no longer '
+                                 f'verified and pre-audited; it cannot be sent until they are'}
             if paylist.status == PaylistStatus.REJECTED:
                 _start_new_muse_attempt(paylist, self.user)
 
@@ -1281,10 +1293,21 @@ def exclusion_reasons(individual_ids, fsp_type):
 
 def benefits_on_a_paylist():
     """Benefit ids already on a live paylist. A benefit is paid from one paylist only; a batch
-    rejected at approval releases its benefits."""
+    rejected at approval releases its benefits, and so does a withdrawn payee."""
     return PaylistItem.objects.filter(
         is_deleted=False, paylist__is_deleted=False, benefit_consumption__isnull=False,
-    ).exclude(paylist__status=PaylistStatus.REJECTED_AT_APPROVAL).values('benefit_consumption_id')
+    ).exclude(paylist__status=PaylistStatus.REJECTED_AT_APPROVAL).exclude(
+        status=PaylistItemStatus.WITHDRAWN).values('benefit_consumption_id')
+
+
+def withdrawn_awaiting_payment(payroll_id):
+    from tasaf_payment.withdrawn_hold import LAPSED_KEY
+    paid = PaylistItem.objects.filter(is_deleted=False, paylist__is_deleted=False,
+                                      status=PaylistItemStatus.PROCESSED).values('benefit_consumption_id')
+    return PaylistItem.objects.filter(
+        is_deleted=False, paylist__is_deleted=False, paylist__payroll_id=payroll_id,
+        status=PaylistItemStatus.WITHDRAWN,
+    ).exclude(benefit_consumption_id__in=paid).exclude(json_ext__has_key=LAPSED_KEY)
 
 
 LOCKED_PAYMENT_FIELDS = ('account_number', 'fsp_name', 'fsp_type', 'account_name')
@@ -1358,13 +1381,22 @@ def account_payment_in_flight(account_id):
 def paid_elsewhere(paylist):
     """Items of *paylist* whose benefit is already paid (PROCESSED), or being paid (on a paylist
     still with MUSE), on another paylist. Submitting them would pay the benefit twice."""
+    mine = paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING)
     others = PaylistItem.objects.filter(
         is_deleted=False, paylist__is_deleted=False,
-        benefit_consumption_id__in=paylist.items.filter(is_deleted=False).values('benefit_consumption_id'),
+        benefit_consumption_id__in=mine.values('benefit_consumption_id'),
     ).exclude(paylist_id=paylist.id).filter(
-        Q(status=PaylistItemStatus.PROCESSED) | Q(paylist__status__in=PAYLIST_IN_FLIGHT_STATUSES))
-    return paylist.items.filter(is_deleted=False,
-                                benefit_consumption_id__in=others.values('benefit_consumption_id'))
+        Q(status=PaylistItemStatus.PROCESSED)
+        | Q(status=PaylistItemStatus.PENDING, paylist__status__in=PAYLIST_IN_FLIGHT_STATUSES))
+    return mine.filter(benefit_consumption_id__in=others.values('benefit_consumption_id'))
+
+
+def unpayable_items(paylist):
+    return paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING).exclude(
+        payment_account__verification_status=VerificationStatus.VERIFIED,
+        payment_account__pre_audit_status=PreAuditStatus.PASSED,
+        payment_account__is_deleted=False,
+    )
 
 
 def wrong_type_items(paylist):
@@ -1507,6 +1539,15 @@ def _notify_payroll_if_all_closed(paylist) -> bool:
         return False
     dispatched = siblings.filter(status=PaylistStatus.CLOSED)
     if not dispatched.exists():
+        return False
+    try:
+        from tasaf_payment.withdrawn_hold import lapse_expired
+        with transaction.atomic():
+            lapse_expired(payroll_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Withdrawn-payee cut-off failed for payroll %s", payroll_id)
+    if withdrawn_awaiting_payment(payroll_id).exists():
+        logger.info("Payroll %s not handed to reconciliation: withdrawn payees still to be paid", payroll_id)
         return False
 
     try:

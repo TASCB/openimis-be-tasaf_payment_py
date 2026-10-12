@@ -171,7 +171,8 @@ def _fsp_profiles(accounts):
 
 
 def payee_rows(paylist):
-    items = list(paylist.items.filter(is_deleted=False)
+    from tasaf_payment.models import PaylistItemStatus
+    items = list(paylist.items.filter(is_deleted=False).exclude(status=PaylistItemStatus.WITHDRAWN)
                  .select_related('payment_account__group_beneficiary__group', 'benefit_consumption')
                  .order_by('date_created', 'id'))
     names = _representative_names(paylist)
