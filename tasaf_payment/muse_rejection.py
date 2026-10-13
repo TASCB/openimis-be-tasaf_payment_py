@@ -135,9 +135,7 @@ def _set_strikes(item, strikes, user):
 
 
 def withdraw_item(item, reason, failure_class, paylist, user):
-    from tasaf_payment.models import (
-        PaylistItemStatus, ReturnFeedback, ReturnFeedbackType, VerificationStatus,
-    )
+    from tasaf_payment.models import PaylistItemStatus, ReturnFeedback, ReturnFeedbackType
 
     ReturnFeedback(paylist_item=item, feedback_type=ReturnFeedbackType.REJECTED_IN_BATCH,
                    reason_code=failure_class, reason_description=reason).save(user=user)
@@ -148,35 +146,49 @@ def withdraw_item(item, reason, failure_class, paylist, user):
     ext['withdrawn_at'] = datetime.now(tz=timezone.utc).isoformat()
     item.json_ext = ext
     item.save(user=user)
+    return flag_returned_account(item, reason, failure_class, paylist, user)
+
+
+def flag_returned_account(item, reason, failure_class, paylist, user):
+    from tasaf_payment.models import VerificationStatus
 
     account = item.payment_account
-    account.verification_status = (VerificationStatus.FAILED if failure_class == DATA
-                                   else VerificationStatus.MANUAL)
+    account.verification_status = (VerificationStatus.MANUAL if failure_class in (TRANSIENT, UNKNOWN)
+                                   else VerificationStatus.FAILED)
     account_ext = dict(account.json_ext or {})
-    account_ext['muse_rejection'] = {'reason': reason, 'class': failure_class,
-                                     'batch': paylist.muse_batch_reference,
-                                     'msg_id': paylist.muse_msg_id}
+    key = 'muse_unapplied' if failure_class == 'UNAPPLIED' else 'muse_rejection'
+    account_ext[key] = {'reason': reason, 'class': failure_class,
+                        'batch': paylist.muse_batch_reference, 'msg_id': paylist.muse_msg_id}
     account.json_ext = account_ext
     account.save(user=user)
-    return _open_follow_up(item, reason, paylist, user)
+    follow_up = _open_follow_up(item, reason, paylist, user, unapplied=failure_class == 'UNAPPLIED')
+    if follow_up:
+        item.json_ext = {**(item.json_ext or {}), 'follow_up_id': str(follow_up)}
+        item.save(user=user)
+    return follow_up
 
 
-def _open_follow_up(item, reason, paylist, user):
+def _open_follow_up(item, reason, paylist, user, unapplied=False):
     try:
         from case_management.services import FollowUpService
     except ImportError:
         return None
     group = getattr(getattr(item.payment_account, 'group_beneficiary', None), 'group', None)
     if not group:
-        logger.warning("Withdrawn payee %s has no household; no follow-up opened", item.uuid)
+        logger.warning("Returned payee %s has no household; no follow-up opened", item.uuid)
         return None
-    remark = (f"MUSE rejected payment batch {paylist.muse_batch_reference} "
-              f"(attempt {muse_message.attempt(paylist)}): {reason} for "
-              f"{item.payment_account.account_number}. The payment was taken out of the batch. "
-              f"Correct the payment details; it is then paid on a new paylist.")
+    if unapplied:
+        remark = (f"MUSE returned the payment on batch {paylist.muse_batch_reference} unapplied: "
+                  f"{reason} for {item.payment_account.account_number}. "
+                  f"Correct the payment details; it is then paid on a new paylist.")
+    else:
+        remark = (f"MUSE rejected payment batch {paylist.muse_batch_reference} "
+                  f"(attempt {muse_message.attempt(paylist)}): {reason} for "
+                  f"{item.payment_account.account_number}. The payment was taken out of the batch. "
+                  f"Correct the payment details; it is then paid on a new paylist.")
     result = FollowUpService(user).add(group_id=group.id, category='PAYMENT_FAILURE', remark=remark,
                                        priority='HIGH', paylist_item_id=item.id)
     if not result.get('success'):
-        logger.warning("No follow-up for withdrawn payee %s: %s", item.uuid, result)
+        logger.warning("No follow-up for returned payee %s: %s", item.uuid, result)
         return None
     return (result.get('data') or {}).get('id')

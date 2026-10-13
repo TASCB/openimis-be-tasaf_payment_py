@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from django.utils.translation import gettext as _
 
 from core.models import HistoryModel, HistoryBusinessModel, UUIDModel, ObjectMutation, MutationLog
@@ -73,6 +74,16 @@ PAYLIST_ITEM_TERMINAL_STATUSES = (
     PaylistItemStatus.UNAPPLIED,
     PaylistItemStatus.WITHDRAWN,
 )
+
+PAYLIST_ITEM_RETURNED_STATUSES = (
+    PaylistItemStatus.WITHDRAWN,
+    PaylistItemStatus.UNAPPLIED,
+)
+
+
+def returned_for_repayment(prefix=''):
+    return (Q(**{f'{prefix}status': PaylistItemStatus.WITHDRAWN})
+            | Q(**{f'{prefix}status': PaylistItemStatus.UNAPPLIED, f'{prefix}json_ext__has_key': 'returned_at'}))
 
 
 class MuseVerificationResult(models.TextChoices):

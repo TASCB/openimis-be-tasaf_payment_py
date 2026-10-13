@@ -23,7 +23,7 @@ def _config(name, default):
 
 
 def withdrawn_on(item):
-    stamped = (item.json_ext or {}).get('withdrawn_at')
+    stamped = (item.json_ext or {}).get('withdrawn_at') or (item.json_ext or {}).get('returned_at')
     if stamped:
         try:
             return datetime.fromisoformat(stamped).astimezone(EAT).date()
@@ -88,9 +88,9 @@ def _escalate_follow_ups(item, cut_off, payroll, user):
 
 
 def held_payrolls():
-    from tasaf_payment.models import PaylistItem, PaylistItemStatus
-    return (PaylistItem.objects.filter(is_deleted=False, paylist__is_deleted=False,
-                                       status=PaylistItemStatus.WITHDRAWN, paylist__payroll__isnull=False)
+    from tasaf_payment.models import PaylistItem, returned_for_repayment
+    return (PaylistItem.objects.filter(returned_for_repayment(), is_deleted=False, paylist__is_deleted=False,
+                                       paylist__payroll__isnull=False)
             .exclude(json_ext__has_key=LAPSED_KEY)
             .values_list('paylist__payroll_id', flat=True).distinct())
 

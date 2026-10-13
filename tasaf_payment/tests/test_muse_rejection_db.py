@@ -249,3 +249,37 @@ class MuseRejectionDbTest(TestCase):
                 reason_text='Number corrected after the cut-off')
         self.assertEqual(FollowUpRemark.objects.get(paylist_item_id=self.bad.id, parent_remark__isnull=True).status,
                          'RESOLVED')
+
+
+class UnappliedRepaymentDbTest(TestCase):
+    setUp = MuseRejectionDbTest.setUp
+
+    def unapply(self, item):
+        from tasaf_payment.services import unapply_item
+        with self.captureOnCommitCallbacks(execute=False):
+            unapply_item(PaylistItem.objects.get(id=item.id), 'U02', 'Account closed')
+        return PaylistItem.objects.get(id=item.id)
+
+    def test_unapplied_payee_goes_to_correction(self):
+        from case_management.models import FollowUpRemark
+        item = self.unapply(self.bad)
+        self.assertEqual(item.status, PaylistItemStatus.UNAPPLIED)
+        self.assertIn('returned_at', item.json_ext)
+        self.assertEqual(item.payment_account.verification_status, VerificationStatus.FAILED)
+        self.assertEqual(item.payment_account.json_ext['muse_unapplied']['class'], 'UNAPPLIED')
+        follow_up = FollowUpRemark.objects.get(paylist_item_id=item.id)
+        self.assertEqual(str(follow_up.id), item.json_ext['follow_up_id'])
+        self.assertIn('unapplied', follow_up.remark)
+
+    def test_unapplied_benefit_is_released_and_held_for_repayment(self):
+        item = self.unapply(self.bad)
+        on_paylist = set(benefits_on_a_paylist().values_list('benefit_consumption_id', flat=True))
+        self.assertNotIn(item.benefit_consumption_id, on_paylist)
+        if self.paylist.payroll_id:
+            self.assertIn(item.id, list(withdrawn_awaiting_payment(self.paylist.payroll_id).values_list('id', flat=True)))
+
+    def test_older_unapplied_items_stay_final(self):
+        PaylistItem.objects.filter(id=self.bad.id).update(status=PaylistItemStatus.UNAPPLIED, json_ext={})
+        on_paylist = set(benefits_on_a_paylist().values_list('benefit_consumption_id', flat=True))
+        self.assertIn(self.bad.benefit_consumption_id, on_paylist)
+

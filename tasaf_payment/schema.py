@@ -169,6 +169,15 @@ def paylist_item_filters(**kwargs):
         from tasaf_payment.services import location_descendants_q
         filters.append(location_descendants_q(
             kwargs["location_id"], base='payment_account__group_beneficiary__group__location'))
+    if kwargs.get("resolution"):
+        from tasaf_payment.returned import resolution_q
+        filters.append(resolution_q(kwargs["resolution"].strip().upper()))
+    if kwargs.get("batch_reference"):
+        filters.append(Q(paylist__muse_batch_reference__icontains=kwargs["batch_reference"].strip()))
+    if kwargs.get("reason_code"):
+        from django.db.models import Exists, OuterRef
+        filters.append(Q(Exists(ReturnFeedback.objects.filter(
+            paylist_item_id=OuterRef('id'), is_deleted=False, reason_code__iexact=kwargs["reason_code"].strip()))))
     return filters
 
 
@@ -298,6 +307,9 @@ class Query(graphene.ObjectType):
         payee_name=graphene.String(),
         fsp_code=graphene.String(),
         location_id=graphene.Int(),
+        resolution=graphene.String(),
+        batch_reference=graphene.String(),
+        reason_code=graphene.String(),
         # status, muse_reference handled by filter_fields
     )
     paylist_items_export = graphene.String(

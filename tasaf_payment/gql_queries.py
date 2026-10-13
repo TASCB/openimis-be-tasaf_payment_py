@@ -165,6 +165,7 @@ class PaylistGQLType(DjangoObjectType):
             "batch_type": ["exact"],
             "destination": ["exact"],
             "status": ["exact"],
+            "muse_batch_reference": ["exact", "icontains"],
             "generated_at": ["exact", "lt", "lte", "gt", "gte"],
             "approved_at": ["exact", "lt", "lte", "gt", "gte"],
             "submitted_at": ["exact", "lt", "lte", "gt", "gte"],
@@ -261,6 +262,53 @@ class PaylistGQLType(DjangoObjectType):
 class PaylistItemGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
     payee_code = graphene.String(description="The household's HHID as MUSE knows it")
+    resolution = graphene.String()
+    repayment = graphene.JSONString()
+    follow_up = graphene.JSONString()
+    return_reason_code = graphene.String()
+    returned_at = graphene.String()
+
+    def resolve_resolution(self, info):
+        from tasaf_payment.returned import resolution_of
+        return resolution_of(self)
+
+    def resolve_repayment(self, info):
+        from tasaf_payment.returned import repayment_item
+        if self.status not in (PaylistItemStatus.WITHDRAWN, PaylistItemStatus.UNAPPLIED):
+            return None
+        other = repayment_item(self) if self.benefit_consumption_id else None
+        if other is None:
+            return None
+        return {'paylistUuid': str(other.paylist.uuid), 'museBatchReference': other.paylist.muse_batch_reference,
+                'paylistStatus': other.paylist.status, 'itemStatus': other.status}
+
+    def resolve_follow_up(self, info):
+        if self.status not in (PaylistItemStatus.WITHDRAWN, PaylistItemStatus.UNAPPLIED):
+            return None
+        try:
+            from case_management.models import FollowUpRemark
+        except ImportError:
+            return None
+        record = (FollowUpRemark.objects.filter(paylist_item_id=self.id, is_deleted=False, parent_remark__isnull=True)
+                  .order_by('-date_created').first())
+        if record is None:
+            return None
+        return {'id': str(record.id), 'status': record.status, 'groupId': str(record.group_id)}
+
+    def resolve_return_reason_code(self, info):
+        if self.status not in (PaylistItemStatus.WITHDRAWN, PaylistItemStatus.UNAPPLIED):
+            return None
+        feedback = self.return_feedbacks.filter(is_deleted=False).order_by('-received_at').first()
+        return feedback.reason_code if feedback else None
+
+    def resolve_returned_at(self, info):
+        if self.status not in (PaylistItemStatus.WITHDRAWN, PaylistItemStatus.UNAPPLIED):
+            return None
+        ext = self.json_ext or {}
+        if ext.get('returned_at') or ext.get('withdrawn_at'):
+            return ext.get('returned_at') or ext.get('withdrawn_at')
+        feedback = self.return_feedbacks.filter(is_deleted=False).order_by('-received_at').first()
+        return feedback.received_at.isoformat() if feedback else None
 
     def resolve_payee_code(self, info):
         from tasaf_payment.muse_message import payee_code

@@ -16,6 +16,7 @@ from tasaf_payment import name_match
 from tasaf_payment.events import emit_muse_event
 from tasaf_payment.validation import WithdrawalChargeValidation
 from tasaf_payment.models import (
+    returned_for_repayment,
     WithdrawalCharge,
     PaymentAccount,
     VerificationStatus,
@@ -1373,11 +1374,11 @@ def exclusion_reasons(individual_ids, fsp_type):
 
 def benefits_on_a_paylist():
     """Benefit ids already on a live paylist. A benefit is paid from one paylist only; a batch
-    rejected at approval releases its benefits, and so does a withdrawn payee."""
+    rejected at approval releases its benefits, and so does a payee returned unpaid."""
     return PaylistItem.objects.filter(
         is_deleted=False, paylist__is_deleted=False, benefit_consumption__isnull=False,
     ).exclude(paylist__status=PaylistStatus.REJECTED_AT_APPROVAL).exclude(
-        status=PaylistItemStatus.WITHDRAWN).values('benefit_consumption_id')
+        returned_for_repayment()).values('benefit_consumption_id')
 
 
 def withdrawn_awaiting_payment(payroll_id):
@@ -1385,8 +1386,7 @@ def withdrawn_awaiting_payment(payroll_id):
     paid = PaylistItem.objects.filter(is_deleted=False, paylist__is_deleted=False,
                                       status=PaylistItemStatus.PROCESSED).values('benefit_consumption_id')
     return PaylistItem.objects.filter(
-        is_deleted=False, paylist__is_deleted=False, paylist__payroll_id=payroll_id,
-        status=PaylistItemStatus.WITHDRAWN,
+        returned_for_repayment(), is_deleted=False, paylist__is_deleted=False, paylist__payroll_id=payroll_id,
     ).exclude(benefit_consumption_id__in=paid).exclude(json_ext__has_key=LAPSED_KEY)
 
 
@@ -1536,8 +1536,9 @@ def settle_item(item, settled_at=None, reference=None):
 
 
 def unapply_item(item, reason_code=None, reason_description=None, reference=None):
-    """PENDING item -> UNAPPLIED, with the reason kept as ReturnFeedback. Terminal too."""
+    from tasaf_payment.muse_rejection import flag_returned_account
     user = _inbound_audit_user(item)
+    reason = ' '.join(p for p in (reason_code, reason_description) if p) or 'Payment returned unapplied'
     with transaction.atomic():
         ReturnFeedback(
             paylist_item=item,
@@ -1549,7 +1550,9 @@ def unapply_item(item, reason_code=None, reason_description=None, reference=None
         item.return_reason = reason_description
         if reference:
             item.muse_reference = reference
+        item.json_ext = {**(item.json_ext or {}), 'returned_at': datetime.now(tz=timezone.utc).isoformat()}
         item.save(user=user)
+        flag_returned_account(item, reason, 'UNAPPLIED', item.paylist, user)
         emit_muse_event(item.paylist, 'unapplied', description=reason_description)
         _close_paylist_if_complete(item.paylist)
 
