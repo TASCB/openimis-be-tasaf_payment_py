@@ -75,7 +75,6 @@ PAYLIST_ITEM_TERMINAL_STATUSES = (
 )
 
 
-
 class MuseVerificationResult(models.TextChoices):
     PASSED = 'PASSED', _("PASSED")
     FAILED = 'FAILED', _("FAILED")
@@ -183,7 +182,7 @@ class PaymentAccount(HistoryBusinessModel):
 
 class MuseVerificationRecord(HistoryModel):
     """
-    Immutable result record pushed from MUSE via GovESB.
+    Immutable result record of one verification event, from whichever gateway answered.
 
     One record per verification event per PaymentAccount. Multiple records may
     exist for the same account across different verification rounds or types.
@@ -207,6 +206,10 @@ class MuseVerificationRecord(HistoryModel):
     failure_reason = models.TextField(null=True, blank=True)
     raw_response = models.JSONField(default=dict, blank=True)
     received_at = models.DateTimeField(auto_now_add=True)
+    expected_name = models.CharField(max_length=255, null=True, blank=True)
+    returned_name = models.CharField(max_length=255, null=True, blank=True)
+    match_score = models.IntegerField(null=True, blank=True)
+    match_details = models.JSONField(null=True, blank=True)
 
     class Meta:
         managed = True

@@ -12,6 +12,7 @@ from core.services import BaseService
 from core.signals import register_service_signal
 from core.services.utils import output_exception, check_authentication
 from tasks_management.services import UpdateCheckerLogicServiceMixin
+from tasaf_payment import name_match
 from tasaf_payment.events import emit_muse_event
 from tasaf_payment.validation import WithdrawalChargeValidation
 from tasaf_payment.models import (
@@ -220,6 +221,7 @@ class MuseVerificationDispatchService:
 
     def __init__(self, user):
         self.user = user
+        self._names = {}
 
     # Only these may be sent. PENDING_MUSE is already with MUSE, so a retried chunk or a second
     # click cannot send it twice; VERIFIED and MANUAL are finished or with an officer.
@@ -247,8 +249,12 @@ class MuseVerificationDispatchService:
                     return {'success': True, 'count': 0, 'batches': 0, 'skipped': skipped,
                             'error': None}
 
+                sent_at = datetime.now(timezone.utc).isoformat()
                 for account in accounts:
                     account.verification_status = VerificationStatus.PENDING_MUSE
+                    account.json_ext = {**(account.json_ext or {}), 'verification_sent': {
+                        'expected_name': self._expected_name(account), 'sent_at': sent_at,
+                    }}
                     account.save(username=self.user.username)
 
             # Published outside the atomic block so the commit is visible to the consumer.
@@ -303,6 +309,11 @@ class MuseVerificationDispatchService:
                 return name.strip()
         return str((group.json_ext or {}).get('primary_recipient') or '').strip()
 
+    def _expected_name(self, account) -> str:
+        if account.id not in self._names:
+            self._names[account.id] = self.recipient_name(account)
+        return self._names[account.id]
+
     def _batch_rows(self, accounts):
         """Group accounts into one batch per FSP, shaped the way MUSE expects.
 
@@ -327,7 +338,7 @@ class MuseVerificationDispatchService:
                 'hhid': getattr(group, 'code', None),
                 'account_uuid': str(account.uuid),
             }
-            name = self.recipient_name(account)
+            name = self._expected_name(account)
             if account.fsp_type == 'MOBILE':
                 row['name'] = name
             else:
@@ -418,10 +429,21 @@ class MuseVerificationInboundService:
         "muse_reference":     "MUSE-REF-123",
         "verification_type":  "FSP_ACCOUNT" | "MOBILE_VALIDATION" | "ACTIVE_CHECK",
         "result":             "PASSED" | "FAILED" | "MANUAL",
+        "returned_name":      "..."  (optional),
         "failure_reason":     "..." | null,
         "raw_response":       {...}
     }
+
+    With ``returned_name`` (the holder name the PSP holds) TASAF decides by name match
+    (name_match.py) and ``result`` is optional; only a gateway FAILED overrides that decision.
+    Without it, the gateway's ``result`` is taken as the verdict.
     """
+
+    _DECISION_TO_RESULT = {
+        name_match.VERIFIED: 'PASSED',
+        name_match.MANUAL: 'MANUAL',
+        name_match.FAILED: 'FAILED',
+    }
 
     _RESULT_TO_STATUS = {
         'PASSED': VerificationStatus.VERIFIED,
@@ -443,7 +465,17 @@ class MuseVerificationInboundService:
             return {'success': False, 'account_uuid': account_uuid,
                     'error': f"PaymentAccount {account_uuid} not found"}
 
-        result_str = payload.get('result', '').upper()
+        result_str = (payload.get('result') or '').upper()
+        has_name = 'returned_name' in payload
+        returned_name = (payload.get('returned_name') or '').strip()
+        expected_name, match = None, None
+        if has_name:
+            expected_name, surname, others = self._expected(account)
+            if result_str != 'FAILED':
+                match = name_match.decide(expected_name, returned_name, surname=surname,
+                                          others=others, overrides=self._thresholds())
+                result_str = self._DECISION_TO_RESULT[match.decision]
+
         new_status = self._RESULT_TO_STATUS.get(result_str)
         if new_status is None:
             return {'success': False, 'account_uuid': account_uuid,
@@ -451,29 +483,36 @@ class MuseVerificationInboundService:
 
         muse_ref = payload.get('muse_reference', '')
         v_type = payload.get('verification_type', MuseVerificationType.FSP_ACCOUNT)
+        failure_reason = payload.get('failure_reason')
+        if match and match.decision != name_match.VERIFIED and not failure_reason:
+            failure_reason = (f"{match.reason}: expected '{expected_name}', "
+                              f"returned '{returned_name}' (score {match.score})")
 
         try:
+            user = _inbound_audit_user(account)
             with transaction.atomic():
                 account.verification_status = new_status
                 account.muse_verification_reference = muse_ref
-                account.save()
-
                 if v_type == MuseVerificationType.ACTIVE_CHECK:
                     account.active_check_status = (
                         ActiveCheckStatus.ACTIVE
                         if result_str == 'PASSED'
                         else ActiveCheckStatus.INACTIVE
                     )
-                    account.save()
+                account.save(user=user)
 
-                MuseVerificationRecord.objects.create(
+                MuseVerificationRecord(
                     payment_account=account,
                     muse_reference=muse_ref,
                     verification_type=v_type,
                     result=result_str,
-                    failure_reason=payload.get('failure_reason'),
+                    failure_reason=failure_reason,
                     raw_response=payload.get('raw_response', {}),
-                )
+                    expected_name=expected_name,
+                    returned_name=returned_name[:255] if has_name else None,
+                    match_score=match.score if match else None,
+                    match_details=match.as_dict() if match else None,
+                ).save(user=user)
 
             logger.info(
                 "MuseVerificationInboundService.handle_result: account=%s result=%s ref=%s",
@@ -491,6 +530,47 @@ class MuseVerificationInboundService:
                 method="handle_verification_result",
                 exception=exc,
             )
+
+
+    @staticmethod
+    def _thresholds():
+        from tasaf_payment.apps import TasafPaymentConfig
+        return TasafPaymentConfig.name_match or {}
+
+    @staticmethod
+    def _expected(account):
+        sent = ((account.json_ext or {}).get('verification_sent') or {}).get('expected_name')
+        name, surname, others = household_names(account)
+        expected = sent or name
+        if not (surname and set(name_match.normalise(surname)) <= set(name_match.normalise(expected))):
+            words = name_match.normalise(expected)
+            surname = words[-1] if words else ''
+        return expected, surname, others
+
+
+def household_names(account):
+    from individual.models import GroupIndividual
+
+    group = getattr(getattr(account, 'group_beneficiary', None), 'group', None)
+    if not group:
+        return '', '', []
+    name = surname = ''
+    others = []
+    primary_seen = False
+    for member in (GroupIndividual.objects.filter(group=group, is_deleted=False)
+                   .select_related('individual').order_by('id')):
+        person = member.individual
+        if not person:
+            continue
+        full = f"{person.first_name or ''} {person.last_name or ''}".strip()
+        if member.recipient_type == 'PRIMARY' and not primary_seen:
+            primary_seen = True
+            name, surname = full, (person.last_name or '').strip()
+        elif full:
+            others.append((member.recipient_type or member.role or 'MEMBER', full))
+    if not name:
+        name = str((group.json_ext or {}).get('primary_recipient') or '').strip()
+    return name, surname, others
 
 
 class ManualApprovalService:

@@ -60,6 +60,8 @@ DEFAULT_CONFIG = {
         "Airtel Money": "AIRTELMONEY",
         "Tigo Pesa": "TIGOPESA",
         "Mixx by Yas": "TIGOPESA",
+        "MIXX": "TIGOPESA",
+        "T-Pesa": "TTCL",
         "Halopesa": "HALOPESA",
         "Ezy Pesa": "EZYPESA",
         "NMB Bank": "NMB",
@@ -74,6 +76,15 @@ DEFAULT_CONFIG = {
     # Rows per MUSE verification message. Every message holds ONE FSP; an FSP with more
     # accounts is split into several. Same ceiling as a paylist batch.
     "verification_batch_max_rows": 50000,
+    "name_match": {
+        "verified_min": 80,
+        "manual_min": 60,
+        "token_min_ratio": 0.80,
+        "initial_credit": 0.5,
+        "min_tokens_matched": 2,
+        "require_surname": True,
+        "surname_min_ratio": 0.90,
+    },
     # Applied at paylist generation. Off by default: turning it on changes disbursed totals.
     "apply_withdrawal_charges": False,
     "charges_require_approval": True,
@@ -127,6 +138,7 @@ class TasafPaymentConfig(AppConfig):
     fsp_code_aliases = {}
     batch_inline_fallback_limit = 1000
     verification_batch_max_rows = 50000
+    name_match = {}
     apply_withdrawal_charges = False
     charges_require_approval = True
 

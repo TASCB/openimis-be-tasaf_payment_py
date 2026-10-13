@@ -70,10 +70,28 @@ class PaymentAccountFilterSet(django_filters.FilterSet):
         }
 
 
+class AccountVerificationAttemptGQLType(graphene.ObjectType):
+    result = graphene.String()
+    failure_reason = graphene.String()
+    received_at = graphene.DateTime()
+    expected_name = graphene.String()
+    returned_name = graphene.String()
+    match_score = graphene.Int()
+    match_reason = graphene.String()
+    match_member = graphene.String()
+
+    def resolve_match_reason(root, info):
+        return (root.match_details or {}).get('reason')
+
+    def resolve_match_member(root, info):
+        return (root.match_details or {}).get('member')
+
+
 class PaymentAccountGQLType(DjangoObjectType):
     uuid = graphene.String(source='uuid')
     client_mutation_id = graphene.String()
     last_failure_reason = graphene.String()
+    verification_attempts = graphene.List(AccountVerificationAttemptGQLType)
     paid_at = graphene.DateTime()
     payment_in_flight = graphene.Boolean()
 
@@ -84,6 +102,10 @@ class PaymentAccountGQLType(DjangoObjectType):
     def resolve_payment_in_flight(root, info):
         from tasaf_payment.services import account_payment_in_flight
         return account_payment_in_flight(root.id)
+
+    def resolve_verification_attempts(root, info):
+        return list(root.muse_verification_records.filter(is_deleted=False)
+                    .order_by('-received_at')[:10])
 
     def resolve_last_failure_reason(root, info):
         record = (root.muse_verification_records

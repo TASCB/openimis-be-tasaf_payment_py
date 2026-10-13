@@ -71,6 +71,7 @@ class MuseVerificationResultView(View):
         "muse_reference":     "MUSE-REF-123",
         "verification_type":  "FSP_ACCOUNT",
         "result":             "PASSED" | "FAILED" | "MANUAL",
+        "returned_name":      "..."  (optional; TASAF then decides by name match),
         "failure_reason":     "..." | null,
         "raw_response":       {}
     }
@@ -88,8 +89,9 @@ class MuseVerificationResultView(View):
 
         if not payload.get('account_uuid'):
             return JsonResponse({'success': False, 'error': 'account_uuid is required'}, status=400)
-        if not payload.get('result'):
-            return JsonResponse({'success': False, 'error': 'result is required'}, status=400)
+        if not payload.get('result') and 'returned_name' not in payload:
+            return JsonResponse({'success': False, 'error': 'result or returned_name is required'},
+                                status=400)
 
         logger.info(
             "Inbound verification result: account=%s result=%s ref=%s",
