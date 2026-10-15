@@ -72,6 +72,14 @@ DEFAULT_CONFIG = {
         "Azania Bank": "AZANIA",
         "TPB Bank": "TPB",
     },
+    "mobile_prefixes": {
+        "MPESA": ["074", "075", "076", "079"],
+        "TIGOPESA": ["065", "067", "071", "077"],
+        "AIRTELMONEY": ["068", "069", "078"],
+        "HALOPESA": ["061", "062"],
+        "TTCL": ["073"],
+        "EZYPESA": ["077"],
+    },
     "batch_inline_fallback_limit": 1000,
     # Rows per MUSE verification message. Every message holds ONE FSP; an FSP with more
     # accounts is split into several. Same ceiling as a paylist batch.
@@ -136,6 +144,7 @@ class TasafPaymentConfig(AppConfig):
     withdrawn_hold_grace_days = 0
     withdrawn_hold_days_without_cycle = 30
     fsp_code_aliases = {}
+    mobile_prefixes = {}
     batch_inline_fallback_limit = 1000
     verification_batch_max_rows = 50000
     name_match = {}
