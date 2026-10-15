@@ -13,7 +13,7 @@ from core.signals import register_service_signal
 from core.services.utils import output_exception, check_authentication
 from tasks_management.services import UpdateCheckerLogicServiceMixin
 from tasaf_payment import name_match
-from tasaf_payment.events import emit_muse_event
+from tasaf_payment.events import emit_muse_event, emit_verification_event
 from tasaf_payment.validation import WithdrawalChargeValidation
 from tasaf_payment.models import (
     returned_for_repayment,
@@ -229,7 +229,7 @@ class MuseVerificationDispatchService:
     DISPATCHABLE_STATUSES = (VerificationStatus.PENDING, VerificationStatus.FAILED)
 
     @check_authentication
-    def dispatch(self, account_ids: list) -> dict:
+    def dispatch(self, account_ids: list, after_change: bool = False) -> dict:
         """
         Mark accounts as PENDING_MUSE and publish verification requests to GovESB:
         one message per FSP, split at ``verification_batch_max_rows``.
@@ -253,9 +253,10 @@ class MuseVerificationDispatchService:
                 sent_at = datetime.now(timezone.utc).isoformat()
                 for account in accounts:
                     account.verification_status = VerificationStatus.PENDING_MUSE
-                    account.json_ext = {**(account.json_ext or {}), 'verification_sent': {
-                        'expected_name': self._expected_name(account), 'sent_at': sent_at,
-                    }}
+                    sent = {'expected_name': self._expected_name(account), 'sent_at': sent_at}
+                    if after_change:
+                        sent['after_change'] = True
+                    account.json_ext = {**(account.json_ext or {}), 'verification_sent': sent}
                     account.save(username=self.user.username)
 
             # Published outside the atomic block so the commit is visible to the consumer.
@@ -514,6 +515,9 @@ class MuseVerificationInboundService:
                     match_score=match.score if match else None,
                     match_details=match.as_dict() if match else None,
                 ).save(user=user)
+
+                if ((account.json_ext or {}).get('verification_sent') or {}).get('after_change'):
+                    emit_verification_event(account, new_status, failure_reason)
 
             logger.info(
                 "MuseVerificationInboundService.handle_result: account=%s result=%s ref=%s",

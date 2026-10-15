@@ -120,3 +120,47 @@ class InboundDecisionTest(SimpleTestCase):
         self.assertEqual(account.verification_status, VerificationStatus.MANUAL)
         self.assertIsNone(record['expected_name'])
         self.assertIsNone(record['returned_name'])
+
+
+class VerificationEventTest(SimpleTestCase):
+
+    def _run(self, json_ext):
+        account = mock.MagicMock(json_ext=json_ext)
+        with mock.patch.object(services.PaymentAccount.objects, 'get', return_value=account), \
+                mock.patch.object(services, 'MuseVerificationRecord'), \
+                mock.patch.object(services, '_inbound_audit_user', return_value='system'), \
+                mock.patch.object(services.transaction, 'atomic', return_value=nullcontext()), \
+                mock.patch.object(services, 'emit_verification_event') as emit:
+            services.MuseVerificationInboundService().handle_result(
+                {'account_uuid': 'U1', 'result': 'FAILED', 'failure_reason': 'Account closed'})
+        return account, emit
+
+    def test_a_reply_to_an_account_sent_after_a_change_is_announced(self):
+        account, emit = self._run({'verification_sent': {'after_change': True}})
+        emit.assert_called_once_with(account, VerificationStatus.FAILED, 'Account closed')
+
+    def test_other_replies_are_not_announced(self):
+        _, emit = self._run({'verification_sent': {'expected_name': 'X'}})
+        emit.assert_not_called()
+
+
+class DispatchAfterChangeTest(SimpleTestCase):
+
+    def _dispatch(self, **kwargs):
+        account = mock.MagicMock(json_ext={}, verification_status=VerificationStatus.PENDING)
+        queryset = mock.MagicMock()
+        queryset.filter.return_value.select_related.return_value = [account]
+        service = services.MuseVerificationDispatchService(mock.MagicMock(username='system'))
+        with mock.patch.object(services.PaymentAccount.objects, 'select_for_update', return_value=queryset), \
+                mock.patch.object(services.transaction, 'atomic', return_value=nullcontext()), \
+                mock.patch.object(service, '_expected_name', return_value='Asha Juma'), \
+                mock.patch.object(service, 'messages', return_value=[]):
+            out = service.dispatch([1], **kwargs)
+        self.assertTrue(out['success'], out)
+        return account.json_ext['verification_sent']
+
+    def test_a_send_after_a_change_is_marked(self):
+        self.assertTrue(self._dispatch(after_change=True)['after_change'])
+
+    def test_an_ordinary_send_is_not_marked(self):
+        self.assertNotIn('after_change', self._dispatch())
