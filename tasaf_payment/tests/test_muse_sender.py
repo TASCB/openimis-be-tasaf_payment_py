@@ -112,6 +112,30 @@ class MuseSenderTest(SimpleTestCase):
         producer.publish.assert_not_called()
 
 
+class FreezeIdsTest(SimpleTestCase):
+    def paylist(self, **ext):
+        p = SimpleNamespace(uuid='u', muse_msg_id=None, muse_batch_reference=None, json_ext=dict(ext), saves=0)
+        p.save = lambda **kw: setattr(p, 'saves', p.saves + 1)
+        return p
+
+    def test_a_send_marks_its_msg_id_as_on_its_way(self):
+        p = self.paylist()
+        ms._freeze_ids(p, BODY, user=None, sending=True)
+        self.assertEqual(p.json_ext[ms.SENDING_KEY], 'TMA0F744FC42A601')
+        self.assertEqual((p.muse_msg_id, p.saves), ('TMA0F744FC42A601', 1))
+
+    def test_record_only_leaves_no_mark(self):
+        p = self.paylist()
+        ms._freeze_ids(p, BODY, user=None)
+        self.assertNotIn(ms.SENDING_KEY, p.json_ext)
+
+    def test_resend_of_a_marked_message_does_not_save_again(self):
+        p = self.paylist(muse_created_at='2026-09-28 10:00:00', muse_sending='TMA0F744FC42A601')
+        p.muse_msg_id, p.muse_batch_reference = 'TMA0F744FC42A601', 'TP260904-A0F744FC'
+        ms._freeze_ids(p, BODY, user=None, sending=True)
+        self.assertEqual(p.saves, 0)
+
+
 ACK = {'message': {'messageHeader': {'msgId': 'PA02002002', 'messageType': 'ACK', 'sender': 'MUSE'},
                    'messageSummary': {'orgMessageType': 'BULK_PAYMENT', 'orgMsgId': 'TMA0F744FC42A601',
                                       'status': 'REJECTED', 'statusDesc': 'payeeName invalid'}},

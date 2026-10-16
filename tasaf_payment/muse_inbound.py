@@ -126,22 +126,27 @@ def _reject(message_type, header, paylist, reason):
 def _batch(message_type, header, summary):
     from tasaf_payment.models import Paylist, PaymentDestination
     from tasaf_payment.muse_rejection import handle_batch_rejection
-    from tasaf_payment.services import apply_muse_batch_status
+    from tasaf_payment.services import apply_muse_batch_status, take_over_send_in_progress
 
     status = BATCH_STATUSES.get(str(summary.get('status') or '').strip().upper().replace('_', ' '))
     if not status:
         return None, _error(400, f"Unknown batch status: {summary.get('status')!r}", 'FAILED')
     org_msg_id = str(summary.get('orgMsgId') or '').strip()
-    paylist = Paylist.objects.filter(muse_msg_id=org_msg_id, is_deleted=False,
-                                     destination=PaymentDestination.MUSE).first() if org_msg_id else None
-    if not paylist:
-        return None, _error(404, f"No paylist was sent with msgId {org_msg_id!r}", 'REJECTED')
     with transaction.atomic():
+        paylist = Paylist.objects.select_for_update().filter(
+            muse_msg_id=org_msg_id, is_deleted=False, destination=PaymentDestination.MUSE,
+        ).first() if org_msg_id else None
+        if not paylist:
+            return None, _error(404, f"No paylist was sent with msgId {org_msg_id!r}", 'REJECTED')
+        was = paylist.status
+        during_send = take_over_send_in_progress(paylist, org_msg_id)
         applied = apply_muse_batch_status(paylist, status, summary.get('statusDesc'),
                                           muse_time(header.get('createdAt')))
         rejection = (handle_batch_rejection(paylist, summary.get('statusDesc'))
                      if applied and status == 'REJECTED' else None)
     note = '' if applied else f'{status} not applied: paylist is {paylist.status}'
+    if applied and during_send:
+        note = f'applied during send (paylist was {was})'
     if rejection:
         note = (f"{rejection['withdrawn']} payee(s) withdrawn, {rejection['kept']} kept, "
                 f"{rejection['needs_review']} need review")

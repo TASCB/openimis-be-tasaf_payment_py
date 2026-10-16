@@ -4,7 +4,9 @@ from unittest import mock
 from django.test import SimpleTestCase
 
 from tasaf_payment.models import PaylistStatus as S
-from tasaf_payment.services import _start_new_muse_attempt, apply_muse_batch_status
+from tasaf_payment.services import (
+    _start_new_muse_attempt, apply_muse_batch_status, take_over_send_in_progress,
+)
 
 
 def paylist(status, **extra):
@@ -46,10 +48,17 @@ class MuseBatchStatusTest(SimpleTestCase):
         self.assertFalse(self.apply(p, S.RECEIVED))
         self.assertEqual((p.status, p.saves), (S.ACCEPTED, 0))
 
-    def test_rejected_only_before_acceptance(self):
+    def test_rejected_up_to_acceptance_never_after_the_bank(self):
         self.assertTrue(self.apply(paylist(S.SUBMITTED), S.REJECTED))
         self.assertTrue(self.apply(paylist(S.RECEIVED), S.REJECTED))
-        self.assertFalse(self.apply(paylist(S.ACCEPTED), S.REJECTED))
+        self.assertTrue(self.apply(paylist(S.ACCEPTED), S.REJECTED))
+        self.assertFalse(self.apply(paylist(S.SENT_TO_BANK), S.REJECTED))
+
+    def test_accepted_then_rejected_ends_rejected(self):
+        p = paylist(S.SUBMITTED)
+        self.assertTrue(self.apply(p, S.ACCEPTED))
+        self.assertTrue(self.apply(p, S.REJECTED))
+        self.assertEqual(p.status, S.REJECTED)
 
     def test_not_in_flight_is_ignored(self):
         for status in (S.APPROVED, S.CLOSED, S.REJECTED):
@@ -62,3 +71,32 @@ class MuseBatchStatusTest(SimpleTestCase):
         self.assertEqual(p.json_ext, {'muse_attempt': 2})
         self.assertIsNone(p.muse_msg_id)
         self.assertEqual(p.muse_batch_reference, 'TP260904-A0F744FC')
+
+
+class SendInProgressTest(SimpleTestCase):
+    def setUp(self):
+        patcher = mock.patch('tasaf_payment.services._inbound_audit_user', return_value=object())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_reply_to_the_msg_id_being_sent_takes_over(self):
+        for status in (S.APPROVED, S.REJECTED):
+            p = paylist(status)
+            p.json_ext = {'muse_sending': p.muse_msg_id}
+            self.assertTrue(take_over_send_in_progress(p, p.muse_msg_id))
+            self.assertEqual(p.status, S.SUBMITTED)
+            self.assertEqual(p.json_ext, {'muse_reply_during_send': p.muse_msg_id})
+
+    def test_no_send_in_progress_is_left_alone(self):
+        p = paylist(S.REJECTED)  # an old reply to a batch MUSE already rejected, not being resent
+        self.assertFalse(take_over_send_in_progress(p, p.muse_msg_id))
+        p.json_ext = {'muse_sending': 'TMOTHER000000002'}
+        self.assertFalse(take_over_send_in_progress(p, p.muse_msg_id))
+        self.assertEqual((p.status, p.saves), (S.REJECTED, 0))
+
+    def test_in_flight_or_final_paylists_are_not_taken_over(self):
+        for status in (S.SUBMITTED, S.ACCEPTED, S.CLOSED, S.PENDING_APPROVAL):
+            p = paylist(status)
+            p.json_ext = {'muse_sending': p.muse_msg_id}
+            self.assertFalse(take_over_send_in_progress(p, p.muse_msg_id))
+            self.assertEqual(p.status, status)

@@ -21,6 +21,9 @@ RECORDED = 'RECORDED'
 
 RETRYABLE_HTTP = (429, 500, 502, 503, 504)
 
+SENDING_KEY = 'muse_sending'
+REPLY_DURING_SEND_KEY = 'muse_reply_during_send'
+
 
 class SendResult:
     def __init__(self, outcome, message='', problems=None, attempts=0, request_id=None, reply=None):
@@ -73,7 +76,7 @@ def _close_log(entry, status, **fields):
         logger.warning("Could not update MuseTransactionLog: %s", exc)
 
 
-def _freeze_ids(paylist, body, user):
+def _freeze_ids(paylist, body, user, sending=False):
     """Store msgId, referenceNo and the message time on the first attempt; later attempts and
     re-submits then rebuild the identical header."""
     header = body['message']['messageHeader']
@@ -87,9 +90,12 @@ def _freeze_ids(paylist, body, user):
     ext = dict(paylist.json_ext or {})
     if 'muse_created_at' not in ext:
         ext['muse_created_at'] = header['createdAt']
-        paylist.json_ext = ext
+        changed.append('json_ext')
+    if sending and ext.get(SENDING_KEY) != header['msgId']:
+        ext[SENDING_KEY] = header['msgId']
         changed.append('json_ext')
     if changed:
+        paylist.json_ext = ext
         paylist.save(user=user)
 
 
@@ -131,13 +137,18 @@ def request_type():
 
 
 def _remember(paylist, user, result):
-    ext = dict(paylist.json_ext or {})
-    ext['muse_last_send'] = {
-        'outcome': result.outcome, 'message': result.message[:500], 'attempts': result.attempts,
-        'request_id': result.request_id, 'at': datetime.now(tz=timezone.utc).isoformat(),
-    }
-    paylist.json_ext = ext
-    paylist.save(user=user)
+    from django.db import transaction
+    from tasaf_payment.models import Paylist
+    with transaction.atomic():
+        fresh = Paylist.objects.select_for_update().get(pk=paylist.pk)
+        ext = dict(fresh.json_ext or {})
+        ext['muse_last_send'] = {
+            'outcome': result.outcome, 'message': result.message[:500], 'attempts': result.attempts,
+            'request_id': result.request_id, 'at': datetime.now(tz=timezone.utc).isoformat(),
+        }
+        fresh.json_ext = ext
+        fresh.save(user=user)
+    paylist.refresh_from_db()
 
 
 class MuseSender:
@@ -175,7 +186,7 @@ class MuseSender:
         if not govesb_enabled():
             return SendResult(REFUSED, 'GovESB is not configured on this server; nothing was sent')
 
-        _freeze_ids(paylist, body, self.user)
+        _freeze_ids(paylist, body, self.user, sending=True)
         body = muse_message.build(paylist)
         _log_payees(body)
         max_attempts = max(1, int(_config('muse_send_max_attempts', 3)))

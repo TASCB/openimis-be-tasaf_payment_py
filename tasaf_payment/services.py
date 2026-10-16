@@ -1242,16 +1242,14 @@ class PaylistService:
             if paylist.destination == PaymentDestination.MUSE:
                 from tasaf_payment.muse_sender import MuseSender
                 result = MuseSender(self.user).send(paylist, self.GOVESB_TOPIC_PAYMENT_SUBMIT)
-                if not result.submitted:
+                if not result.submitted and not _replied_during_send(paylist):
                     logger.info("PaylistService.submit: paylist=%s not submitted (%s): %s",
                                 paylist_uuid, result.outcome, result.message)
                     return {'success': False, 'error': result.message, 'outcome': result.outcome}
             else:
                 self._publish_paylist(paylist)
 
-            paylist.status = PaylistStatus.SUBMITTED
-            paylist.submitted_at = datetime.now(tz=timezone.utc)
-            paylist.save(user=self.user)
+            paylist = _mark_submitted(paylist, self.user)
 
             from tasaf_payment.muse_sender import apply_reply
             ack = apply_reply(result)
@@ -1575,13 +1573,52 @@ def _start_new_muse_attempt(paylist, user):
 MUSE_BATCH_ORDER = {s: i for i, s in enumerate(PAYLIST_IN_FLIGHT_STATUSES)}
 
 
+def _replied_during_send(paylist) -> bool:
+    from tasaf_payment.muse_sender import REPLY_DURING_SEND_KEY
+    paylist.refresh_from_db()
+    ext = paylist.json_ext or {}
+    return bool(paylist.muse_msg_id) and ext.get(REPLY_DURING_SEND_KEY) == paylist.muse_msg_id
+
+
+def _mark_submitted(paylist, user):
+    from tasaf_payment.muse_sender import REPLY_DURING_SEND_KEY, SENDING_KEY
+    with transaction.atomic():
+        fresh = Paylist.objects.select_for_update().get(pk=paylist.pk)
+        ext = dict(fresh.json_ext or {})
+        replied = bool(fresh.muse_msg_id) and ext.get(REPLY_DURING_SEND_KEY) == fresh.muse_msg_id
+        ext.pop(SENDING_KEY, None)
+        ext.pop(REPLY_DURING_SEND_KEY, None)
+        fresh.json_ext = ext
+        if not replied:
+            fresh.status = PaylistStatus.SUBMITTED
+            fresh.submitted_at = datetime.now(tz=timezone.utc)
+        fresh.save(user=user)
+    return fresh
+
+
+def take_over_send_in_progress(paylist, org_msg_id) -> bool:
+    from tasaf_payment.muse_sender import REPLY_DURING_SEND_KEY, SENDING_KEY
+    ext = dict(paylist.json_ext or {})
+    if (paylist.status not in (PaylistStatus.APPROVED, PaylistStatus.REJECTED)
+            or not org_msg_id or ext.get(SENDING_KEY) != org_msg_id):
+        return False
+    ext.pop(SENDING_KEY)
+    ext[REPLY_DURING_SEND_KEY] = org_msg_id
+    paylist.json_ext = ext
+    paylist.status = PaylistStatus.SUBMITTED
+    paylist.submitted_at = datetime.now(tz=timezone.utc)
+    paylist.save(user=_inbound_audit_user(paylist))
+    logger.info("Paylist %s: MUSE replied before Submit finished; now SUBMITTED", paylist.uuid)
+    return True
+
+
 def apply_muse_batch_status(paylist, status, description=None, at=None, user=None) -> bool:
     """Record a batch-level reply from MUSE (RECEIVED, ACCEPTED, SENT_TO_BANK, REJECTED).
     Only moves forward; a repeat or an older reply is ignored. Returns True if applied."""
     if paylist.status not in PAYLIST_IN_FLIGHT_STATUSES:
         return False
     if status == PaylistStatus.REJECTED:
-        if MUSE_BATCH_ORDER[paylist.status] > MUSE_BATCH_ORDER[PaylistStatus.RECEIVED]:
+        if MUSE_BATCH_ORDER[paylist.status] > MUSE_BATCH_ORDER[PaylistStatus.ACCEPTED]:
             return False
     elif status not in MUSE_BATCH_ORDER or MUSE_BATCH_ORDER[status] <= MUSE_BATCH_ORDER[paylist.status]:
         return False
