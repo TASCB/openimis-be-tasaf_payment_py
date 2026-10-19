@@ -1240,7 +1240,7 @@ class PaylistService:
 
             result = None
             if paylist.destination == PaymentDestination.MUSE:
-                from tasaf_payment.muse_sender import MuseSender
+                from tasaf_payment.muse.sender import MuseSender
                 result = MuseSender(self.user).send(paylist, self.GOVESB_TOPIC_PAYMENT_SUBMIT)
                 if not result.submitted and not _replied_during_send(paylist):
                     logger.info("PaylistService.submit: paylist=%s not submitted (%s): %s",
@@ -1251,7 +1251,7 @@ class PaylistService:
 
             paylist = _mark_submitted(paylist, self.user)
 
-            from tasaf_payment.muse_sender import apply_reply
+            from tasaf_payment.muse.sender import apply_reply
             ack = apply_reply(result)
             logger.info("PaylistService.submit: paylist=%s (user=%s) ack=%s", paylist_uuid, self.user.username, ack)
             return {'success': True, 'error': None, 'muse_ack': ack}
@@ -1264,7 +1264,7 @@ class PaylistService:
 
     def _publish_paylist(self, paylist: Paylist) -> None:
         """GePG only: the flat payload over GovESB, fail-soft. MUSE paylists go through
-        ``muse_sender.MuseSender``."""
+        ``muse.sender.MuseSender``."""
         items = list(paylist.items.select_related('payment_account').all())
         payload = {
             'paylist_uuid':   str(paylist.uuid),
@@ -1538,7 +1538,7 @@ def settle_item(item, settled_at=None, reference=None):
 
 
 def unapply_item(item, reason_code=None, reason_description=None, reference=None):
-    from tasaf_payment.muse_rejection import flag_returned_account
+    from tasaf_payment.muse.rejection import flag_returned_account
     user = _inbound_audit_user(item)
     reason = ' '.join(p for p in (reason_code, reason_description) if p) or 'Payment returned unapplied'
     with transaction.atomic():
@@ -1574,14 +1574,14 @@ MUSE_BATCH_ORDER = {s: i for i, s in enumerate(PAYLIST_IN_FLIGHT_STATUSES)}
 
 
 def _replied_during_send(paylist) -> bool:
-    from tasaf_payment.muse_sender import REPLY_DURING_SEND_KEY
+    from tasaf_payment.muse.sender import REPLY_DURING_SEND_KEY
     paylist.refresh_from_db()
     ext = paylist.json_ext or {}
     return bool(paylist.muse_msg_id) and ext.get(REPLY_DURING_SEND_KEY) == paylist.muse_msg_id
 
 
 def _mark_submitted(paylist, user):
-    from tasaf_payment.muse_sender import REPLY_DURING_SEND_KEY, SENDING_KEY
+    from tasaf_payment.muse.sender import REPLY_DURING_SEND_KEY, SENDING_KEY
     with transaction.atomic():
         fresh = Paylist.objects.select_for_update().get(pk=paylist.pk)
         ext = dict(fresh.json_ext or {})
@@ -1597,7 +1597,7 @@ def _mark_submitted(paylist, user):
 
 
 def take_over_send_in_progress(paylist, org_msg_id) -> bool:
-    from tasaf_payment.muse_sender import REPLY_DURING_SEND_KEY, SENDING_KEY
+    from tasaf_payment.muse.sender import REPLY_DURING_SEND_KEY, SENDING_KEY
     ext = dict(paylist.json_ext or {})
     if (paylist.status not in (PaylistStatus.APPROVED, PaylistStatus.REJECTED)
             or not org_msg_id or ext.get(SENDING_KEY) != org_msg_id):

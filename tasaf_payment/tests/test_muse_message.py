@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from django.test import SimpleTestCase
 
-from tasaf_payment import muse_message as mm
+from tasaf_payment.muse import message as mm
 
 NOW = datetime(2026, 1, 8, 18, 18, 6)
 SETTINGS = {'institutionCode': '000M0048', 'payerAccount': '9921473423', 'subBudgetClass': 202,

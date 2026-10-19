@@ -57,14 +57,14 @@ class PayeeCodeTest(SimpleTestCase):
 class PayeeCodeWiringTest(SimpleTestCase):
     def test_message_payee_code_is_encoded_never_raw(self):
         from types import SimpleNamespace
-        from tasaf_payment import muse_message as mm
+        from tasaf_payment.muse import message as mm
         self.assertEqual(mm.payee_code(SimpleNamespace(code='P3-020410104-82239997')), 'TSFBN09LZ8JU9gj')
         for code in ('P3-040403202-25694267-R', 'SEEDG0000001', None):
             self.assertEqual(mm.payee_code(SimpleNamespace(code=code)), '')
         self.assertEqual(mm.payee_code(None), '')
 
     def test_check_names_the_missing_hhid_and_shows_hhid_next_to_code(self):
-        from tasaf_payment import muse_message as mm
+        from tasaf_payment.muse import message as mm
         from tasaf_payment.tests.test_muse_message import IDS, NOW, SETTINGS, payee
         body = mm.assemble(IDS, SETTINGS, [payee(payeeCode=''), payee(payeeCode='TSFBN09LZ8JU9gj',
                                                                         payeeBankBic='BAD')], NOW)
@@ -82,7 +82,7 @@ class InboundPayeeCodeTest(SimpleTestCase):
 
     def _check(self, details, item, exists=True):
         from unittest import mock
-        from tasaf_payment import muse_inbound as mi
+        from tasaf_payment.muse import inbound as mi
         with mock.patch('individual.models.Group.objects') as objects:
             objects.filter.return_value.exists.return_value = exists
             return mi._payee_problem(details, item)

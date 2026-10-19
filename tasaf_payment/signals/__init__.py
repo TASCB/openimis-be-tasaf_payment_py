@@ -156,7 +156,7 @@ def bind_service_signals():
 
     try:
         from tasaf_payment.approval_adapter import PaylistApprovalAdapter
-        from tasaf_payment.muse_setup import on_approval_finalized as on_muse_change_finalized
+        from tasaf_payment.muse.setup import on_approval_finalized as on_muse_change_finalized
         bind_service_signal(
             'approval_service.finalized',
             PaylistApprovalAdapter.on_finalized,

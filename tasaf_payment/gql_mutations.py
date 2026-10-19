@@ -707,7 +707,7 @@ class SaveFspProfileMutation(OpenIMISMutation):
 
     @classmethod
     def async_mutate(cls, user, **data):
-        from tasaf_payment.muse_setup import propose_profile
+        from tasaf_payment.muse.setup import propose_profile
         try:
             _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
             propose_profile(user, data['fsp_code'], data['bank_name'], data['fsp_type'], data['bic'],
@@ -726,7 +726,7 @@ class DeleteFspMutation(OpenIMISMutation):
 
     @classmethod
     def async_mutate(cls, user, **data):
-        from tasaf_payment.muse_setup import delete_fsp
+        from tasaf_payment.muse.setup import delete_fsp
         try:
             _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
             delete_fsp(user, data['fsp_code'])
@@ -757,7 +757,7 @@ class SaveMuseSettingsMutation(OpenIMISMutation):
 
     @classmethod
     def async_mutate(cls, user, **data):
-        from tasaf_payment.muse_setup import propose_settings
+        from tasaf_payment.muse.setup import propose_settings
         try:
             _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
             data.pop('client_mutation_id', None)
@@ -784,7 +784,7 @@ class ApproveMuseChangeMutation(OpenIMISMutation):
 
     @classmethod
     def async_mutate(cls, user, **data):
-        from tasaf_payment.muse_setup import decide
+        from tasaf_payment.muse.setup import decide
         try:
             _require_perms(user, TasafPaymentConfig.gql_muse_settings_approve_perms)
             decide(user, data['change_id'], True, data.get('comment'))
@@ -802,7 +802,7 @@ class RejectMuseChangeMutation(OpenIMISMutation):
 
     @classmethod
     def async_mutate(cls, user, **data):
-        from tasaf_payment.muse_setup import decide
+        from tasaf_payment.muse.setup import decide
         try:
             _require_perms(user, TasafPaymentConfig.gql_muse_settings_approve_perms)
             decide(user, data['change_id'], False, data.get('comment'))
@@ -821,7 +821,7 @@ class CancelMuseChangeMutation(OpenIMISMutation):
 
     @classmethod
     def async_mutate(cls, user, **data):
-        from tasaf_payment.muse_setup import cancel
+        from tasaf_payment.muse.setup import cancel
         try:
             _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
             cancel(user, data['change_id'], data.get('comment'))

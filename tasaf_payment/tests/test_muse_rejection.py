@@ -3,7 +3,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
-from tasaf_payment import muse_rejection as mr
+from tasaf_payment.muse import rejection as mr
 
 REAL_DA2C = 'Failure for 255739804505, System internal error. for 255726694556'
 REAL_AC4F = ('MSISDN invalid. for 255646379525, MSISDN invalid. for 255721640936, '
@@ -96,7 +96,7 @@ class HandleRejectionTest(SimpleTestCase):
         for target, kwargs in (
             ('tasaf_payment.services._inbound_audit_user', {'return_value': object()}),
             ('tasaf_payment.events.emit_muse_event', {}),
-            ('tasaf_payment.muse_rejection.withdraw_item',
+            ('tasaf_payment.muse.rejection.withdraw_item',
              {'side_effect': lambda i, reason, cls, p, u: self.withdrawn.append((i.id, cls)) or 'fu-1'}),
             ('tasaf_payment.apps.TasafPaymentConfig.muse_rejection_reason_classes', {'new': CLASSES}),
             ('tasaf_payment.apps.TasafPaymentConfig.muse_transient_retry_limit', {'new': 2}),

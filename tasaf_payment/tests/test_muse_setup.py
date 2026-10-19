@@ -1,6 +1,6 @@
 from django.test import SimpleTestCase
 
-from tasaf_payment import muse_setup as ms
+from tasaf_payment.muse import setup as ms
 
 
 class MuseSetupValidationTest(SimpleTestCase):

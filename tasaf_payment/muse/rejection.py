@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from django.db import transaction
 
-from tasaf_payment import muse_message
+from tasaf_payment.muse import message as muse_message
 from tasaf_payment.msisdn import normalise
 
 logger = logging.getLogger(__name__)

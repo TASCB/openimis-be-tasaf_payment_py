@@ -3,7 +3,7 @@ from unittest import mock
 from django.db.models import Count, Q
 from django.test import TestCase
 
-from tasaf_payment import muse_inbound, muse_sender
+from tasaf_payment.muse import inbound as muse_inbound, sender as muse_sender
 from tasaf_payment.models import Paylist, PaylistItemStatus, PaylistStatus, PaymentDestination
 from tasaf_payment.services import PaylistService
 

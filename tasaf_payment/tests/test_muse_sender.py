@@ -6,7 +6,7 @@ from django.test import SimpleTestCase
 from coremis_app_integration.esb_client.exceptions import (
     ESBConfigurationError, ESBRequestError, ESBSignatureError,
 )
-from tasaf_payment import muse_sender as ms
+from tasaf_payment.muse import sender as ms
 
 BODY = {'message': {'messageHeader': {'msgId': 'TMA0F744FC42A601', 'createdAt': '2026-09-28 10:00:00'},
                     'paymentSummary': {'referenceNo': 'TP260904-A0F744FC', 'noofTransaction': 2,
@@ -148,13 +148,13 @@ class MuseReplyTest(SimpleTestCase):
             self.assertIsNone(ms.muse_reply(esb_body))
 
     def test_apply_reply_runs_the_inbound_handler(self):
-        with mock.patch('tasaf_payment.muse_inbound.handle') as handle:
+        with mock.patch('tasaf_payment.muse.inbound.handle') as handle:
             status = ms.apply_reply(ms.SendResult(ms.SENT, reply=ACK))
         handle.assert_called_once_with(ACK)
         self.assertEqual(status, 'REJECTED')
 
     def test_apply_reply_never_raises(self):
-        with mock.patch('tasaf_payment.muse_inbound.handle', side_effect=RuntimeError('db down')):
+        with mock.patch('tasaf_payment.muse.inbound.handle', side_effect=RuntimeError('db down')):
             self.assertIsNone(ms.apply_reply(ms.SendResult(ms.SENT, reply=ACK)))
         self.assertIsNone(ms.apply_reply(ms.SendResult(ms.SENT)))
         self.assertIsNone(ms.apply_reply(None))

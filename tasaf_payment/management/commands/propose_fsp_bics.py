@@ -31,7 +31,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         from core.models import User
         from tasaf_payment.models import MuseChangeKind, MuseChangeRequest, MuseChangeStatus
-        from tasaf_payment.muse_setup import SetupError, profile_values, propose_profile
+        from tasaf_payment.muse.setup import SetupError, profile_values, propose_profile
 
         maker = User.objects.filter(i_user__login_name=options['maker']).first()
         if not maker:

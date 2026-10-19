@@ -218,7 +218,7 @@ class MuseMessageView(View):
 
     def post(self, request, *args, **kwargs):
         from coremis_app_integration.govesb_inbound import signed_reply
-        from tasaf_payment.muse_inbound import handle
+        from tasaf_payment.muse.inbound import handle
 
         def reply(success, body):
             if success:

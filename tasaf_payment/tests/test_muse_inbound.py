@@ -1,6 +1,6 @@
 from django.test import SimpleTestCase
 
-from tasaf_payment import muse_inbound as mi
+from tasaf_payment.muse import inbound as mi
 
 
 class MuseInboundPureTest(SimpleTestCase):

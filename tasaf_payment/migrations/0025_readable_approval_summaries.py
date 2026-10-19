@@ -17,7 +17,7 @@ def rewrite_summaries(apps, schema_editor):
 
     change_type = ContentType.objects.filter(app_label='tasaf_payment', model='musechangerequest').first()
     if change_type and ApprovalRequest.objects.filter(content_type=change_type).exists():
-        from tasaf_payment.muse_setup import describe_change
+        from tasaf_payment.muse.setup import describe_change
         MuseChangeRequest = apps.get_model('tasaf_payment', 'MuseChangeRequest')
         for change in MuseChangeRequest.objects.all():
             summary = describe_change(change.kind, change.fsp_code, change.current, change.proposed or {},

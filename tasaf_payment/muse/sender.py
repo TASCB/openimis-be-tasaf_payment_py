@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from tasaf_payment import muse_message
+from tasaf_payment.muse import message as muse_message
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ def apply_reply(result):
     if not result or not result.reply:
         return None
     try:
-        from tasaf_payment.muse_inbound import handle
+        from tasaf_payment.muse.inbound import handle
         handle(result.reply)
         return str(((result.reply['message'].get('messageSummary') or {}).get('status')) or '') or None
     except Exception as exc:  # noqa: BLE001 — the batch is sent; a reply problem must not undo that

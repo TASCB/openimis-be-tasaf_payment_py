@@ -430,7 +430,7 @@ class Query(graphene.ObjectType):
 
     def resolve_paylist_fsp_options(self, info, paylist_uuid):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
-        from tasaf_payment.muse_setup import paylist_fsps
+        from tasaf_payment.muse.setup import paylist_fsps
         return [FspProviderGQLType(**row) for row in paylist_fsps(paylist_uuid)]
 
     def resolve_paylist_muse_log(self, info, paylist_uuid, limit=None):
@@ -439,7 +439,7 @@ class Query(graphene.ObjectType):
             from muse_payment_adaptor.models import MuseTransactionLog
         except ImportError:
             return []
-        from tasaf_payment.muse_inbound import muse_feedback
+        from tasaf_payment.muse.inbound import muse_feedback
         paylist = Paylist.objects.filter(uuid=paylist_uuid).first()
         if not paylist:
             return []
@@ -633,12 +633,12 @@ class Query(graphene.ObjectType):
 
     def resolve_fsp_providers(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_withdrawal_charge_search_perms)
-        from tasaf_payment.muse_setup import provider_list
+        from tasaf_payment.muse.setup import provider_list
         return [FspProviderGQLType(**row) for row in provider_list()]
 
     def resolve_muse_settings(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
-        from tasaf_payment.muse_setup import SETTINGS_FIELDS, get_settings
+        from tasaf_payment.muse.setup import SETTINGS_FIELDS, get_settings
         s = get_settings()
         if s is None:
             return None
@@ -647,7 +647,7 @@ class Query(graphene.ObjectType):
 
     def resolve_muse_change_requests(self, info, status=None, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
-        from tasaf_payment.muse_setup import change_rows
+        from tasaf_payment.muse.setup import change_rows
         user = info.context.user
         rows = change_rows(status=status)
         me = getattr(user, 'username', None)
@@ -662,7 +662,7 @@ class Query(graphene.ObjectType):
 
     def resolve_muse_readiness(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
-        from tasaf_payment.muse_setup import readiness
+        from tasaf_payment.muse.setup import readiness
         return MuseReadinessGQLType(**readiness())
 
     def resolve_fsp_band_set(self, info, fsp_code, **kwargs):
@@ -681,7 +681,7 @@ class Query(graphene.ObjectType):
         return PaylistService(info.context.user).preview_generation(payroll_id, batch_type, destination, fsp_code or None)
 
     def resolve_paylist_muse_preview(self, info, paylist_uuid, sample_rows=20, **kwargs):
-        from tasaf_payment.muse_message import preview
+        from tasaf_payment.muse.message import preview
 
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
         paylist = Paylist.objects.filter(id=paylist_uuid, is_deleted=False).first()

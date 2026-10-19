@@ -5,7 +5,7 @@ from unittest import mock
 from django.db.models import Count, Q
 from django.test import TestCase
 
-from tasaf_payment import muse_inbound, muse_message
+from tasaf_payment.muse import inbound as muse_inbound, message as muse_message
 from tasaf_payment.models import (
     Paylist, PaylistItem, PaylistItemStatus, PaylistStatus, PaymentDestination, ReturnFeedback,
     ReturnFeedbackType, VerificationStatus,

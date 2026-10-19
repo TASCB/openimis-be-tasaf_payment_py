@@ -37,7 +37,7 @@ _FEEDBACK_RE = re.compile(r'"status"\s*:\s*"([^"]*)"(?:.*?"statusDesc"\s*:\s*"([
 
 
 def muse_feedback(body):
-    from tasaf_payment.muse_message import SENDER
+    from tasaf_payment.muse.message import SENDER
     try:
         message = (json.loads(body) or {}).get('message')
     except (TypeError, ValueError, AttributeError):
@@ -68,7 +68,7 @@ def muse_time(value):
 
 
 def ack_message(org_message_type, org_msg_id, desc='Received Successfully', status='RECEIVED'):
-    from tasaf_payment.muse_message import DATE_FORMAT, RECEIVER, SENDER
+    from tasaf_payment.muse.message import DATE_FORMAT, RECEIVER, SENDER
     return {'message': {
         'messageHeader': {'sender': SENDER, 'receiver': RECEIVER,
                           'msgId': f"TA{uuid.uuid4().hex[:14].upper()}",
@@ -125,7 +125,7 @@ def _reject(message_type, header, paylist, reason):
 
 def _batch(message_type, header, summary):
     from tasaf_payment.models import Paylist, PaymentDestination
-    from tasaf_payment.muse_rejection import handle_batch_rejection
+    from tasaf_payment.muse.rejection import handle_batch_rejection
     from tasaf_payment.services import apply_muse_batch_status, take_over_send_in_progress
 
     status = BATCH_STATUSES.get(str(summary.get('status') or '').strip().upper().replace('_', ' '))

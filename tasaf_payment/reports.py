@@ -229,7 +229,7 @@ def export_paylist_items(user, items):
     from pandas import DataFrame
     from core.models import ExportableQueryModel
     from individual.models import GroupIndividual
-    from tasaf_payment.muse_message import payee_code
+    from tasaf_payment.muse.message import payee_code
 
     items = list(items.select_related(
         'benefit_consumption', 'payment_account__group_beneficiary__group__location__parent__parent__parent',

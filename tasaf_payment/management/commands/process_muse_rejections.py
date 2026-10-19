@@ -15,7 +15,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         from django.db.models import Q
         from tasaf_payment.models import Paylist, PaylistStatus, PaymentDestination
-        from tasaf_payment.muse_rejection import handle_batch_rejection
+        from tasaf_payment.muse.rejection import handle_batch_rejection
 
         qs = Paylist.objects.filter(is_deleted=False, destination=PaymentDestination.MUSE,
                                     status=PaylistStatus.REJECTED).exclude(muse_msg_id__isnull=True)

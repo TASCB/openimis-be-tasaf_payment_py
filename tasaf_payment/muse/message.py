@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from tasaf_payment.muse_setup import BIC_RE, CURRENCY
+from tasaf_payment.muse.setup import BIC_RE, CURRENCY
 from tasaf_payment.payee_code import PayeeCodeError, decode_payee_code, encode_hhid
 
 SENDER = 'TASAFMIS'
@@ -200,7 +200,7 @@ def payee_rows(paylist):
 
 
 def build(paylist, now=None):
-    from tasaf_payment.muse_setup import get_settings
+    from tasaf_payment.muse.setup import get_settings
 
     now = now or message_time(paylist) or datetime.now()
     ids = {'msgId': msg_id(paylist), 'referenceNo': reference_no(paylist)}
@@ -333,7 +333,7 @@ def summarise(problems):
 
 def _request_type_name():
     try:
-        from tasaf_payment.muse_sender import request_type
+        from tasaf_payment.muse.sender import request_type
         return request_type().name
     except ImportError:
         return 'NORMAL'
@@ -354,7 +354,7 @@ def preview(paylist, sample_rows=20, max_problems=100):
     except ImportError:
         enabled, api_code = False, None
 
-    from tasaf_payment.muse_setup import get_settings, server_environment
+    from tasaf_payment.muse.setup import get_settings, server_environment
 
     body = build(paylist)
     problems = check(body)

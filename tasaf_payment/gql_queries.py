@@ -311,7 +311,7 @@ class PaylistItemGQLType(DjangoObjectType):
         return feedback.received_at.isoformat() if feedback else None
 
     def resolve_payee_code(self, info):
-        from tasaf_payment.muse_message import payee_code
+        from tasaf_payment.muse.message import payee_code
         beneficiary = getattr(self.payment_account, 'group_beneficiary', None)
         return payee_code(getattr(beneficiary, 'group', None)) or None
 
