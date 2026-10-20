@@ -1429,7 +1429,8 @@ def take_over_send_in_progress(paylist, org_msg_id) -> bool:
 
 
 def apply_muse_batch_status(paylist, status, description=None, at=None, user=None) -> bool:
-    """Record a batch-level reply from MUSE (RECEIVED, ACCEPTED, SENT_TO_BANK, REJECTED).
+    """Record a batch-level reply from MUSE (RECEIVED, ACCEPTED, SENT_TO_BANK, ACCEPTED_BY_BANK,
+    PROCESSED_BY_BANK, REJECTED).
     Only moves forward; a repeat or an older reply is ignored. Returns True if applied."""
     if paylist.status not in PAYLIST_IN_FLIGHT_STATUSES:
         return False

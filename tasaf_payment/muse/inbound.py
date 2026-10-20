@@ -12,7 +12,9 @@ from django.db import transaction
 logger = logging.getLogger(__name__)
 
 BATCH_STATUSES = {'RECEIVED': 'RECEIVED', 'REJECTED': 'REJECTED', 'ACCEPTED': 'ACCEPTED',
-                  'SENT TO BANK': 'SENT_TO_BANK'}
+                  'SENT TO BANK': 'SENT_TO_BANK', 'SENT TO MNO': 'SENT_TO_BANK',
+                  'ACCEPTED BY BANK': 'ACCEPTED_BY_BANK', 'ACCEPTED BY MNO': 'ACCEPTED_BY_BANK',
+                  'PROCESSED BY BANK': 'PROCESSED_BY_BANK', 'PROCESSED BY MNO': 'PROCESSED_BY_BANK'}
 PAYMENT_STATUSES = ('SETTLED', 'UNAPPLIED')
 REFERENCE_RE = re.compile(r'Reference\s+([A-Za-z0-9-]+)', re.IGNORECASE)
 ACK_TOPIC = 'tasaf.payment.ack'
@@ -123,12 +125,16 @@ def _reject(message_type, header, paylist, reason):
     return ack
 
 
+def batch_status_key(raw):
+    return ' '.join(str(raw or '').upper().replace('_', ' ').split())
+
+
 def _batch(message_type, header, summary):
     from tasaf_payment.models import Paylist, PaymentDestination
     from tasaf_payment.muse.rejection import handle_batch_rejection
     from tasaf_payment.services import apply_muse_batch_status, take_over_send_in_progress
 
-    status = BATCH_STATUSES.get(str(summary.get('status') or '').strip().upper().replace('_', ' '))
+    status = BATCH_STATUSES.get(batch_status_key(summary.get('status')))
     if not status:
         return None, _error(400, f"Unknown batch status: {summary.get('status')!r}", 'FAILED')
     org_msg_id = str(summary.get('orgMsgId') or '').strip()

@@ -20,7 +20,14 @@ class MuseInboundPureTest(SimpleTestCase):
 
     def test_both_spellings_of_sent_to_bank(self):
         for raw in ('SENT TO BANK', 'SENT_TO_BANK', 'sent to bank'):
-            self.assertEqual(mi.BATCH_STATUSES[raw.strip().upper().replace('_', ' ')], 'SENT_TO_BANK')
+            self.assertEqual(mi.BATCH_STATUSES[mi.batch_status_key(raw)], 'SENT_TO_BANK')
+
+    def test_muses_bank_and_mno_wording(self):
+        sent = {'Sent to Bank': 'SENT_TO_BANK', 'Sent to MNO': 'SENT_TO_BANK',
+                'Accepted by Bank': 'ACCEPTED_BY_BANK', ' Processed  by Bank ': 'PROCESSED_BY_BANK',
+                'REJECTED': 'REJECTED', 'Accepted': 'ACCEPTED', 'Received': 'RECEIVED'}
+        for raw, status in sent.items():
+            self.assertEqual(mi.BATCH_STATUSES.get(mi.batch_status_key(raw)), status, raw)
 
     def test_rejected_ack_carries_the_reason(self):
         ack = mi.ack_message('RESPONSE', 'SP1', 'No paylist was sent with msgId', status='REJECTED')['message']

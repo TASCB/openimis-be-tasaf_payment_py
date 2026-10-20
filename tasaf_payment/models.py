@@ -47,6 +47,8 @@ class PaylistStatus(models.TextChoices):
     RECEIVED         = 'RECEIVED',         _("RECEIVED")
     ACCEPTED         = 'ACCEPTED',         _("ACCEPTED")
     SENT_TO_BANK     = 'SENT_TO_BANK',     _("SENT_TO_BANK")
+    ACCEPTED_BY_BANK = 'ACCEPTED_BY_BANK', _("ACCEPTED_BY_BANK")
+    PROCESSED_BY_BANK = 'PROCESSED_BY_BANK', _("PROCESSED_BY_BANK")
     REJECTED         = 'REJECTED',         _("REJECTED")
     CLOSED           = 'CLOSED',           _("CLOSED")
     # Payment approval rejected or cancelled: final; its benefits may be generated again.
@@ -59,6 +61,8 @@ PAYLIST_IN_FLIGHT_STATUSES = (
     PaylistStatus.RECEIVED,
     PaylistStatus.ACCEPTED,
     PaylistStatus.SENT_TO_BANK,
+    PaylistStatus.ACCEPTED_BY_BANK,
+    PaylistStatus.PROCESSED_BY_BANK,
 )
 
 
@@ -305,7 +309,7 @@ class Paylist(HistoryBusinessModel):
     muse_batch_reference = models.CharField(max_length=100, null=True, blank=True)
     # MUSE msgId, fixed at the first send so every resend carries the same id.
     muse_msg_id = models.CharField(max_length=32, null=True, blank=True, db_index=True)
-    # MUSE's last batch-level reply (RECEIVED / ACCEPTED / SENT_TO_BANK / REJECTED).
+    # MUSE's last batch-level reply, in MUSE's own words.
     muse_status_desc = models.TextField(null=True, blank=True)
     muse_status_at = models.DateTimeField(null=True, blank=True)
     batch_group = models.UUIDField(null=True, blank=True, db_index=True)

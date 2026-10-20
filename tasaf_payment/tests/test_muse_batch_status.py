@@ -33,10 +33,11 @@ class MuseBatchStatusTest(SimpleTestCase):
 
     def test_moves_forward_through_the_flow(self):
         p = paylist(S.SUBMITTED)
-        for status in (S.RECEIVED, S.ACCEPTED, S.SENT_TO_BANK):
+        for status in (S.RECEIVED, S.ACCEPTED, S.SENT_TO_BANK, S.ACCEPTED_BY_BANK, S.PROCESSED_BY_BANK):
             self.assertTrue(self.apply(p, status))
             self.assertEqual(p.status, status)
-        self.assertEqual((p.muse_status_desc, p.saves), ('desc', 3))
+        self.assertEqual((p.muse_status_desc, p.saves), ('desc', 5))
+        self.assertFalse(self.apply(p, S.SENT_TO_BANK))
 
     def test_may_skip_a_stage(self):
         p = paylist(S.SUBMITTED)
@@ -53,6 +54,7 @@ class MuseBatchStatusTest(SimpleTestCase):
         self.assertTrue(self.apply(paylist(S.RECEIVED), S.REJECTED))
         self.assertTrue(self.apply(paylist(S.ACCEPTED), S.REJECTED))
         self.assertFalse(self.apply(paylist(S.SENT_TO_BANK), S.REJECTED))
+        self.assertFalse(self.apply(paylist(S.PROCESSED_BY_BANK), S.REJECTED))
 
     def test_accepted_then_rejected_ends_rejected(self):
         p = paylist(S.SUBMITTED)
