@@ -274,3 +274,54 @@ def export_paylist_items(user, items):
     export.save()
     logger.info("export_paylist_items: %s (%d row(s))", filename, len(records))
     return export.name
+
+
+def paylist_pdf_rows(paylist):
+    from tasaf_payment.muse.message import _representative_names
+
+    names = _representative_names(paylist)
+    rows = (paylist.items.filter(is_deleted=False).exclude(status=PaylistItemStatus.WITHDRAWN)
+            .order_by('date_created', 'id')
+            .values_list('payment_account__group_beneficiary__group_id',
+                         'payment_account__group_beneficiary__group__code',
+                         'payment_account__group_beneficiary__group__json_ext__primary_recipient',
+                         'payment_account__fsp_name', 'payment_account__account_number', 'amount'))
+    return [{
+        'hhid': code or '',
+        'representative': names.get(group_id) or str(primary or '').strip(),
+        'fsp': fsp or '',
+        'account': account or '',
+        'amount': float(amount) if amount is not None else 0,
+    } for group_id, code, primary, fsp, account, amount in rows]
+
+
+PDF_DEDUCTION_KEYS = ('education_penalty', 'health_penalty', 'overpayment')
+
+
+def paylist_pdf_breakdown(paylist):
+    payments, deductions = defaultdict(Decimal), defaultdict(Decimal)
+    gross = charges = Decimal('0')
+    rows = (paylist.items.filter(is_deleted=False).exclude(status=PaylistItemStatus.WITHDRAWN)
+            .values_list('amount', 'charge_amount', 'benefit_consumption__json_ext'))
+    for amount, charge, ext in rows:
+        gross += _dec(amount)
+        charges += _dec(charge)
+        breakdown = (ext or {}).get('pct_breakdown') or {}
+        for key, value in breakdown.items():
+            if key in PDF_DEDUCTION_KEYS or key.endswith('_penalty'):
+                deductions[key] += _dec(value)
+            elif key.endswith('_amount') and key != 'household_cap_amount':
+                payments[key] += _dec(value)
+        if breakdown:
+            deductions['household_cap'] += _dec(breakdown.get('raw_total')) - _dec(breakdown.get('capped_total'))
+    payments['withdrawal_charge'] += charges
+    difference = gross - (sum(payments.values()) - sum(deductions.values()))
+    if difference > 0:
+        payments['other'] += difference
+    elif difference < 0:
+        deductions['other'] -= difference
+
+    def listed(side):
+        return [{'key': key, 'amount': float(value)} for key, value in side.items() if value]
+
+    return {'payments': listed(payments), 'deductions': listed(deductions), 'total': float(gross)}

@@ -338,6 +338,12 @@ class Query(graphene.ObjectType):
         description="The paylist's items matching the filters as CSV; returns the export name for "
                     "core's /api/core/fetch_export.",
     )
+    paylist_pdf_rows = graphene.JSONString(
+        paylist_uuid=graphene.UUID(required=True),
+        description="The paylist's payees for its PDF: hhid, representative, fsp, account, amount.")
+    paylist_pdf_breakdown = graphene.JSONString(
+        paylist_uuid=graphene.UUID(required=True),
+        description="Totals for the paylist PDF's summary page: payments, deductions, total.")
     paylist_fsp_options = graphene.List(
         FspProviderGQLType, paylist_uuid=graphene.UUID(required=True),
         description="The Charges-list FSPs present in one paylist, for its FSP filter.")
@@ -438,6 +444,18 @@ class Query(graphene.ObjectType):
             kwargs["muse_reference__icontains"] = kwargs.pop("muse_reference")
         items = PaylistItem.objects.filter(*paylist_item_filters(**kwargs), is_deleted=False)
         return export_paylist_items(info.context.user, items)
+
+    def resolve_paylist_pdf_rows(self, info, paylist_uuid):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
+        from tasaf_payment.reports import paylist_pdf_rows
+        paylist = Paylist.objects.filter(uuid=paylist_uuid, is_deleted=False).first()
+        return paylist_pdf_rows(paylist) if paylist else []
+
+    def resolve_paylist_pdf_breakdown(self, info, paylist_uuid):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
+        from tasaf_payment.reports import paylist_pdf_breakdown
+        paylist = Paylist.objects.filter(uuid=paylist_uuid, is_deleted=False).first()
+        return paylist_pdf_breakdown(paylist) if paylist else None
 
     def resolve_paylist_fsp_options(self, info, paylist_uuid):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
