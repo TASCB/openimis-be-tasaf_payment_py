@@ -142,25 +142,3 @@ class VerificationEventTest(SimpleTestCase):
     def test_other_replies_are_not_announced(self):
         _, emit = self._run({'verification_sent': {'expected_name': 'X'}})
         emit.assert_not_called()
-
-
-class DispatchAfterChangeTest(SimpleTestCase):
-
-    def _dispatch(self, **kwargs):
-        account = mock.MagicMock(json_ext={}, verification_status=VerificationStatus.PENDING)
-        queryset = mock.MagicMock()
-        queryset.filter.return_value.select_related.return_value = [account]
-        service = services.MuseVerificationDispatchService(mock.MagicMock(username='system'))
-        with mock.patch.object(services.PaymentAccount.objects, 'select_for_update', return_value=queryset), \
-                mock.patch.object(services.transaction, 'atomic', return_value=nullcontext()), \
-                mock.patch.object(service, '_expected_name', return_value='Asha Juma'), \
-                mock.patch.object(service, 'messages', return_value=[]):
-            out = service.dispatch([1], **kwargs)
-        self.assertTrue(out['success'], out)
-        return account.json_ext['verification_sent']
-
-    def test_a_send_after_a_change_is_marked(self):
-        self.assertTrue(self._dispatch(after_change=True)['after_change'])
-
-    def test_an_ordinary_send_is_not_marked(self):
-        self.assertNotIn('after_change', self._dispatch())

@@ -81,9 +81,12 @@ DEFAULT_CONFIG = {
         "EZYPESA": ["077"],
     },
     "batch_inline_fallback_limit": 1000,
-    # Rows per MUSE verification message. Every message holds ONE FSP; an FSP with more
-    # accounts is split into several. Same ceiling as a paylist batch.
+    # Rows per GePG verification request (one FSP each; larger FSPs are split).
     "verification_batch_max_rows": 50000,
+    "gepg_message_format": "XML",
+    "gepg_send_max_attempts": 3,
+    "gepg_send_backoff_seconds": 2,
+    "gepg_answer_timeout_hours": 48,
     "name_match": {
         "verified_min": 80,
         "manual_min": 60,
@@ -147,6 +150,10 @@ class TasafPaymentConfig(AppConfig):
     mobile_prefixes = {}
     batch_inline_fallback_limit = 1000
     verification_batch_max_rows = 50000
+    gepg_message_format = 'XML'
+    gepg_send_max_attempts = 3
+    gepg_send_backoff_seconds = 2
+    gepg_answer_timeout_hours = 48
     name_match = {}
     apply_withdrawal_charges = False
     charges_require_approval = True

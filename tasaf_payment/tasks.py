@@ -24,9 +24,6 @@ Pre-audit batch:
         │
         └── pre_audit_chunk(chunk)  ← worker
 
-TODO (GovESB): When the GovESB adaptor is available, replace the stub
-publish in MuseVerificationDispatchService._publish() with the real
-GovESB producer. The Celery task structure itself does not change.
 """
 
 import logging
@@ -220,10 +217,10 @@ def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_ind
     """
     try:
         from core.models import User
-        from tasaf_payment.services import MuseVerificationDispatchService
+        from tasaf_payment.services import verification_dispatcher
 
         user = User.objects.get(id=user_id)
-        service = MuseVerificationDispatchService(user)
+        service = verification_dispatcher(user)
 
         result = service.dispatch(account_ids)
         logger.info(

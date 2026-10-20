@@ -219,7 +219,11 @@ def _readable(value):
 def describe_change(kind, fsp_code, current, proposed, reason=''):
     """The approval summary a person can read: what changes from what to what, and why."""
     current = current or {}
-    if kind == 'SETTINGS':
+    labels, effect = FIELD_LABELS, CHANGE_EFFECT
+    if kind == 'GEPG_SETTINGS':
+        from tasaf_payment.gepg import setup as gepg_setup
+        title, labels, effect = 'GePG settings', gepg_setup.FIELD_LABELS, gepg_setup.CHANGE_EFFECT
+    elif kind == 'SETTINGS':
         title = 'MUSE settings'
     else:
         name = proposed.get('bank_name') or current.get('bank_name')
@@ -227,11 +231,11 @@ def describe_change(kind, fsp_code, current, proposed, reason=''):
     changes = []
     for field, value in proposed.items():
         before, after = _readable(current.get(field)), _readable(value)
-        changes.append({'label': FIELD_LABELS.get(field, field.replace('_', ' ').capitalize()),
+        changes.append({'label': labels.get(field, field.replace('_', ' ').capitalize()),
                         'before': before, 'after': after, 'changed': before != after})
     changes.sort(key=lambda c: not c['changed'])
     return {'title': title, 'changes': changes, 'reason': (reason or '').strip() or None,
-            'effect': CHANGE_EFFECT}
+            'effect': effect}
 
 
 def pending_fsp_codes():
@@ -247,7 +251,11 @@ def propose(user, kind, proposed, fsp_code='', reason=''):
     from tasaf_payment.apps import TasafPaymentConfig
     from tasaf_payment.models import MuseChangeKind, MuseChangeRequest, MuseChangeStatus
 
-    current = settings_values() if kind == MuseChangeKind.SETTINGS else profile_values(fsp_code)
+    if kind == MuseChangeKind.GEPG_SETTINGS:
+        from tasaf_payment.gepg.setup import settings_values as gepg_settings_values
+        current = gepg_settings_values()
+    else:
+        current = settings_values() if kind == MuseChangeKind.SETTINGS else profile_values(fsp_code)
     if current and all(current.get(k) == v for k, v in proposed.items()):
         raise SetupError('Nothing was changed')
     with transaction.atomic():
@@ -304,6 +312,10 @@ def _apply(change, user):
     from tasaf_payment.models import FspProfile, MuseChangeKind, MuseSettings
 
     values = change.proposed
+    if change.kind == MuseChangeKind.GEPG_SETTINGS:
+        from tasaf_payment.gepg.setup import apply
+        apply(change, user)
+        return
     if change.kind == MuseChangeKind.SETTINGS:
         target = get_settings() or MuseSettings()
         for field in SETTINGS_FIELDS:
@@ -392,13 +404,15 @@ def on_approval_finalized(**kwargs):
         return [str(exc)]
 
 
-def change_rows(status=None, limit=50):
+def change_rows(status=None, limit=50, kinds=None):
     from approval.models import ApprovalDecision
     from tasaf_payment.models import MuseChangeRequest
 
     qs = MuseChangeRequest.objects.filter(is_deleted=False).select_related('user_created')
     if status:
         qs = qs.filter(status=status)
+    if kinds:
+        qs = qs.filter(kind__in=kinds)
     rows = []
     for c in qs.order_by('-date_created')[:limit]:
         decision = (ApprovalDecision.objects

@@ -1,4 +1,4 @@
-"""Business logic for TASAF payment accounts, MUSE verification, and paylists."""
+"""Business logic for TASAF payment accounts, account verification, and paylists."""
 
 import logging
 import uuid
@@ -209,226 +209,42 @@ class PaymentAccountService(BaseService):
         return super().delete(obj_data)
 
 
-class MuseVerificationDispatchService:
+def recipient_name(account) -> str:
+    """The household representative's name -- what the account holder name is matched against.
+
+    NOT the household head: measured on real data, the two differ in 37% of
+    households, so using the head would fail verification for a third of the
+    caseload and look like an FSP mismatch rather than our error.
+
+    NOT PaymentAccount.account_name either -- that currently holds the HHID
+    (the questionnaire never collected account details), so it is unusable as a name.
     """
-    Sends payment accounts to MUSE for verification via GovESB.
+    from individual.models import GroupIndividual
 
-    Sets each account to PENDING_MUSE status and publishes a verification
-    request message over GovESB. MUSE pushes the result back asynchronously to
-    the inbound endpoint (handled by MuseVerificationInboundService).
-    """
+    group = getattr(getattr(account, 'group_beneficiary', None), 'group', None)
+    if not group:
+        return ''
 
-    GOVESB_TOPIC_VERIFICATION_REQUEST = 'tasaf.verification.request'
-
-    def __init__(self, user):
-        self.user = user
-        self._names = {}
-
-    # Only these may be sent. PENDING_MUSE is already with MUSE, so a retried chunk or a second
-    # click cannot send it twice; VERIFIED and MANUAL are finished or with an officer.
-    DISPATCHABLE_STATUSES = (VerificationStatus.PENDING, VerificationStatus.FAILED)
-
-    @check_authentication
-    def dispatch(self, account_ids: list, after_change: bool = False) -> dict:
-        """
-        Mark accounts as PENDING_MUSE and publish verification requests to GovESB:
-        one message per FSP, split at ``verification_batch_max_rows``.
-
-        Returns: {'success': bool, 'count': int, 'batches': int, 'skipped': int, 'error': str|None}
-        """
-        try:
-            with transaction.atomic():
-                accounts = list(
-                    PaymentAccount.objects.select_for_update(of=('self',)).filter(
-                        id__in=account_ids,
-                        is_deleted=False,
-                        verification_status__in=self.DISPATCHABLE_STATUSES,
-                    ).select_related('group_beneficiary__group')
-                )
-                skipped = len(set(account_ids)) - len(accounts)
-                if not accounts:
-                    return {'success': True, 'count': 0, 'batches': 0, 'skipped': skipped,
-                            'error': None}
-
-                sent_at = datetime.now(timezone.utc).isoformat()
-                for account in accounts:
-                    account.verification_status = VerificationStatus.PENDING_MUSE
-                    sent = {'expected_name': self._expected_name(account), 'sent_at': sent_at}
-                    if after_change:
-                        sent['after_change'] = True
-                    account.json_ext = {**(account.json_ext or {}), 'verification_sent': sent}
-                    account.save(username=self.user.username)
-
-            # Published outside the atomic block so the commit is visible to the consumer.
-            messages = 0
-            for payload in self.messages(accounts):
-                self._publish_payload(payload)
-                messages += 1
-
-            logger.info(
-                "MuseVerificationDispatchService.dispatch: %d account(s) in %d message(s), "
-                "%d skipped as already sent or not sendable, user=%s",
-                len(accounts), messages, skipped, self.user.username,
-            )
-            return {
-                'success': True, 'count': len(accounts),
-                'batches': messages, 'skipped': skipped, 'error': None,
-            }
-
-        except Exception as exc:
-            logger.exception("MuseVerificationDispatchService.dispatch failed")
-            return output_exception(
-                model_name="PaymentAccount",
-                method="dispatch_verification",
-                exception=exc,
-            )
-
-    @staticmethod
-    def recipient_name(account) -> str:
-        """The household representative's name -- what MUSE matches the account against.
-
-        NOT the household head: measured on real data, the two differ in 37% of
-        households, so using the head would fail verification for a third of the
-        caseload and look like an FSP mismatch rather than our error.
-
-        NOT PaymentAccount.account_name either -- that currently holds the HHID
-        (the questionnaire never collected account details), so it is unusable as a name.
-        """
-        from individual.models import GroupIndividual
-
-        group = getattr(getattr(account, 'group_beneficiary', None), 'group', None)
-        if not group:
-            return ''
-
-        primary = (
-            GroupIndividual.objects
-            .filter(group=group, is_deleted=False, recipient_type='PRIMARY')
-            .select_related('individual').first()
-        )
-        if primary and primary.individual:
-            name = f"{primary.individual.first_name or ''} {primary.individual.last_name or ''}"
-            if name.strip():
-                return name.strip()
-        return str((group.json_ext or {}).get('primary_recipient') or '').strip()
-
-    def _expected_name(self, account) -> str:
-        if account.id not in self._names:
-            self._names[account.id] = self.recipient_name(account)
-        return self._names[account.id]
-
-    def _batch_rows(self, accounts):
-        """Group accounts into one batch per FSP, shaped the way MUSE expects.
-
-        The key differs by channel -- mobile sends `name`, bank sends `account_name` --
-        so the row is built per fsp_type rather than one shape for both.
-        """
-        from tasaf_payment.charges import resolve_fsp_code
-
-        batches = {}
-        for account in accounts:
-            code = resolve_fsp_code(account.fsp_name) or 'UNMAPPED'
-            batch = batches.setdefault(code, {
-                'fsp_code': code,
-                'fsp_name': account.fsp_name,
-                'fsp_type': account.fsp_type,
-                'rows': [],
-            })
-            group = getattr(getattr(account, 'group_beneficiary', None), 'group', None)
-            row = {
-                'account_number': account.account_number,
-                # hhid is our reconciliation key; MUSE matches on number + name only.
-                'hhid': getattr(group, 'code', None),
-                'account_uuid': str(account.uuid),
-            }
-            name = self._expected_name(account)
-            if account.fsp_type == 'MOBILE':
-                row['name'] = name
-            else:
-                row['account_name'] = name
-            batch['rows'].append(row)
-        return batches
-
-    def messages(self, accounts):
-        """The exact GovESB payloads a dispatch publishes: one FSP each, split at
-        ``verification_batch_max_rows``. ``preview`` uses this too, so what it shows is
-        what is sent."""
-        from tasaf_payment.apps import TasafPaymentConfig
-
-        size = int(TasafPaymentConfig.verification_batch_max_rows or 0) or max(len(accounts), 1)
-        for batch in self._batch_rows(accounts).values():
-            rows = batch['rows']
-            for start in range(0, len(rows), size):
-                part = rows[start:start + size]
-                yield {
-                    'fsp_code': batch['fsp_code'],
-                    'fsp_name': batch['fsp_name'],
-                    'fsp_type': batch['fsp_type'],
-                    'count': len(part),
-                    'requested_by': getattr(self.user, 'username', None),
-                    'rows': part,
-                }
-
-    def _publish_payload(self, payload) -> None:
-        """One GovESB message. Fail-soft, as elsewhere."""
-        _govesb_publish(
-            self.GOVESB_TOPIC_VERIFICATION_REQUEST,
-            payload,
-            user_id=getattr(self.user, 'username', None),
-            context=f"verification fsp={payload['fsp_code']} rows={payload['count']}",
-        )
-
-    def preview(self, account_ids: list, sample_rows: int = 20) -> dict:
-        """What a dispatch of these accounts would publish, without publishing or changing
-        anything. Rows are trimmed to ``sample_rows`` per message for display; ``count`` keeps
-        the real number."""
-        from django.conf import settings
-        from tasaf_payment.apps import TasafPaymentConfig
-        try:
-            from coremis_app_integration.govesb import GovESBProducer, govesb_enabled
-            enabled = govesb_enabled()
-            api_code = GovESBProducer._resolve_api_code(self.GOVESB_TOPIC_VERIFICATION_REQUEST)
-        except ImportError:
-            enabled, api_code = False, None
-
-        accounts = list(PaymentAccount.objects.filter(
-            id__in=account_ids, is_deleted=False,
-            verification_status__in=self.DISPATCHABLE_STATUSES,
-        ).select_related('group_beneficiary__group'))
-        messages = []
-        for payload in self.messages(accounts):
-            shown = {**payload, 'rows': payload['rows'][:sample_rows]}
-            messages.append({
-                'fsp_code': payload['fsp_code'],
-                'count': payload['count'],
-                'rows_shown': len(shown['rows']),
-                # The ESB client wraps every payload as {"requestdata": ...} and signs it.
-                'body': {'requestdata': shown},
-            })
-        return {
-            'topic': self.GOVESB_TOPIC_VERIFICATION_REQUEST,
-            'api_code': api_code,
-            'govesb_enabled': enabled,
-            'esb_url': ((getattr(settings, 'ESB', None) or {}).get('ENGINE_URL') if enabled else None),
-            'request_type': 'PUSH',
-            'accounts': len(accounts),
-            'max_rows_per_message': int(TasafPaymentConfig.verification_batch_max_rows or 0),
-            'messages': messages,
-        }
+    primary = (
+        GroupIndividual.objects
+        .filter(group=group, is_deleted=False, recipient_type='PRIMARY')
+        .select_related('individual').first()
+    )
+    if primary and primary.individual:
+        name = f"{primary.individual.first_name or ''} {primary.individual.last_name or ''}"
+        if name.strip():
+            return name.strip()
+    return str((group.json_ext or {}).get('primary_recipient') or '').strip()
 
 
 class MuseVerificationInboundService:
     """
-    Processes verification results pushed from MUSE via GovESB.
-
-    Called by:
-    - The stub REST endpoint (POST /api/tasaf_payment/muse/verification_result/)
-      for development/testing.
-    - The GovESB consumer in coremis_app_integration (when available).
+    Applies one account's verification result; called by gepg.inbound for each answered item.
 
     Expected payload:
     {
         "account_uuid":       "...",
-        "muse_reference":     "MUSE-REF-123",
+        "muse_reference":     "<AccVerifId>",
         "verification_type":  "FSP_ACCOUNT" | "MOBILE_VALIDATION" | "ACTIVE_CHECK",
         "result":             "PASSED" | "FAILED" | "MANUAL",
         "returned_name":      "..."  (optional),
@@ -455,7 +271,7 @@ class MuseVerificationInboundService:
 
     def handle_result(self, payload: dict) -> dict:
         """
-        Parse MUSE result payload, update PaymentAccount, create audit record.
+        Update the PaymentAccount from one result and write the audit record.
 
         Returns: {'success': bool, 'account_uuid': str, 'error': str|None}
         """
@@ -580,7 +396,7 @@ def household_names(account):
 
 class ManualApprovalService:
     """
-    Approve or reject accounts that MUSE returned as MANUAL (borderline).
+    Approve or reject accounts whose verification came back MANUAL (borderline).
 
     approved=True  → VERIFIED  (cleared for payment)
     approved=False → FAILED    (must resubmit with corrected data)
@@ -1844,23 +1660,14 @@ class ReturnFeedbackService:
             )
 
 
-class VerificationService(MuseVerificationDispatchService):
-    """Deprecated alias. Use MuseVerificationDispatchService."""
-
-    def run_verification(self, account_ids: list) -> dict:
-        return self.dispatch(account_ids)
-
-    def approve_accounts(self, account_ids: list, approved: bool, review_notes: str = '') -> dict:
-        return ManualApprovalService(self.user).approve_accounts(account_ids, approved, review_notes)
+def verification_dispatcher(user):
+    from tasaf_payment.gepg.sender import GepgVerificationSender
+    return GepgVerificationSender(user)
 
 
 class BatchVerificationService:
-    """Queue a filter-scoped MUSE verification dispatch.
-
-    Not a deprecated alias despite its former docstring -- this is the live path behind
-    the runBatchVerification mutation. MuseVerificationDispatchService is the per-account
-    worker it fans out to.
-    """
+    """Queue a filter-scoped GePG verification dispatch (runBatchVerification);
+    verification_dispatcher is the per-account worker it fans out to."""
 
     def __init__(self, user):
         self.user = user
@@ -1871,7 +1678,7 @@ class BatchVerificationService:
             return _queue_or_inline(
                 task=run_batch_verification_task,
                 task_args=(filters, self.user.id),
-                inline=lambda ids: MuseVerificationDispatchService(self.user).dispatch(ids),
+                inline=lambda ids: verification_dispatcher(self.user).dispatch(ids),
                 count_ids=lambda: _build_account_queryset(filters).values_list('id', flat=True),
                 label='BatchVerificationService.dispatch',
                 # Inline dispatch publishes to GovESB, so it is capped.

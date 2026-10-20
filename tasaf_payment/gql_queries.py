@@ -429,6 +429,25 @@ class MuseSettingsGQLType(graphene.ObjectType):
     date_updated = graphene.DateTime()
 
 
+class GepgSettingsGQLType(graphene.ObjectType):
+    sp_code = graphene.String()
+    sp_sys_id = graphene.String()
+    environment = graphene.String()
+    date_updated = graphene.DateTime()
+
+
+class GepgReadinessGQLType(graphene.ObjectType):
+    ready = graphene.Boolean()
+    settings_missing = graphene.List(graphene.String)
+    providers_missing = graphene.List(graphene.String)
+    server_environment = graphene.String()
+    settings_environment = graphene.String()
+    environment_mismatch = graphene.Boolean()
+    govesb_enabled = graphene.Boolean()
+    api_code_set = graphene.Boolean()
+    topic = graphene.String()
+
+
 class MuseLogEntryGQLType(graphene.ObjectType):
     created_at = graphene.DateTime()
     direction = graphene.String()

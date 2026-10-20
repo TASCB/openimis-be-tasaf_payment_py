@@ -18,6 +18,8 @@ from tasaf_payment.gql_mutations import (
     ApproveMuseChangeMutation,
     RejectMuseChangeMutation,
     CancelMuseChangeMutation,
+    SaveGepgSettingsMutation,
+    ResendGepgVerificationMutation,
     DeleteFspMappingMutation,
     SeedFspMappingsMutation,
     SaveFspChargesMutation,
@@ -40,6 +42,8 @@ from tasaf_payment.gql_queries import (
     FspProviderGQLType,
     MuseSettingsGQLType,
     MuseReadinessGQLType,
+    GepgSettingsGQLType,
+    GepgReadinessGQLType,
     PaymentAccountGQLType,
     VerificationRecordGQLType,
     MuseVerificationRecordGQLType,
@@ -282,7 +286,14 @@ class Query(graphene.ObjectType):
     fsp_providers = graphene.List(FspProviderGQLType)
     muse_settings = graphene.Field(MuseSettingsGQLType)
     muse_readiness = graphene.Field(MuseReadinessGQLType)
-    muse_change_requests = graphene.Field(graphene.JSONString, status=graphene.String())
+    muse_change_requests = graphene.Field(graphene.JSONString, status=graphene.String(),
+                                          kinds=graphene.List(graphene.String))
+    gepg_settings = graphene.Field(GepgSettingsGQLType)
+    gepg_readiness = graphene.Field(GepgReadinessGQLType)
+    gepg_verification_requests = graphene.Field(graphene.JSONString, status=graphene.String(),
+                                                limit=graphene.Int())
+    gepg_verification_items = graphene.Field(graphene.JSONString,
+                                             acc_verif_id=graphene.String(required=True))
     # Current bands for one FSP, for the config editor.
     fsp_band_set = graphene.List(WithdrawalChargeGQLType, fsp_code=graphene.String(required=True))
 
@@ -645,11 +656,11 @@ class Query(graphene.ObjectType):
         return MuseSettingsGQLType(date_updated=s.date_updated, environment=s.environment,
                                    **{f: getattr(s, f) for f in SETTINGS_FIELDS})
 
-    def resolve_muse_change_requests(self, info, status=None, **kwargs):
+    def resolve_muse_change_requests(self, info, status=None, kinds=None, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
         from tasaf_payment.muse.setup import change_rows
         user = info.context.user
-        rows = change_rows(status=status)
+        rows = change_rows(status=status, kinds=kinds)
         me = getattr(user, 'username', None)
         can_approve = user.has_perms(TasafPaymentConfig.gql_muse_settings_approve_perms)
         can_propose = user.has_perms(TasafPaymentConfig.gql_muse_settings_propose_perms)
@@ -664,6 +675,30 @@ class Query(graphene.ObjectType):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
         from tasaf_payment.muse.setup import readiness
         return MuseReadinessGQLType(**readiness())
+
+    def resolve_gepg_settings(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        from tasaf_payment.gepg.setup import SETTINGS_FIELDS, get_settings
+        s = get_settings()
+        if s is None:
+            return None
+        return GepgSettingsGQLType(date_updated=s.date_updated, environment=s.environment,
+                                   **{f: getattr(s, f) for f in SETTINGS_FIELDS})
+
+    def resolve_gepg_readiness(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        from tasaf_payment.gepg.setup import readiness
+        return GepgReadinessGQLType(**readiness())
+
+    def resolve_gepg_verification_requests(self, info, status=None, limit=None, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        from tasaf_payment.gepg.history import request_rows
+        return request_rows(status=status, limit=limit or 50)
+
+    def resolve_gepg_verification_items(self, info, acc_verif_id, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        from tasaf_payment.gepg.history import item_rows
+        return item_rows(acc_verif_id)
 
     def resolve_fsp_band_set(self, info, fsp_code, **kwargs):
         Query._check_permissions(info.context.user,
@@ -692,7 +727,7 @@ class Query(graphene.ObjectType):
         return preview(paylist, sample_rows=max(0, min(int(sample_rows or 0), 200)))
 
     def resolve_verification_batch_preview(self, info, sample_rows=20, **kwargs):
-        from tasaf_payment.services import MuseVerificationDispatchService
+        from tasaf_payment.services import verification_dispatcher
         from tasaf_payment.tasks import _build_account_queryset
 
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_run_verification_perms)
@@ -700,7 +735,7 @@ class Query(graphene.ObjectType):
         if not filters:
             raise ValueError(_("tasaf_payment.validation.batch_verification_requires_filter"))
         ids = list(_build_account_queryset(filters).values_list('id', flat=True))
-        return MuseVerificationDispatchService(info.context.user).preview(
+        return verification_dispatcher(info.context.user).preview(
             ids, sample_rows=max(0, min(int(sample_rows or 0), 200)))
 
     @staticmethod
@@ -733,6 +768,8 @@ class Mutation(graphene.ObjectType):
     approve_muse_change = ApproveMuseChangeMutation.Field()
     reject_muse_change = RejectMuseChangeMutation.Field()
     cancel_muse_change = CancelMuseChangeMutation.Field()
+    save_gepg_settings = SaveGepgSettingsMutation.Field()
+    resend_gepg_verification = ResendGepgVerificationMutation.Field()
     delete_fsp_mapping = DeleteFspMappingMutation.Field()
     seed_fsp_mappings = SeedFspMappingsMutation.Field()
     save_fsp_charges = SaveFspChargesMutation.Field()

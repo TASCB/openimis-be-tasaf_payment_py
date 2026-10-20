@@ -20,7 +20,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.views import View
 
-from tasaf_payment.services import PaymentSettlementService, MuseVerificationInboundService, ReturnFeedbackService
+from tasaf_payment.services import PaymentSettlementService, ReturnFeedbackService
 
 logger = logging.getLogger(__name__)
 
@@ -56,55 +56,6 @@ def _verify_inbound(payload, raw=None):
     if verified:
         logger.info("[GovESB] inbound signature verified")
     return business, None
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-class MuseVerificationResultView(View):
-    """
-    POST /api/tasaf_payment/muse/verification_result/
-
-    Receives a verification result pushed by MUSE over GovESB. In production the
-    request body is a signed ``{data, signature}`` envelope; the verified
-    business payload (``esbBody``) has the shape:
-    {
-        "account_uuid":       "<uuid>",
-        "muse_reference":     "MUSE-REF-123",
-        "verification_type":  "FSP_ACCOUNT",
-        "result":             "PASSED" | "FAILED" | "MANUAL",
-        "returned_name":      "..."  (optional; TASAF then decides by name match),
-        "failure_reason":     "..." | null,
-        "raw_response":       {}
-    }
-    """
-
-    def post(self, request, *args, **kwargs):
-        payload, error = _parse_json_body(request)
-        if error:
-            return JsonResponse({'success': False, 'error': f'Invalid JSON: {error}'}, status=400)
-
-        payload, verr = _verify_inbound(payload, request.body)
-        if verr:
-            logger.warning("[GovESB] inbound verification result rejected: %s", verr)
-            return JsonResponse({'success': False, 'error': verr}, status=401)
-
-        if not payload.get('account_uuid'):
-            return JsonResponse({'success': False, 'error': 'account_uuid is required'}, status=400)
-        if not payload.get('result') and 'returned_name' not in payload:
-            return JsonResponse({'success': False, 'error': 'result or returned_name is required'},
-                                status=400)
-
-        logger.info(
-            "Inbound verification result: account=%s result=%s ref=%s",
-            payload.get('account_uuid'),
-            payload.get('result'),
-            payload.get('muse_reference'),
-        )
-
-        service = MuseVerificationInboundService()
-        result = service.handle_result(payload)
-
-        status_code = 200 if result.get('success') else 400
-        return JsonResponse(result, status=status_code)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -237,3 +188,46 @@ class MuseMessageView(View):
             return reply(False, verr)
 
         return reply(*handle(payload))
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class GepgMessageView(View):
+    """POST /api/tasaf_payment/gepg/message/ — GePG's gepgAccVerifSubResp over GovESB, XML or JSON;
+    answered in the format it came in."""
+
+    def post(self, request, *args, **kwargs):
+        from tasaf_payment.gepg.inbound import handle
+
+        if request.body.lstrip().startswith(b'<'):
+            return self._xml(request.body.decode('utf-8', 'replace'), handle)
+
+        from coremis_app_integration.govesb_inbound import signed_reply
+
+        def reply(success, body):
+            text = signed_reply(True, esb_body=body) if success else signed_reply(False, message=body)
+            return HttpResponse(text, content_type='application/json', status=200)
+
+        payload, error = _parse_json_body(request)
+        if error:
+            return reply(False, f'Invalid JSON: {error}')
+        payload, verr = _verify_inbound(payload, request.body)
+        if verr:
+            logger.warning("[GovESB] inbound GePG message rejected: %s", verr)
+            return reply(False, verr)
+        return reply(*handle(payload))
+
+    @staticmethod
+    def _xml(raw, handle):
+        from coremis_app_integration.govesb_inbound import signed_reply_xml, verify_inbound_xml
+        from tasaf_payment.gepg import message as gepg_message
+
+        def reply(success, body):
+            text = (signed_reply_xml(True, esb_body=gepg_message.as_xml(body)) if success
+                    else signed_reply_xml(False, message=body))
+            return HttpResponse(text, content_type='application/xml', status=200)
+
+        body, _, verr = verify_inbound_xml(raw)
+        if verr:
+            logger.warning("[GovESB] inbound GePG XML message rejected: %s", verr)
+            return reply(False, verr)
+        return reply(*handle(gepg_message.load(body) or {}))

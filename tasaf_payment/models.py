@@ -14,7 +14,7 @@ class VerificationStatus(models.IntegerChoices):
     VERIFIED = 1, _("VERIFIED")
     FAILED   = 2, _("FAILED")
     MANUAL   = 3, _("MANUAL")
-    PENDING_MUSE = 4, _("PENDING_MUSE")   # sent to MUSE, awaiting result
+    PENDING_MUSE = 4, _("PENDING_MUSE")   # sent to GePG, awaiting result
 
 
 class PreAuditStatus(models.TextChoices):
@@ -115,7 +115,7 @@ class PaymentAccount(HistoryBusinessModel):
     enrolled in a benefit plan. One household may have multiple accounts across
     FSPs, but only one should be marked is_primary=True at a time.
 
-    verification_status reflects the MUSE-returned result (not internal scoring).
+    verification_status reflects the GePG-returned result (not internal scoring).
     pre_audit_status and active_check_status are TASAF MIS workflow states.
     muse_verification_reference is the MUSE reference ID for the last verification.
 
@@ -531,6 +531,7 @@ class MuseSettings(HistoryModel):
 class MuseChangeKind(models.TextChoices):
     SETTINGS    = 'SETTINGS',    _("SETTINGS")
     FSP_PROFILE = 'FSP_PROFILE', _("FSP_PROFILE")
+    GEPG_SETTINGS = 'GEPG_SETTINGS', _("GEPG_SETTINGS")
 
 
 class MuseChangeStatus(models.TextChoices):
@@ -554,3 +555,78 @@ class MuseChangeRequest(HistoryModel):
     class Meta:
         db_table = 'tasaf_MuseChangeRequest'
         indexes = [models.Index(fields=['status', 'kind'], name='tasaf_musechg_status_idx')]
+
+
+class GepgSettings(HistoryModel):
+    sp_code = models.CharField(max_length=5, blank=True, default='')
+    sp_sys_id = models.CharField(max_length=10, blank=True, default='')
+    environment = models.CharField(max_length=20, blank=True, default='')
+
+    class Meta:
+        db_table = 'tasaf_GepgSettings'
+
+
+class GepgRequestStatus(models.TextChoices):
+    SENDING  = 'SENDING',  _("SENDING")
+    SENT     = 'SENT',     _("SENT")
+    ACCEPTED = 'ACCEPTED', _("ACCEPTED")
+    REJECTED = 'REJECTED', _("REJECTED")
+    REFUSED  = 'REFUSED',  _("REFUSED")
+    FAILED   = 'FAILED',   _("FAILED")
+    ANSWERED = 'ANSWERED', _("ANSWERED")
+    EXPIRED  = 'EXPIRED',  _("EXPIRED")
+
+
+class GepgItemStatus(models.TextChoices):
+    PENDING  = 'PENDING',  _("PENDING")
+    ANSWERED = 'ANSWERED', _("ANSWERED")
+    RELEASED = 'RELEASED', _("RELEASED")
+    EXPIRED  = 'EXPIRED',  _("EXPIRED")
+
+
+class GepgVerificationRequest(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    acc_verif_id = models.CharField(max_length=50, unique=True)
+    fsp_code = models.CharField(max_length=50, blank=True, default='')
+    bic = models.CharField(max_length=11, blank=True, default='')
+    status = models.CharField(max_length=20, choices=GepgRequestStatus.choices,
+                              default=GepgRequestStatus.SENDING, db_index=True)
+    status_code = models.CharField(max_length=10, blank=True, default='')
+    status_desc = models.TextField(blank=True, default='')
+    item_count = models.IntegerField(default=0)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    esb_request_id = models.CharField(max_length=100, blank=True, default='')
+    requested_by = models.CharField(max_length=150, blank=True, default='')
+    after_change = models.BooleanField(default=False)
+    request_body = models.JSONField(null=True, blank=True)
+    ack_body = models.JSONField(null=True, blank=True)
+    response_body = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'tasaf_GepgVerificationRequest'
+
+
+class GepgVerificationItem(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    request = models.ForeignKey(GepgVerificationRequest, on_delete=models.CASCADE, related_name='items')
+    item_id = models.CharField(max_length=50)
+    payment_account = models.ForeignKey(PaymentAccount, on_delete=models.DO_NOTHING,
+                                        related_name='gepg_verification_items')
+    acc_num = models.CharField(max_length=50)
+    previous_status = models.IntegerField(choices=VerificationStatus.choices,
+                                          default=VerificationStatus.PENDING)
+    expected_name = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=20, choices=GepgItemStatus.choices,
+                              default=GepgItemStatus.PENDING)
+    acc_name = models.CharField(max_length=150, blank=True, default='')
+    acc_sts_code = models.CharField(max_length=10, blank=True, default='')
+    acc_sts_desc = models.CharField(max_length=255, blank=True, default='')
+    decision = models.CharField(max_length=10, blank=True, default='')
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'tasaf_GepgVerificationItem'
+        constraints = [models.UniqueConstraint(fields=['request', 'item_id'], name='tasaf_gepg_item_uniq')]

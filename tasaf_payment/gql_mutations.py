@@ -180,11 +180,11 @@ class RunVerificationMutation(BaseMutation):
 
     @classmethod
     def _mutate(cls, user, **data):
-        from tasaf_payment.services import MuseVerificationDispatchService
+        from tasaf_payment.services import verification_dispatcher
         data.pop('client_mutation_id', None)
         data.pop('client_mutation_label', None)
         account_ids = _resolve_account_ids(data.get('account_uuids', []))
-        result = MuseVerificationDispatchService(user).dispatch(account_ids)
+        result = verification_dispatcher(user).dispatch(account_ids)
         if not result.get('success'):
             raise Exception(result.get('error', 'Verification dispatch failed'))
 
@@ -764,6 +764,46 @@ class SaveMuseSettingsMutation(OpenIMISMutation):
             data.pop('client_mutation_label', None)
             reason = data.pop('reason', None) or ''
             propose_settings(user, data, reason=reason)
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class SaveGepgSettingsMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SaveGepgSettingsMutation"
+
+    class Input(OpenIMISMutation.Input):
+        sp_code = graphene.String(required=False)
+        sp_sys_id = graphene.String(required=False)
+        reason = graphene.String(required=False)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.gepg.setup import propose_settings
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
+            propose_settings(user, data, reason=data.get('reason') or '')
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class ResendGepgVerificationMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "ResendGepgVerificationMutation"
+
+    class Input(OpenIMISMutation.Input):
+        acc_verif_id = graphene.String(required=True)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.gepg.sender import GepgVerificationSender
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_run_verification_perms)
+            result = GepgVerificationSender(user).resend(data['acc_verif_id'])
+            if not result.get('success'):
+                return [{'message': result.get('error') or 'Nothing was sent'}]
             return None
         except Exception as exc:
             return [{'message': str(exc)}]

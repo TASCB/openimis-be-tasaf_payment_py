@@ -1,17 +1,12 @@
 from django.urls import path
 from tasaf_payment.views import (
-    MuseVerificationResultView,
     MuseReturnFeedbackView,
     MuseSettlementView,
     MuseMessageView,
+    GepgMessageView,
 )
 
 urlpatterns = [
-    path(
-        'muse/verification_result/',
-        MuseVerificationResultView.as_view(),
-        name='muse-verification-result',
-    ),
     path(
         'muse/return_feedback/',
         MuseReturnFeedbackView.as_view(),
@@ -28,5 +23,10 @@ urlpatterns = [
         'muse/message/',
         MuseMessageView.as_view(),
         name='muse-message',
+    ),
+    path(
+        'gepg/message/',
+        GepgMessageView.as_view(),
+        name='gepg-message',
     ),
 ]
