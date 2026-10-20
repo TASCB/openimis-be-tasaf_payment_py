@@ -31,10 +31,19 @@ def blocked():
         return 'GovESB is not configured on this server; nothing was sent'
     if not gepg_setup.api_code():
         return f'No GovESB API code for {gepg_setup.TOPIC}; nothing was sent'
+    return _settings_missing()
+
+
+def _settings_missing():
     values = gepg_setup.settings_values()
     if not all(values.get(f) for f in gepg_setup.SETTINGS_FIELDS):
         return 'GePG SP code and SP system ID are not set; nothing was sent'
     return None
+
+
+def _headers():
+    code = gepg_setup.service_code()
+    return {'service-code': code} if code else {}
 
 
 def _release(items, reason, user):
@@ -143,6 +152,7 @@ class GepgVerificationSender:
         from coremis_app_integration.esb_client.exceptions import ESBConfigurationError, ESBSignatureError
         from coremis_app_integration.govesb import GovESBProducer
 
+        headers = _headers()
         max_attempts = max(1, int(_config('gepg_send_max_attempts', 3)))
         backoff = float(_config('gepg_send_backoff_seconds', 2))
         error = 'not sent'
@@ -151,7 +161,8 @@ class GepgVerificationSender:
             try:
                 response = GovESBProducer().publish(
                     gepg_setup.TOPIC, wire, request_type=ESBRequestType.NORMAL,
-                    data_format=DataFormat.XML if fmt == gepg_message.XML else DataFormat.JSON)
+                    data_format=DataFormat.XML if fmt == gepg_message.XML else DataFormat.JSON,
+                    **({'extra_headers': headers} if headers else {}))
             except ESBConfigurationError as exc:
                 return self._finish(request, items, GepgRequestStatus.FAILED, f'GovESB is misconfigured: {exc}')
             except ESBSignatureError as exc:
@@ -249,6 +260,7 @@ class GepgVerificationSender:
                              'problems': gepg_message.summarise(gepg_message.check(body, fsp_type))})
         from django.conf import settings as dj
         return {'channel': 'GEPG', 'format': gepg_message.message_format(), 'topic': gepg_setup.TOPIC,
+                'service_code_set': bool(gepg_setup.service_code()),
                 'api_code': gepg_setup.api_code() or None,
                 'govesb_enabled': gepg_setup.govesb_on(),
                 'esb_url': (getattr(dj, 'ESB', None) or {}).get('ENGINE_URL') if gepg_setup.govesb_on() else None,

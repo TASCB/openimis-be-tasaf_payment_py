@@ -564,6 +564,7 @@ class MuseChangeRequest(HistoryModel):
 class GepgSettings(HistoryModel):
     sp_code = models.CharField(max_length=5, blank=True, default='')
     sp_sys_id = models.CharField(max_length=10, blank=True, default='')
+    service_code = models.CharField(max_length=50, blank=True, default='')
     environment = models.CharField(max_length=20, blank=True, default='')
 
     class Meta:

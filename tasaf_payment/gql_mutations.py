@@ -776,6 +776,7 @@ class SaveGepgSettingsMutation(OpenIMISMutation):
     class Input(OpenIMISMutation.Input):
         sp_code = graphene.String(required=False)
         sp_sys_id = graphene.String(required=False)
+        service_code = graphene.String(required=False)
         reason = graphene.String(required=False)
 
     @classmethod

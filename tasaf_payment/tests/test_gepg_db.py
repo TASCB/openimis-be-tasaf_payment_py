@@ -76,6 +76,17 @@ class GepgVerificationDbTest(TestCase):
         sent = PaymentAccount.objects.get(id=self.ids[0]).json_ext['verification_sent']
         self.assertTrue(sent['after_change'])
 
+    def test_service_code_goes_as_a_header_through_govesb(self):
+        with mock.patch('tasaf_payment.gepg.setup.settings_values',
+                        return_value={**SETTINGS, 'service_code': 'SRVC1'}):
+            result, producer = self.dispatch(ack())
+        self.assertEqual(producer.publish.call_args[1]['extra_headers'], {'service-code': 'SRVC1'})
+        self.assertEqual(result['count'], 2)
+
+    def test_no_service_code_sends_no_header(self):
+        result, producer = self.dispatch(ack())
+        self.assertNotIn('extra_headers', producer.publish.call_args[1])
+
     def test_json_format_sends_the_dict(self):
         with mock.patch('tasaf_payment.apps.TasafPaymentConfig.gepg_message_format', 'JSON'):
             _, producer = self.dispatch(ack())
@@ -218,12 +229,16 @@ class GepgSettingsDbTest(TestCase):
         if user is None:
             self.skipTest('needs the Admin user')
         change = SimpleNamespace(kind=MuseChangeKind.GEPG_SETTINGS,
-                                 proposed=gepg_setup.normalise_settings({'sp_code': 'sp991', 'sp_sys_id': 'tasaf001'}))
+                                 proposed=gepg_setup.normalise_settings({
+                                     'sp_code': 'sp991', 'sp_sys_id': 'tasaf001',
+                                     'service_code': ' SRVC1 '}))
         gepg_setup.apply(change, user)
         s = GepgSettings.objects.filter(is_deleted=False).order_by('-date_created').first()
-        self.assertEqual((s.sp_code, s.sp_sys_id), ('SP991', 'TASAF001'))
+        self.assertEqual((s.sp_code, s.sp_sys_id, s.service_code), ('SP991', 'TASAF001', 'SRVC1'))
 
     def test_invalid_values_are_refused(self):
         from tasaf_payment.muse.setup import SetupError
         with self.assertRaises(SetupError):
             gepg_setup.normalise_settings({'sp_code': 'TOOLONG'})
+        with self.assertRaises(SetupError):
+            gepg_setup.normalise_settings({'service_code': 'has space'})

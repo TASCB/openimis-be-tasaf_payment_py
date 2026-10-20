@@ -696,12 +696,12 @@ class Query(graphene.ObjectType):
 
     def resolve_gepg_settings(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
-        from tasaf_payment.gepg.setup import SETTINGS_FIELDS, get_settings
+        from tasaf_payment.gepg.setup import ALL_FIELDS, get_settings
         s = get_settings()
         if s is None:
             return None
         return GepgSettingsGQLType(date_updated=s.date_updated, environment=s.environment,
-                                   **{f: getattr(s, f) for f in SETTINGS_FIELDS})
+                                   **{f: getattr(s, f) for f in ALL_FIELDS})
 
     def resolve_gepg_readiness(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)

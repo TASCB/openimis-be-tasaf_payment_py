@@ -432,6 +432,7 @@ class MuseSettingsGQLType(graphene.ObjectType):
 class GepgSettingsGQLType(graphene.ObjectType):
     sp_code = graphene.String()
     sp_sys_id = graphene.String()
+    service_code = graphene.String()
     environment = graphene.String()
     date_updated = graphene.DateTime()
 
@@ -446,6 +447,7 @@ class GepgReadinessGQLType(graphene.ObjectType):
     govesb_enabled = graphene.Boolean()
     api_code_set = graphene.Boolean()
     topic = graphene.String()
+    service_code_set = graphene.Boolean()
 
 
 class MuseLogEntryGQLType(graphene.ObjectType):

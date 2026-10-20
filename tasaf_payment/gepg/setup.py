@@ -4,11 +4,15 @@ from tasaf_payment.muse.setup import SetupError, propose, provider_list, server_
 
 TOPIC = 'tasaf.verification.gepg'
 SETTINGS_FIELDS = ('sp_code', 'sp_sys_id')
-FIELD_LABELS = {'sp_code': 'SP code', 'sp_sys_id': 'SP system ID'}
+OPTIONAL_FIELDS = ('service_code',)
+ALL_FIELDS = SETTINGS_FIELDS + OPTIONAL_FIELDS
+FIELD_LABELS = {'sp_code': 'SP code', 'sp_sys_id': 'SP system ID',
+                'service_code': 'Service code'}
 CHANGE_EFFECT = ('Applies to every account verification sent to GePG from this server once approved. '
                  'Requests already sent are not affected.')
 SP_CODE_RE = re.compile(r'^[A-Za-z0-9]{1,5}$')
 SP_SYS_ID_RE = re.compile(r'^[A-Za-z0-9]{1,10}$')
+SERVICE_CODE_RE = re.compile(r'^[A-Za-z0-9_-]{1,50}$')
 
 
 def get_settings():
@@ -18,17 +22,20 @@ def get_settings():
 
 def settings_values():
     s = get_settings()
-    return {f: getattr(s, f) for f in SETTINGS_FIELDS} if s else {}
+    return {f: getattr(s, f) for f in ALL_FIELDS} if s else {}
 
 
 def normalise_settings(data):
     values = {'sp_code': (data.get('sp_code') or '').strip().upper(),
-              'sp_sys_id': (data.get('sp_sys_id') or '').strip().upper()}
+              'sp_sys_id': (data.get('sp_sys_id') or '').strip().upper(),
+              'service_code': (data.get('service_code') or '').strip()}
     errors = []
     if values['sp_code'] and not SP_CODE_RE.match(values['sp_code']):
         errors.append('SP code must be up to 5 letters or digits')
     if values['sp_sys_id'] and not SP_SYS_ID_RE.match(values['sp_sys_id']):
         errors.append('SP system ID must be up to 10 letters or digits')
+    if values['service_code'] and not SERVICE_CODE_RE.match(values['service_code']):
+        errors.append('Service code must be up to 50 letters, digits, - or _')
     if errors:
         raise SetupError('; '.join(errors))
     return values
@@ -42,11 +49,15 @@ def propose_settings(user, data, reason=''):
 def apply(change, user):
     from tasaf_payment.models import GepgSettings
     target = get_settings() or GepgSettings()
-    for field in SETTINGS_FIELDS:
+    for field in ALL_FIELDS:
         if field in change.proposed:
             setattr(target, field, change.proposed[field])
     target.environment = server_environment()
     target.save(username=user.username)
+
+
+def service_code():
+    return (settings_values().get('service_code') or '').strip()
 
 
 def api_code():
@@ -70,7 +81,7 @@ def readiness():
     approved_on = s.environment if s else ''
     environment_mismatch = bool(s) and approved_on != server
     enabled, code = govesb_on(), api_code()
-    return {'settings_missing': settings_missing, 'providers_missing': providers_missing,
+    return {'service_code_set': bool(service_code()),'settings_missing': settings_missing, 'providers_missing': providers_missing,
             'server_environment': server, 'settings_environment': approved_on,
             'environment_mismatch': environment_mismatch, 'govesb_enabled': enabled,
             'api_code_set': bool(code), 'topic': TOPIC,
