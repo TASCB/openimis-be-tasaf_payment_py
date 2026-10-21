@@ -13,7 +13,11 @@ class MuseSetupValidationTest(SimpleTestCase):
         with self.assertRaises(ms.SetupError):
             ms.normalise_settings({'sub_budget_class': 'abc'})
         self.assertIsNone(ms.normalise_settings({'sub_budget_class': ''})['sub_budget_class'])
-        self.assertEqual(ms.normalise_settings({'sub_budget_class': '202'})['sub_budget_class'], 202)
+        self.assertEqual(ms.normalise_settings({'sub_budget_class': '212'})['sub_budget_class'], 212)
+
+    def test_budget_classes_must_be_on_the_list(self):
+        with self.assertRaisesMessage(ms.SetupError, 'Sub-budget class (unapplied) 202 is not in'):
+            ms.normalise_settings({'sub_budget_class': '212', 'unapplied_sub_budget_class': '202'})
 
     def test_gl_line_needs_an_account_code(self):
         with self.assertRaises(ms.SetupError):

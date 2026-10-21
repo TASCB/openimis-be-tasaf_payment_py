@@ -80,6 +80,14 @@ DEFAULT_CONFIG = {
         "TTCL": ["073"],
         "EZYPESA": ["077"],
     },
+    "sub_budget_classes": [
+        {"code": 211, "description": "UN Agencies"},
+        {"code": 212, "description": "Government of Tanzania"},
+        {"code": 213, "description": "OPEC"},
+        {"code": 214, "description": "World Bank (IDA)"},
+        {"code": 215, "description": "Development Partners (DPs)"},
+        {"code": 216, "description": "GOT II"},
+    ],
     "batch_inline_fallback_limit": 1000,
     # Rows per GePG verification request (one FSP each; larger FSPs are split).
     "verification_batch_max_rows": 50000,
@@ -149,6 +157,7 @@ class TasafPaymentConfig(AppConfig):
     withdrawn_hold_days_without_cycle = 30
     fsp_code_aliases = {}
     mobile_prefixes = {}
+    sub_budget_classes = []
     batch_inline_fallback_limit = 1000
     verification_batch_max_rows = 50000
     gepg_message_format = 'XML'

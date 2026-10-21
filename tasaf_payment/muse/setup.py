@@ -153,6 +153,25 @@ def _int_or_none(value, label, errors):
         return None
 
 
+SUB_BUDGET_FIELDS = ('sub_budget_class', 'unapplied_sub_budget_class')
+
+
+def sub_budget_classes():
+    from tasaf_payment.apps import TasafPaymentConfig
+    out = []
+    for row in TasafPaymentConfig.sub_budget_classes or []:
+        try:
+            out.append({'code': int(row['code']), 'description': str(row.get('description') or '')})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _sub_budget_label(value):
+    names = {r['code']: r['description'] for r in sub_budget_classes()}
+    return f'{value} — {names[value]}' if value in names else value
+
+
 def normalise_settings(data):
     errors = []
     gl = data.get('gl_accounts') or []
@@ -177,6 +196,10 @@ def normalise_settings(data):
             for line in gl if isinstance(line, dict) and (line.get('glaccount') or '').strip()
         ],
     }
+    allowed = {r['code'] for r in sub_budget_classes()}
+    for field in SUB_BUDGET_FIELDS:
+        if allowed and values[field] is not None and values[field] not in allowed:
+            errors.append(f"{FIELD_LABELS[field]} {values[field]} is not in the sub-budget class list")
     if errors:
         raise SetupError('; '.join(errors))
     return values
@@ -230,7 +253,10 @@ def describe_change(kind, fsp_code, current, proposed, reason=''):
         title = f'FSP routing: {name} ({fsp_code})' if name else f'FSP routing: {fsp_code}'
     changes = []
     for field, value in proposed.items():
-        before, after = _readable(current.get(field)), _readable(value)
+        old = current.get(field)
+        if field in SUB_BUDGET_FIELDS and kind == 'SETTINGS':
+            old, value = _sub_budget_label(old), _sub_budget_label(value)
+        before, after = _readable(old), _readable(value)
         changes.append({'label': labels.get(field, field.replace('_', ' ').capitalize()),
                         'before': before, 'after': after, 'changed': before != after})
     changes.sort(key=lambda c: not c['changed'])
@@ -443,5 +469,5 @@ def readiness():
     environment_mismatch = bool(s) and approved_on != server
     return {'settings_missing': settings_missing, 'providers_missing': providers_missing,
             'server_environment': server, 'settings_environment': approved_on,
-            'environment_mismatch': environment_mismatch,
+            'environment_mismatch': environment_mismatch, 'sub_budget_classes': sub_budget_classes(),
             'ready': not settings_missing and not providers_missing and not environment_mismatch}

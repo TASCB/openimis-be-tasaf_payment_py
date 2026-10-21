@@ -528,3 +528,4 @@ class MuseReadinessGQLType(graphene.ObjectType):
     server_environment = graphene.String()
     settings_environment = graphene.String()
     environment_mismatch = graphene.Boolean()
+    sub_budget_classes = graphene.JSONString()
