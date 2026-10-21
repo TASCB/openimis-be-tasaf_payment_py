@@ -193,6 +193,7 @@ class Query(graphene.ObjectType):
         fsp_name_icontains=graphene.String(),
         account_number_icontains=graphene.String(),
         location_id=graphene.Int(),
+        before_first_payment=graphene.Boolean(),
         sample_rows=graphene.Int(),
         description="The GovESB messages 'Verify all matching' would publish for these filters. "
                     "Read-only: nothing is sent and no account changes.",
@@ -749,12 +750,14 @@ class Query(graphene.ObjectType):
         from tasaf_payment.tasks import _build_account_queryset
 
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_run_verification_perms)
+        before_first_payment = bool(kwargs.pop('before_first_payment', False))
         filters = {k: v for k, v in kwargs.items() if v not in (None, '')}
         if not filters:
             raise ValueError(_("tasaf_payment.validation.batch_verification_requires_filter"))
+        filters['before_first_payment'] = before_first_payment
         ids = list(_build_account_queryset(filters).values_list('id', flat=True))
         return verification_dispatcher(info.context.user).preview(
-            ids, sample_rows=max(0, min(int(sample_rows or 0), 200)))
+            ids, sample_rows=max(0, min(int(sample_rows or 0), 200)), before_first_payment=before_first_payment)
 
     @staticmethod
     def _check_permissions(user, perms):

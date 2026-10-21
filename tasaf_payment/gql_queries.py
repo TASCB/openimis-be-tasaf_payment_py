@@ -94,6 +94,26 @@ class PaymentAccountGQLType(DjangoObjectType):
     verification_attempts = graphene.List(AccountVerificationAttemptGQLType)
     paid_at = graphene.DateTime()
     payment_in_flight = graphene.Boolean()
+    recipient_name = graphene.String()
+    first_payment_check = graphene.String(description="DONE, DUE, PAID or IN_PAYMENT")
+
+    def resolve_recipient_name(root, info):
+        if hasattr(root, '_recipient_name'):
+            name = (root._recipient_name or '').strip()
+            if name:
+                return name
+        from tasaf_payment.services import recipient_name
+        return recipient_name(root) or None
+
+    def resolve_first_payment_check(root, info):
+        from tasaf_payment.services import account_paid_at, account_payment_in_flight, first_payment_check_done
+        paid = root._paid if hasattr(root, '_paid') else bool(account_paid_at(root.id))
+        if paid:
+            return 'PAID'
+        in_flight = root._in_flight if hasattr(root, '_in_flight') else account_payment_in_flight(root.id)
+        if in_flight:
+            return 'IN_PAYMENT'
+        return 'DONE' if first_payment_check_done(root) else 'DUE'
 
     def resolve_paid_at(root, info):
         from tasaf_payment.services import account_paid_at
@@ -104,10 +124,14 @@ class PaymentAccountGQLType(DjangoObjectType):
         return account_payment_in_flight(root.id)
 
     def resolve_verification_attempts(root, info):
+        if hasattr(root, '_attempts'):
+            return root._attempts[:10]
         return list(root.muse_verification_records.filter(is_deleted=False)
                     .order_by('-received_at')[:10])
 
     def resolve_last_failure_reason(root, info):
+        if hasattr(root, '_last_failure_reason'):
+            return root._last_failure_reason
         record = (root.muse_verification_records
                   .exclude(failure_reason__isnull=True).exclude(failure_reason='')
                   .order_by('-date_created').first())
@@ -121,7 +145,36 @@ class PaymentAccountGQLType(DjangoObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
-        return PaymentAccount.get_queryset(queryset, info.context.user)
+        return with_list_columns(PaymentAccount.get_queryset(queryset, info.context.user))
+
+
+def with_list_columns(queryset):
+    from django.db.models import Exists, OuterRef, Prefetch, Subquery, Value
+    from django.db.models.functions import Coalesce, Concat
+    from individual.models import GroupIndividual
+    from tasaf_payment.services import PAYLIST_FINISHED_STATUSES
+
+    items = PaylistItem.objects.filter(payment_account=OuterRef('pk'), is_deleted=False)
+    primary = (GroupIndividual.objects
+               .filter(group=OuterRef('group_beneficiary__group'), is_deleted=False, recipient_type='PRIMARY')
+               .order_by('pk')
+               .annotate(full=Concat(Coalesce('individual__first_name', Value('')), Value(' '),
+                                     Coalesce('individual__last_name', Value(''))))
+               .values('full')[:1])
+    failure = (MuseVerificationRecord.objects.filter(payment_account=OuterRef('pk'))
+               .exclude(failure_reason__isnull=True).exclude(failure_reason='')
+               .order_by('-date_created').values('failure_reason')[:1])
+    attempts = MuseVerificationRecord.objects.filter(is_deleted=False).order_by('-received_at')
+    return (queryset
+            .select_related('group_beneficiary__group')
+            .annotate(
+                _recipient_name=Subquery(primary),
+                _paid=Exists(items.filter(status=PaylistItemStatus.PROCESSED)),
+                _in_flight=Exists(items.filter(status=PaylistItemStatus.PENDING, paylist__is_deleted=False)
+                                  .exclude(paylist__status__in=PAYLIST_FINISHED_STATUSES)),
+                _last_failure_reason=Subquery(failure),
+            )
+            .prefetch_related(Prefetch('muse_verification_records', queryset=attempts, to_attr='_attempts')))
 
 
 class MuseVerificationRecordGQLType(DjangoObjectType):

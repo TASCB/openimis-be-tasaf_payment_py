@@ -53,6 +53,7 @@ class DeletePaymentAccountInputType(OpenIMISMutation.Input):
 
 class RunVerificationInputType(OpenIMISMutation.Input):
     account_uuids = graphene.List(graphene.UUID, required=True)
+    before_first_payment = graphene.Boolean(required=False)
 
 
 class ApprovePaymentAccountsInputType(OpenIMISMutation.Input):
@@ -69,6 +70,7 @@ class RunBatchVerificationInputType(OpenIMISMutation.Input):
     account_number_icontains = graphene.String(required=False)
     location_id     = graphene.Int(required=False)
     rerun           = graphene.Boolean(required=False)
+    before_first_payment = graphene.Boolean(required=False)
     account_uuids   = graphene.List(graphene.UUID, required=False)
 
 
@@ -184,7 +186,8 @@ class RunVerificationMutation(BaseMutation):
         data.pop('client_mutation_id', None)
         data.pop('client_mutation_label', None)
         account_ids = _resolve_account_ids(data.get('account_uuids', []))
-        result = verification_dispatcher(user).dispatch(account_ids)
+        result = verification_dispatcher(user).dispatch(
+            account_ids, before_first_payment=bool(data.get('before_first_payment')))
         if not result.get('success'):
             raise Exception(result.get('error', 'Verification dispatch failed'))
 
@@ -259,6 +262,8 @@ class RunBatchVerificationMutation(BaseMutation):
             filters['location_id'] = int(data['location_id'])
         if data.get('rerun'):
             filters['rerun'] = bool(data['rerun'])
+        if data.get('before_first_payment'):
+            filters['before_first_payment'] = True
         if data.get('account_uuids'):
             filters['account_uuids'] = [str(u) for u in data['account_uuids']]
         result = BatchVerificationService(user).dispatch(filters)

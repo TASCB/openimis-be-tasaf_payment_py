@@ -74,7 +74,9 @@ def _build_account_queryset(filters: dict):
 
     # Default: PENDING (and optionally FAILED) accounts
     statuses = [VerificationStatus.PENDING]
-    if filters.get('rerun'):
+    if filters.get('before_first_payment'):
+        statuses = [VerificationStatus.VERIFIED]
+    elif filters.get('rerun'):
         statuses.append(VerificationStatus.FAILED)
 
     qs = qs.filter(verification_status__in=statuses)
@@ -194,7 +196,8 @@ def run_batch_verification_task(self, filters: dict, user_id: int):
         )
 
         for i, (_code, chunk) in enumerate(chunks, start=1):
-            dispatch_verification_chunk.delay(chunk, user_id, chunk_index=i)
+            dispatch_verification_chunk.delay(chunk, user_id, chunk_index=i,
+                                              before_first_payment=bool(filters.get('before_first_payment')))
 
         return {'queued': total, 'chunks': len(chunks)}
 
@@ -209,7 +212,8 @@ def run_batch_verification_task(self, filters: dict, user_id: int):
     default_retry_delay=30,
     name='tasaf_payment.dispatch_verification_chunk',
 )
-def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_index: int = 0):
+def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_index: int = 0,
+                                before_first_payment: bool = False):
     """
     Mark a chunk of PaymentAccounts as PENDING_MUSE and publish to GovESB.
 
@@ -222,7 +226,7 @@ def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_ind
         user = User.objects.get(id=user_id)
         service = verification_dispatcher(user)
 
-        result = service.dispatch(account_ids)
+        result = service.dispatch(account_ids, before_first_payment=before_first_payment)
         logger.info(
             "dispatch_verification_chunk: chunk=%d dispatched %d accounts",
             chunk_index, result.get('count', 0),

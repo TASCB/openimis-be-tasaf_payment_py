@@ -311,6 +311,8 @@ class MuseVerificationInboundService:
             with transaction.atomic():
                 account.verification_status = new_status
                 account.muse_verification_reference = muse_ref
+                if new_status == VerificationStatus.VERIFIED:
+                    mark_first_payment_check(account, muse_ref)
                 if v_type == MuseVerificationType.ACTIVE_CHECK:
                     account.active_check_status = (
                         ActiveCheckStatus.ACTIVE
@@ -428,6 +430,8 @@ class ManualApprovalService:
                     ext['reviewed_by']     = self.user.username
                     ext['review_decision'] = 'approved' if approved else 'rejected'
                     account.json_ext = ext
+                    if approved:
+                        mark_first_payment_check(account, account.muse_verification_reference)
                     account.save(username=self.user.username)
 
             return {'success': True, 'count': count, 'error': None}
@@ -531,6 +535,8 @@ class PreAuditService:
             from tasaf_payment.msisdn import is_valid
             if not is_valid(account.account_number):
                 reasons.append('INVALID_MOBILE_NUMBER')
+        if needs_first_payment_check(account):
+            reasons.append('FIRST_PAYMENT_CHECK_DUE')
         return reasons
 
 
@@ -1270,6 +1276,31 @@ def describe_paylist(paylist):
     }
 
 
+FIRST_PAYMENT_CHECK = 'first_payment_check'
+
+
+def mark_first_payment_check(account, reference):
+    sent = (account.json_ext or {}).get('verification_sent') or {}
+    if not (sent.get('before_first_payment') or sent.get('after_change')):
+        return
+    account.json_ext = {**(account.json_ext or {}), FIRST_PAYMENT_CHECK: {
+        'at': datetime.now(tz=timezone.utc).isoformat(), 'reference': reference or '',
+        'account_number': account.account_number, 'fsp_name': account.fsp_name,
+    }}
+
+
+def first_payment_check_done(account):
+    mark = (account.json_ext or {}).get(FIRST_PAYMENT_CHECK) or {}
+    return mark.get('account_number') == account.account_number and mark.get('fsp_name') == account.fsp_name
+
+
+def needs_first_payment_check(account):
+    from tasaf_payment.apps import TasafPaymentConfig
+    if not TasafPaymentConfig.require_first_payment_check or first_payment_check_done(account):
+        return False
+    return not account_paid_at(account.id) and not account_payment_in_flight(account.id)
+
+
 def account_payment_in_flight(account_id):
     return (PaylistItem.objects.filter(payment_account_id=account_id, is_deleted=False,
                                        status=PaylistItemStatus.PENDING, paylist__is_deleted=False)
@@ -1679,7 +1710,8 @@ class BatchVerificationService:
             return _queue_or_inline(
                 task=run_batch_verification_task,
                 task_args=(filters, self.user.id),
-                inline=lambda ids: verification_dispatcher(self.user).dispatch(ids),
+                inline=lambda ids: verification_dispatcher(self.user).dispatch(
+                    ids, before_first_payment=bool(filters.get('before_first_payment'))),
                 count_ids=lambda: _build_account_queryset(filters).values_list('id', flat=True),
                 label='BatchVerificationService.dispatch',
                 # Inline dispatch publishes to GovESB, so it is capped.

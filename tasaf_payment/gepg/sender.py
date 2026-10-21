@@ -69,11 +69,11 @@ class GepgVerificationSender:
         self.sleep = sleep
         self.DISPATCHABLE_STATUSES = (VerificationStatus.PENDING, VerificationStatus.FAILED)
 
-    def dispatch(self, account_ids, after_change=False):
+    def dispatch(self, account_ids, after_change=False, before_first_payment=False):
         problem = blocked()
         if problem:
             return {'success': False, 'count': 0, 'batches': 0, 'skipped': 0, 'error': problem}
-        requests, skipped = self._claim(account_ids, after_change)
+        requests, skipped = self._claim(account_ids, after_change, before_first_payment)
         sent, errors = 0, []
         for request in requests:
             outcome = self.send(request)
@@ -86,19 +86,31 @@ class GepgVerificationSender:
         return {'success': bool(sent) or not errors, 'count': sent, 'batches': len(requests) - len(errors),
                 'skipped': skipped, 'error': '; '.join(errors[:3]) or None}
 
-    def _claim(self, account_ids, after_change):
+    def _statuses(self, before_first_payment):
+        from tasaf_payment.models import VerificationStatus
+        return (VerificationStatus.VERIFIED,) if before_first_payment else self.DISPATCHABLE_STATUSES
+
+    @staticmethod
+    def _due(accounts, before_first_payment):
+        if not before_first_payment:
+            return accounts
+        from tasaf_payment.services import needs_first_payment_check
+        return [a for a in accounts if needs_first_payment_check(a)]
+
+    def _claim(self, account_ids, after_change, before_first_payment=False):
         from tasaf_payment.charges import resolve_fsp_code
         from tasaf_payment.models import (
-            FspProfile, GepgVerificationItem, GepgVerificationRequest, PaymentAccount, VerificationStatus,
+            FspProfile, GepgVerificationItem, GepgVerificationRequest, PaymentAccount, PreAuditStatus,
+            VerificationStatus,
         )
         from tasaf_payment.services import recipient_name
 
         size = int(_config('verification_batch_max_rows', 0) or 0) or 50000
         requests = []
         with transaction.atomic():
-            accounts = list(PaymentAccount.objects.select_for_update(of=('self',)).filter(
-                id__in=account_ids, is_deleted=False, verification_status__in=self.DISPATCHABLE_STATUSES,
-            ).select_related('group_beneficiary__group').order_by('id'))
+            accounts = self._due(list(PaymentAccount.objects.select_for_update(of=('self',)).filter(
+                id__in=account_ids, is_deleted=False, verification_status__in=self._statuses(before_first_payment),
+            ).select_related('group_beneficiary__group').order_by('id')), before_first_payment)
             skipped = len(set(account_ids)) - len(accounts)
             bics = {p.fsp_code: p.bic for p in FspProfile.objects.filter(is_deleted=False).exclude(bic='')}
             groups = {}
@@ -127,6 +139,9 @@ class GepgVerificationSender:
                         sent = {'expected_name': expected, 'sent_at': sent_at, 'gepg': request.acc_verif_id}
                         if after_change:
                             sent['after_change'] = True
+                        if before_first_payment:
+                            sent['before_first_payment'] = True
+                            account.pre_audit_status = PreAuditStatus.PENDING
                         account.verification_status = VerificationStatus.PENDING_MUSE
                         account.json_ext = {**(account.json_ext or {}), 'verification_sent': sent}
                         account.save(username=self.user.username)
@@ -233,13 +248,13 @@ class GepgVerificationSender:
         ids = list(request.items.values_list('payment_account_id', flat=True))
         return self.dispatch(ids, after_change=request.after_change)
 
-    def preview(self, account_ids, sample_rows=20):
+    def preview(self, account_ids, sample_rows=20, before_first_payment=False):
         from tasaf_payment.charges import resolve_fsp_code
         from tasaf_payment.models import FspProfile, PaymentAccount
 
-        accounts = list(PaymentAccount.objects.filter(
-            id__in=account_ids, is_deleted=False, verification_status__in=self.DISPATCHABLE_STATUSES,
-        ).order_by('id'))
+        accounts = self._due(list(PaymentAccount.objects.filter(
+            id__in=account_ids, is_deleted=False, verification_status__in=self._statuses(before_first_payment),
+        ).order_by('id')), before_first_payment)
         bics = {p.fsp_code: p.bic for p in FspProfile.objects.filter(is_deleted=False).exclude(bic='')}
         settings = gepg_setup.settings_values()
         groups, no_bic = {}, {}
