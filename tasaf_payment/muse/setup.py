@@ -235,7 +235,7 @@ def describe_change(kind, fsp_code, current, proposed, reason=''):
                         'before': before, 'after': after, 'changed': before != after})
     changes.sort(key=lambda c: not c['changed'])
     return {'title': title, 'changes': changes, 'reason': (reason or '').strip() or None,
-            'effect': effect}
+            'effect': effect, 'integration': 'gepg' if kind == 'GEPG_SETTINGS' else 'muse'}
 
 
 def pending_fsp_codes():

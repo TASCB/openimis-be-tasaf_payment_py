@@ -20,6 +20,7 @@ def request_rows(status=None, limit=50):
         'status_code': r.status_code, 'status_desc': r.status_desc, 'item_count': r.item_count,
         'answered': r.answered, 'verified': r.verified, 'failed': r.failed, 'manual': r.manual,
         'attempts': r.attempts, 'requested_by': r.requested_by, 'after_change': r.after_change,
+        'esb_request_id': r.esb_request_id,
         'created_at': _iso(r.created_at), 'sent_at': _iso(r.sent_at), 'answered_at': _iso(r.answered_at),
     } for r in qs.order_by('-created_at')[:min(int(limit), 500)]]
 

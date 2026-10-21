@@ -710,12 +710,14 @@ class Query(graphene.ObjectType):
         return GepgReadinessGQLType(**readiness())
 
     def resolve_gepg_verification_requests(self, info, status=None, limit=None, **kwargs):
-        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        Query._check_any_permission(info.context.user, [
+            TasafPaymentConfig.gql_muse_settings_search_perms, TasafPaymentConfig.gql_payment_account_search_perms])
         from tasaf_payment.gepg.history import request_rows
         return request_rows(status=status, limit=limit or 50)
 
     def resolve_gepg_verification_items(self, info, acc_verif_id, **kwargs):
-        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        Query._check_any_permission(info.context.user, [
+            TasafPaymentConfig.gql_muse_settings_search_perms, TasafPaymentConfig.gql_payment_account_search_perms])
         from tasaf_payment.gepg.history import item_rows
         return item_rows(acc_verif_id)
 

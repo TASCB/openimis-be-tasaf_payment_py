@@ -194,9 +194,9 @@ class GepgVerificationSender:
                 return self._finish(request, items, GepgRequestStatus.REFUSED,
                                     'GovESB is not configured on this server; nothing was sent')
             status_code = response.get('status_code')
+            request.esb_request_id = str(response.get('request_id') or '')[:100] or request.esb_request_id
             if response.get('ok'):
                 request.sent_at = _now()
-                request.esb_request_id = str(response.get('request_id') or '')
                 return self._apply_ack(request, items, response.get('esb_body'))
             error = f"GovESB refused the request: {response.get('error') or f'HTTP {status_code}'}"
             if status_code in RETRYABLE_HTTP and attempt < max_attempts:
