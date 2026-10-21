@@ -294,7 +294,9 @@ class Query(graphene.ObjectType):
     gepg_verification_requests = graphene.Field(graphene.JSONString, status=graphene.String(),
                                                 limit=graphene.Int())
     gepg_verification_items = graphene.Field(graphene.JSONString,
-                                             acc_verif_id=graphene.String(required=True))
+                                             acc_verif_id=graphene.String(required=True), offset=graphene.Int(),
+                                             limit=graphene.Int(), search=graphene.String(),
+                                             decision=graphene.String())
     # Current bands for one FSP, for the config editor.
     fsp_band_set = graphene.List(WithdrawalChargeGQLType, fsp_code=graphene.String(required=True))
 
@@ -715,11 +717,12 @@ class Query(graphene.ObjectType):
         from tasaf_payment.gepg.history import request_rows
         return request_rows(status=status, limit=limit or 50)
 
-    def resolve_gepg_verification_items(self, info, acc_verif_id, **kwargs):
+    def resolve_gepg_verification_items(self, info, acc_verif_id, offset=0, limit=100, search='', decision='',
+                                        **kwargs):
         Query._check_any_permission(info.context.user, [
             TasafPaymentConfig.gql_muse_settings_search_perms, TasafPaymentConfig.gql_payment_account_search_perms])
         from tasaf_payment.gepg.history import item_rows
-        return item_rows(acc_verif_id)
+        return item_rows(acc_verif_id, offset=offset, limit=limit, search=search, decision=decision)
 
     def resolve_fsp_band_set(self, info, fsp_code, **kwargs):
         Query._check_permissions(info.context.user,

@@ -25,15 +25,27 @@ def request_rows(status=None, limit=50):
     } for r in qs.order_by('-created_at')[:min(int(limit), 500)]]
 
 
-def item_rows(acc_verif_id):
+ITEM_FIELDS = ('item_id', 'acc_num', 'expected_name', 'acc_name', 'status', 'acc_sts_code', 'acc_sts_desc',
+               'decision', 'answered_at')
+
+
+def item_rows(acc_verif_id, offset=0, limit=100, search='', decision=''):
+    from django.db.models import F
     from tasaf_payment.models import GepgVerificationItem
-    qs = (GepgVerificationItem.objects.filter(request__acc_verif_id=acc_verif_id)
-          .select_related('payment_account__group_beneficiary__group').order_by('id'))
-    rows = []
-    for i in qs:
-        group = getattr(getattr(i.payment_account, 'group_beneficiary', None), 'group', None)
-        rows.append({'item_id': i.item_id, 'hhid': getattr(group, 'code', None), 'acc_num': i.acc_num,
-                     'expected_name': i.expected_name, 'acc_name': i.acc_name, 'status': i.status,
-                     'acc_sts_code': i.acc_sts_code, 'acc_sts_desc': i.acc_sts_desc,
-                     'decision': i.decision, 'answered_at': _iso(i.answered_at)})
-    return rows
+    qs = GepgVerificationItem.objects.filter(request__acc_verif_id=acc_verif_id)
+    search = (search or '').strip()
+    if search:
+        qs = qs.filter(Q(acc_num__icontains=search) | Q(expected_name__icontains=search)
+                       | Q(acc_name__icontains=search)
+                       | Q(payment_account__group_beneficiary__group__code__icontains=search))
+    if decision == 'NONE':
+        qs = qs.filter(decision='')
+    elif decision:
+        qs = qs.filter(decision=decision)
+    offset, limit = max(0, int(offset or 0)), max(1, min(int(limit or 100), 500))
+    rows = list(qs.order_by('id')
+                .annotate(hhid=F('payment_account__group_beneficiary__group__code'))
+                .values(*ITEM_FIELDS, 'hhid')[offset:offset + limit])
+    for row in rows:
+        row['answered_at'] = _iso(row['answered_at'])
+    return {'total': qs.count(), 'offset': offset, 'rows': rows}
