@@ -96,6 +96,7 @@ DEFAULT_CONFIG = {
     "gepg_send_backoff_seconds": 2,
     "gepg_answer_timeout_hours": 48,
     "require_first_payment_check": True,
+    "check_mobile_prefix": True,
     "name_match": {
         "verified_min": 80,
         "manual_min": 60,
@@ -165,6 +166,7 @@ class TasafPaymentConfig(AppConfig):
     gepg_send_backoff_seconds = 2
     gepg_answer_timeout_hours = 48
     require_first_payment_check = True
+    check_mobile_prefix = True
     name_match = {}
     apply_withdrawal_charges = False
     charges_require_approval = True

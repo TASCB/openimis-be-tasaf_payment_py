@@ -497,6 +497,7 @@ class FspProfile(HistoryModel):
     bank_name = models.CharField(max_length=100, blank=True, default='')
     fsp_type = models.CharField(max_length=20, blank=True, default='')
     bic = models.CharField(max_length=11, blank=True, default='')
+    mobile_prefixes = models.JSONField(default=list, blank=True)
 
     class Meta:
         db_table = 'tasaf_FspProfile'

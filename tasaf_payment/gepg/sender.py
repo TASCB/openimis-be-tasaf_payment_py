@@ -46,6 +46,23 @@ def _headers():
     return {'service-code': code} if code else {}
 
 
+WITHDRAWN_KEY = 'verification_withdrawn'
+
+
+def _withdraw(account, problem, at, user):
+    from tasaf_payment.models import (
+        MuseVerificationRecord, MuseVerificationResult, MuseVerificationType, VerificationStatus,
+    )
+    account.verification_status = VerificationStatus.FAILED
+    account.json_ext = {**(account.json_ext or {}), WITHDRAWN_KEY: {**problem, 'at': at}}
+    account.save(username=user.username)
+    MuseVerificationRecord(
+        payment_account=account, muse_reference='', verification_type=MuseVerificationType.MOBILE_VALIDATION,
+        result=MuseVerificationResult.FAILED, failure_reason=problem['reason'],
+        raw_response={'withdrawn': problem},
+    ).save(username=user.username)
+
+
 def _release(items, reason, user):
     from tasaf_payment.models import GepgItemStatus, PaymentAccount, VerificationStatus
     for item in items:
@@ -68,6 +85,7 @@ class GepgVerificationSender:
         self.user = user
         self.sleep = sleep
         self.DISPATCHABLE_STATUSES = (VerificationStatus.PENDING, VerificationStatus.FAILED)
+        self.withdrawn = 0
 
     def dispatch(self, account_ids, after_change=False, before_first_payment=False):
         problem = blocked()
@@ -81,10 +99,10 @@ class GepgVerificationSender:
                 sent += request.item_count
             else:
                 errors.append(outcome)
-        logger.info("GePG verification: %d account(s) accepted in %d request(s), %d skipped, %d failed",
-                    sent, len(requests) - len(errors), skipped, len(errors))
+        logger.info("GePG verification: %d account(s) accepted in %d request(s), %d skipped, %d withdrawn, "
+                    "%d failed", sent, len(requests) - len(errors), skipped, self.withdrawn, len(errors))
         return {'success': bool(sent) or not errors, 'count': sent, 'batches': len(requests) - len(errors),
-                'skipped': skipped, 'error': '; '.join(errors[:3]) or None}
+                'skipped': skipped, 'withdrawn': self.withdrawn, 'error': '; '.join(errors[:3]) or None}
 
     def _statuses(self, before_first_payment):
         from tasaf_payment.models import VerificationStatus
@@ -103,6 +121,7 @@ class GepgVerificationSender:
             FspProfile, GepgVerificationItem, GepgVerificationRequest, PaymentAccount, PreAuditStatus,
             VerificationStatus,
         )
+        from tasaf_payment import prefixes
         from tasaf_payment.services import recipient_name
 
         size = int(_config('verification_batch_max_rows', 0) or 0) or 50000
@@ -113,14 +132,20 @@ class GepgVerificationSender:
             ).select_related('group_beneficiary__group').order_by('id')), before_first_payment)
             skipped = len(set(account_ids)) - len(accounts)
             bics = {p.fsp_code: p.bic for p in FspProfile.objects.filter(is_deleted=False).exclude(bic='')}
+            table = prefixes.table()
+            sent_at = _now().isoformat()
             groups = {}
             for account in accounts:
                 code = resolve_fsp_code(account.fsp_name) or ''
                 if not bics.get(code):
                     skipped += 1
                     continue
+                problem = prefixes.problem(account, table)
+                if problem:
+                    _withdraw(account, problem, sent_at, self.user)
+                    self.withdrawn += 1
+                    continue
                 groups.setdefault((code, account.fsp_type), []).append(account)
-            sent_at = _now().isoformat()
             for (code, fsp_type), members in sorted(groups.items()):
                 for start in range(0, len(members), size):
                     part = members[start:start + size]
@@ -143,7 +168,9 @@ class GepgVerificationSender:
                             sent['before_first_payment'] = True
                             account.pre_audit_status = PreAuditStatus.PENDING
                         account.verification_status = VerificationStatus.PENDING_MUSE
-                        account.json_ext = {**(account.json_ext or {}), 'verification_sent': sent}
+                        ext = {**(account.json_ext or {}), 'verification_sent': sent}
+                        ext.pop(WITHDRAWN_KEY, None)
+                        account.json_ext = ext
                         account.save(username=self.user.username)
                     GepgVerificationItem.objects.bulk_create(items)
                     requests.append(request)
@@ -256,12 +283,18 @@ class GepgVerificationSender:
             id__in=account_ids, is_deleted=False, verification_status__in=self._statuses(before_first_payment),
         ).order_by('id')), before_first_payment)
         bics = {p.fsp_code: p.bic for p in FspProfile.objects.filter(is_deleted=False).exclude(bic='')}
+        from tasaf_payment import prefixes
         settings = gepg_setup.settings_values()
-        groups, no_bic = {}, {}
+        table = prefixes.table()
+        groups, no_bic, withdrawn = {}, {}, []
         for account in accounts:
             code = resolve_fsp_code(account.fsp_name) or ''
             if not bics.get(code):
                 no_bic[code or account.fsp_name] = no_bic.get(code or account.fsp_name, 0) + 1
+                continue
+            problem = prefixes.problem(account, table)
+            if problem:
+                withdrawn.append(problem)
                 continue
             groups.setdefault((code, account.fsp_type), []).append(account)
         messages = []
@@ -281,4 +314,5 @@ class GepgVerificationSender:
                 'esb_url': (getattr(dj, 'ESB', None) or {}).get('ENGINE_URL') if gepg_setup.govesb_on() else None,
                 'request_type': 'NORMAL', 'accounts': len(accounts),
                 'max_rows_per_message': int(_config('verification_batch_max_rows', 0) or 0),
-                'messages': messages, 'skipped_no_bic': no_bic, 'blocked': blocked()}
+                'messages': messages, 'skipped_no_bic': no_bic, 'withdrawn': len(withdrawn),
+                'withdrawn_sample': [w['reason'] for w in withdrawn[:sample_rows]], 'blocked': blocked()}

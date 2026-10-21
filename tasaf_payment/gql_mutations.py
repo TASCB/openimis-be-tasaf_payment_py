@@ -699,6 +699,7 @@ class SaveFspProfileInputType(OpenIMISMutation.Input):
     bank_name = graphene.String(required=True)
     fsp_type = graphene.String(required=True)
     bic = graphene.String(required=True)
+    mobile_prefixes = graphene.List(graphene.String, required=False)
     reason = graphene.String(required=False)
 
 
@@ -716,7 +717,7 @@ class SaveFspProfileMutation(OpenIMISMutation):
         try:
             _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
             propose_profile(user, data['fsp_code'], data['bank_name'], data['fsp_type'], data['bic'],
-                            reason=data.get('reason') or '')
+                            reason=data.get('reason') or '', mobile_prefixes=data.get('mobile_prefixes'))
             return None
         except Exception as exc:
             return [{'message': str(exc)}]

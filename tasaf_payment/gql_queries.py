@@ -463,6 +463,8 @@ class FspProviderGQLType(graphene.ObjectType):
     bank_name = graphene.String()
     fsp_type = graphene.String()
     bic = graphene.String()
+    mobile_prefixes = graphene.List(graphene.String)
+    prefixes_from_config = graphene.Boolean()
     names = graphene.List(graphene.String)
     has_bands = graphene.Boolean()
     accounts = graphene.Int()

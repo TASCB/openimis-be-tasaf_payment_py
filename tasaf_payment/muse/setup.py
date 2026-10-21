@@ -53,7 +53,9 @@ def provider_list():
         if u['fsp_name'] not in row['names']:
             row['names'].append(u['fsp_name'])
 
+    from tasaf_payment import prefixes as mobile
     profiles = {p.fsp_code: p for p in FspProfile.objects.filter(is_deleted=False)}
+    prefix_table = mobile.table()
     band_counts = dict(WithdrawalCharge.objects.filter(is_deleted=False).values('fsp_code')
                        .annotate(n=Count('id')).values_list('fsp_code', 'n'))
     pending = set(pending_fsp_codes())
@@ -70,6 +72,8 @@ def provider_list():
             'uuid': str(p.uuid) if p else None,
             'fsp_code': code, 'name': main_fsp_name(row, bank_name), 'band_count': band_counts.get(code, 0),
             'bank_name': bank_name, 'fsp_type': fsp_type, 'bic': bic,
+            'mobile_prefixes': prefix_table.get(code, []) if fsp_type == 'MOBILE' else [],
+            'prefixes_from_config': fsp_type == 'MOBILE' and not (p and p.mobile_prefixes),
             'names': sorted(row['names']), 'has_bands': row['has_bands'],
             'accounts': row['accounts'], 'missing': missing, 'pending': code in pending,
         })
@@ -105,12 +109,18 @@ def paylist_fsps(paylist_uuid):
     return sorted(out, key=lambda r: r['name'].upper())
 
 
-def normalise_profile(fsp_code, bank_name, fsp_type, bic):
+def normalise_profile(fsp_code, bank_name, fsp_type, bic, mobile_prefixes=None):
+    from tasaf_payment import prefixes as mobile
     from tasaf_payment.charges import normalise_fsp
 
     code = normalise_fsp(fsp_code or '')
     values = {'bank_name': (bank_name or '').strip(), 'fsp_type': (fsp_type or '').strip().upper(),
               'bic': (bic or '').strip().upper()}
+    values['mobile_prefixes'] = []
+    if values['fsp_type'] == 'MOBILE':
+        if mobile_prefixes is None:
+            mobile_prefixes = profile_values(code).get('mobile_prefixes') or []
+        values['mobile_prefixes'] = mobile.normalise_list(mobile_prefixes)
     errors = []
     if not code:
         errors.append('FSP code is required')
@@ -121,6 +131,13 @@ def normalise_profile(fsp_code, bank_name, fsp_type, bic):
     if not BIC_RE.match(values['bic']):
         errors.append('BIC must be 8 characters in the Tanzanian form '
                       '(four letters, then TZT, then Z, X or 0)')
+    bad = mobile.invalid(values['mobile_prefixes'])
+    if bad:
+        errors.append(f"Mobile prefixes must look like 078 (0, then 6 or 7, then 1–2 digits): {', '.join(bad)}")
+    taken = mobile.clashes(code, values['mobile_prefixes']) if values['mobile_prefixes'] else {}
+    if taken:
+        errors.append('Mobile prefix already set on another provider: '
+                      + ', '.join(f'{p} ({owner})' for p, owner in sorted(taken.items())))
     if errors:
         raise SetupError('; '.join(errors))
     return code, values
@@ -129,7 +146,8 @@ def normalise_profile(fsp_code, bank_name, fsp_type, bic):
 def profile_values(fsp_code):
     from tasaf_payment.models import FspProfile
     p = FspProfile.objects.filter(fsp_code=fsp_code, is_deleted=False).first()
-    return {'bank_name': p.bank_name, 'fsp_type': p.fsp_type, 'bic': p.bic} if p else {}
+    return ({'bank_name': p.bank_name, 'fsp_type': p.fsp_type, 'bic': p.bic,
+             'mobile_prefixes': list(p.mobile_prefixes or [])} if p else {})
 
 
 SETTINGS_FIELDS = ('institution_code', 'payer_account', 'sub_budget_class',
@@ -222,6 +240,7 @@ FIELD_LABELS = {
     'sub_budget_class': 'Sub-budget class', 'unapplied_sub_budget_class': 'Sub-budget class (unapplied)',
     'payment_desc': 'Payment description', 'is_stp': 'Straight-through processing',
     'gl_accounts': 'GL accounts', 'bank_name': 'Bank name', 'fsp_type': 'Channel', 'bic': 'BIC',
+    'mobile_prefixes': 'Mobile prefixes',
 }
 CHANGE_EFFECT = ('Applies to every paylist submitted to MUSE from this server once approved. '
                  'Paylists already sent are not affected.')
@@ -232,6 +251,8 @@ def _readable(value):
         return None
     if isinstance(value, bool):
         return 'Yes' if value else 'No'
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return ', '.join(value)
     if isinstance(value, list):
         return '; '.join(' — '.join(p for p in (line.get('glaccount'), line.get('glaccountDesc'),
                                                line.get('grantName')) if p)
@@ -328,9 +349,9 @@ def delete_fsp(user, fsp_code):
     return code
 
 
-def propose_profile(user, fsp_code, bank_name, fsp_type, bic, reason=''):
+def propose_profile(user, fsp_code, bank_name, fsp_type, bic, reason='', mobile_prefixes=None):
     from tasaf_payment.models import MuseChangeKind
-    code, values = normalise_profile(fsp_code, bank_name, fsp_type, bic)
+    code, values = normalise_profile(fsp_code, bank_name, fsp_type, bic, mobile_prefixes)
     return propose(user, MuseChangeKind.FSP_PROFILE, values, fsp_code=code, reason=reason)
 
 
@@ -352,6 +373,8 @@ def _apply(change, user):
         target = (FspProfile.objects.filter(fsp_code=change.fsp_code, is_deleted=False).first()
                   or FspProfile(fsp_code=change.fsp_code))
         target.bank_name, target.fsp_type, target.bic = values['bank_name'], values['fsp_type'], values['bic']
+        if 'mobile_prefixes' in values:
+            target.mobile_prefixes = values['mobile_prefixes']
     target.save(username=user.username)
 
 

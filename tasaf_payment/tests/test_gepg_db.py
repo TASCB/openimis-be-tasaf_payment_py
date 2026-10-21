@@ -32,7 +32,7 @@ class GepgVerificationDbTest(TestCase):
                 fsp_name='GEPGTEST', fsp_type='MOBILE', account_number=f'25576748267{n}',
                 verification_status=VerificationStatus.FAILED if n else VerificationStatus.PENDING, json_ext={})
         FspProfile(fsp_code='GEPGTEST', bank_name='GePG test', fsp_type='MOBILE',
-                   bic='AMTLTZTX').save(username='Admin')
+                   bic='AMTLTZTX', mobile_prefixes=['0767']).save(username='Admin')
         self.ids = [a.id for a in self.accounts]
         for target, kwargs in (('tasaf_payment.gepg.sender.blocked', {'return_value': None}),
                                ('tasaf_payment.gepg.setup.settings_values', {'return_value': SETTINGS}),
