@@ -20,6 +20,7 @@ from tasaf_payment.gql_mutations import (
     CancelMuseChangeMutation,
     SaveGepgSettingsMutation,
     ResendGepgVerificationMutation,
+    ReleaseGepgVerificationMutation,
     DeleteFspMappingMutation,
     SeedFspMappingsMutation,
     SaveFspChargesMutation,
@@ -796,6 +797,7 @@ class Mutation(graphene.ObjectType):
     cancel_muse_change = CancelMuseChangeMutation.Field()
     save_gepg_settings = SaveGepgSettingsMutation.Field()
     resend_gepg_verification = ResendGepgVerificationMutation.Field()
+    release_gepg_verification = ReleaseGepgVerificationMutation.Field()
     delete_fsp_mapping = DeleteFspMappingMutation.Field()
     seed_fsp_mappings = SeedFspMappingsMutation.Field()
     save_fsp_charges = SaveFspChargesMutation.Field()

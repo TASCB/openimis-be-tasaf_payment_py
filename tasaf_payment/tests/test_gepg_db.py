@@ -208,6 +208,24 @@ class GepgVerificationDbTest(TestCase):
         self.assertEqual(GepgVerificationRequest.objects.get().status, GepgRequestStatus.EXPIRED)
         self.assertEqual(self.statuses(), [VerificationStatus.PENDING, VerificationStatus.FAILED])
 
+    def test_a_request_without_an_ack_can_be_released_and_sent_fresh(self):
+        self.dispatch({'published': True, 'ok': True, 'status_code': 200, 'request_id': 'R1', 'esb_body': {}})
+        stuck = GepgVerificationRequest.objects.get()
+        self.assertEqual(stuck.status, GepgRequestStatus.SENT)
+        self.assertEqual(sweeper.release(stuck.acc_verif_id, self.user), 2)
+        stuck.refresh_from_db()
+        self.assertEqual(stuck.status, GepgRequestStatus.EXPIRED)
+        self.assertIn('Released by Admin', stuck.status_desc)
+        self.assertEqual(self.statuses(), [VerificationStatus.PENDING, VerificationStatus.FAILED])
+        with self.assertRaises(ValueError):
+            sweeper.release(stuck.acc_verif_id, self.user)
+        producer = mock.Mock(**{'publish.return_value': ack()})
+        with mock.patch('coremis_app_integration.govesb.GovESBProducer', return_value=producer):
+            self.assertTrue(GepgVerificationSender(self.user).resend(stuck.acc_verif_id)['success'])
+        fresh = GepgVerificationRequest.objects.exclude(id=stuck.id).get()
+        self.assertNotEqual(fresh.acc_verif_id, stuck.acc_verif_id)
+        self.assertEqual(self.statuses(), [VerificationStatus.PENDING_MUSE] * 2)
+
     def test_resend_creates_a_new_request(self):
         self.dispatch(ack('7201'))
         first = GepgVerificationRequest.objects.get()

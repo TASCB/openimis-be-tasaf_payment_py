@@ -816,6 +816,24 @@ class ResendGepgVerificationMutation(OpenIMISMutation):
             return [{'message': str(exc)}]
 
 
+class ReleaseGepgVerificationMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "ReleaseGepgVerificationMutation"
+
+    class Input(OpenIMISMutation.Input):
+        acc_verif_id = graphene.String(required=True)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.gepg.sweeper import release
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_run_verification_perms)
+            release(data['acc_verif_id'], user)
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
 class MuseChangeInputType(OpenIMISMutation.Input):
     change_id = graphene.UUID(required=True)
     comment = graphene.String(required=False)
