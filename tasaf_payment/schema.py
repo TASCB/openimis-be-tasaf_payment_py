@@ -294,6 +294,7 @@ class Query(graphene.ObjectType):
     gepg_readiness = graphene.Field(GepgReadinessGQLType)
     gepg_verification_requests = graphene.Field(graphene.JSONString, status=graphene.String(),
                                                 limit=graphene.Int())
+    verification_outcome = graphene.Field(graphene.JSONString, client_mutation_id=graphene.String(required=True))
     gepg_verification_items = graphene.Field(graphene.JSONString,
                                              acc_verif_id=graphene.String(required=True), offset=graphene.Int(),
                                              limit=graphene.Int(), search=graphene.String(),
@@ -714,6 +715,11 @@ class Query(graphene.ObjectType):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
         from tasaf_payment.gepg.setup import readiness
         return GepgReadinessGQLType(**readiness())
+
+    def resolve_verification_outcome(self, info, client_mutation_id, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_run_verification_perms)
+        from tasaf_payment.gepg import outcome
+        return outcome.recall(client_mutation_id)
 
     def resolve_gepg_verification_requests(self, info, status=None, limit=None, **kwargs):
         Query._check_any_permission(info.context.user, [

@@ -93,17 +93,19 @@ class GepgVerificationSender:
         if problem:
             return {'success': False, 'count': 0, 'batches': 0, 'skipped': 0, 'error': problem}
         requests, skipped = self._claim(account_ids, after_change, before_first_payment)
-        sent, errors = 0, []
+        sent, refused, errors = 0, 0, []
         for request in requests:
             outcome = self.send(request)
             if outcome is None:
                 sent += request.item_count
             else:
+                refused += request.item_count
                 errors.append(outcome)
         logger.info("GePG verification: %d account(s) accepted in %d request(s), %d skipped, %d withdrawn, "
                     "%d failed", sent, len(requests) - len(errors), skipped, self.withdrawn, len(errors))
         return {'success': bool(sent) or not errors, 'count': sent, 'batches': len(requests) - len(errors),
-                'skipped': skipped, 'withdrawn': self.withdrawn, 'error': '; '.join(errors[:3]) or None}
+                'refused': refused, 'refused_batches': len(errors), 'skipped': skipped,
+                'withdrawn': self.withdrawn, 'error': '; '.join(errors[:3]) or None}
 
     def _statuses(self, before_first_payment):
         from tasaf_payment.models import VerificationStatus

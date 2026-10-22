@@ -70,6 +70,10 @@ def handle(payload):
                 request.answered_at = datetime.now(tz=timezone.utc)
                 request.response_body = payload
                 request.save(update_fields=['status', 'answered_at', 'response_body'])
+            if applied:
+                from collections import Counter
+                from tasaf_payment.events import emit_gepg_answered
+                emit_gepg_answered(request, dict(Counter(i.decision or 'PENDING' for i in items.values())))
     except Exception as exc:  # noqa: BLE001 — not acknowledged, so GePG sends it again
         logger.exception("GePG inbound %s failed", acc_verif_id)
         return False, f'Could not process the response: {exc}'

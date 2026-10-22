@@ -185,6 +185,32 @@ class GepgVerificationDbTest(TestCase):
         second.refresh_from_db()
         self.assertEqual(second.acc_name, '')
 
+    def test_an_answer_signals_once_with_the_decisions(self):
+        from tasaf_payment.events import gepg_answered
+        receiver = mock.Mock()
+        gepg_answered.connect(receiver, dispatch_uid='test.gepg_answered')
+        self.addCleanup(gepg_answered.disconnect, dispatch_uid='test.gepg_answered')
+        self.dispatch(ack())
+        request = GepgVerificationRequest.objects.get()
+        first, second = request.items.order_by('id')
+        with self.captureOnCommitCallbacks(execute=True):
+            self.respond(request, [{'AccVerifItemId': second.item_id, 'AccNum': second.acc_num, 'AccName': '',
+                                    'AccStsCode': '7240', 'AccStsDesc': 'Account not found'}])
+        receiver.assert_called_once()
+        self.assertEqual(receiver.call_args.kwargs['counts'], {'FAILED': 1, 'PENDING': 1})
+
+    def test_the_send_counts_are_kept_for_the_pop_up(self):
+        from django.core.cache import cache
+        from django.test import override_settings
+        from tasaf_payment.gepg import outcome
+        with override_settings(CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}):
+            cache.clear()
+            result, _ = self.dispatch(ack())
+            outcome.remember('cmid-1', result)
+            kept = outcome.recall('cmid-1')
+        self.assertEqual((kept['count'], kept['batches'], kept['refused'], kept['withdrawn']),
+                         (result['count'], 1, 0, 0))
+
     def test_unknown_or_malformed_answers_are_not_acknowledged(self):
         self.assertFalse(inbound.handle({gm.RESPONSE: {'AccVerifId': 'NOPE'}})[0])
         self.assertFalse(inbound.handle({'message': {}})[0])

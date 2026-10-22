@@ -182,12 +182,14 @@ class RunVerificationMutation(BaseMutation):
 
     @classmethod
     def _mutate(cls, user, **data):
+        from tasaf_payment.gepg import outcome
         from tasaf_payment.services import verification_dispatcher
-        data.pop('client_mutation_id', None)
+        client_mutation_id = data.pop('client_mutation_id', None)
         data.pop('client_mutation_label', None)
         account_ids = _resolve_account_ids(data.get('account_uuids', []))
         result = verification_dispatcher(user).dispatch(
             account_ids, before_first_payment=bool(data.get('before_first_payment')))
+        outcome.remember(client_mutation_id, result)
         if not result.get('success'):
             raise Exception(result.get('error', 'Verification dispatch failed'))
 
@@ -247,8 +249,9 @@ class RunBatchVerificationMutation(BaseMutation):
 
     @classmethod
     def _mutate(cls, user, **data):
+        from tasaf_payment.gepg import outcome
         from tasaf_payment.services import BatchVerificationService
-        data.pop('client_mutation_id', None)
+        client_mutation_id = data.pop('client_mutation_id', None)
         data.pop('client_mutation_label', None)
         filters = {}
         if data.get('benefit_plan_id'):
@@ -267,6 +270,7 @@ class RunBatchVerificationMutation(BaseMutation):
         if data.get('account_uuids'):
             filters['account_uuids'] = [str(u) for u in data['account_uuids']]
         result = BatchVerificationService(user).dispatch(filters)
+        outcome.remember(client_mutation_id, result)
         if not result.get('success'):
             raise Exception(result.get('error', 'Batch verification dispatch failed'))
 
