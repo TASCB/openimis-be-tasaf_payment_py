@@ -118,6 +118,23 @@ class WithdrawAtSendTest(_Providers):
         record = MuseVerificationRecord.objects.filter(payment_account=wrong).latest('received_at')
         self.assertIn('is AIRTELMONEY (078)', record.failure_reason)
 
+    def test_one_signal_per_send_names_the_withdrawn_and_their_district(self):
+        from tasaf_payment.events import accounts_withdrawn
+        from notifications.adapters.tasaf_payment import _district_chains
+        receiver = mock.Mock()
+        accounts_withdrawn.connect(receiver, dispatch_uid='test.withdrawn')
+        self.addCleanup(accounts_withdrawn.disconnect, dispatch_uid='test.withdrawn')
+        producer = mock.Mock(**{'publish.return_value': ACK})
+        with mock.patch('coremis_app_integration.govesb.GovESBProducer', return_value=producer), \
+                self.captureOnCommitCallbacks(execute=True):
+            GepgVerificationSender(self.user, sleep=lambda s: None).dispatch(self.ids)
+        receiver.assert_called_once()
+        accounts = receiver.call_args.kwargs['accounts']
+        self.assertEqual(sorted(a.id for a in accounts), self.ids[1:])
+        chains = _district_chains(accounts)
+        for chain in filter(None, chains.values()):
+            self.assertIn(chain[0].type, ('D', 'R'))
+
     def test_preview_counts_the_withdrawn(self):
         preview = GepgVerificationSender(self.user).preview(self.ids)
         self.assertEqual((preview['accounts'], preview['withdrawn']), (3, 2))

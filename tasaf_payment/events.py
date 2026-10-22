@@ -11,6 +11,9 @@ muse_event = Signal()
 # kwargs: account, status (VerificationStatus), failure_reason. Only for accounts sent after a change.
 verification_event = Signal()
 
+# kwargs: accounts (the PaymentAccounts a GePG send held back), user
+accounts_withdrawn = Signal()
+
 
 def emit_muse_event(paylist, event, **details):
     if not muse_event.has_listeners():
@@ -32,4 +35,15 @@ def emit_verification_event(account, status, failure_reason=None):
                 sender=None, account=account, status=status, failure_reason=failure_reason):
             if isinstance(result, Exception):
                 logger.warning("verification_event receiver %s failed: %s", receiver, result)
+    transaction.on_commit(send)
+
+
+def emit_accounts_withdrawn(accounts, user):
+    if not accounts or not accounts_withdrawn.has_listeners():
+        return
+
+    def send():
+        for receiver, result in accounts_withdrawn.send_robust(sender=None, accounts=accounts, user=user):
+            if isinstance(result, Exception):
+                logger.warning("accounts_withdrawn receiver %s failed: %s", receiver, result)
     transaction.on_commit(send)

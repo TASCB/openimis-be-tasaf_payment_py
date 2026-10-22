@@ -86,6 +86,7 @@ class GepgVerificationSender:
         self.sleep = sleep
         self.DISPATCHABLE_STATUSES = (VerificationStatus.PENDING, VerificationStatus.FAILED)
         self.withdrawn = 0
+        self.withdrawn_accounts = []
 
     def dispatch(self, account_ids, after_change=False, before_first_payment=False):
         problem = blocked()
@@ -122,6 +123,7 @@ class GepgVerificationSender:
             VerificationStatus,
         )
         from tasaf_payment import prefixes
+        from tasaf_payment.events import emit_accounts_withdrawn
         from tasaf_payment.services import recipient_name
 
         size = int(_config('verification_batch_max_rows', 0) or 0) or 50000
@@ -144,6 +146,7 @@ class GepgVerificationSender:
                 if problem:
                     _withdraw(account, problem, sent_at, self.user)
                     self.withdrawn += 1
+                    self.withdrawn_accounts.append(account)
                     continue
                 groups.setdefault((code, account.fsp_type), []).append(account)
             for (code, fsp_type), members in sorted(groups.items()):
@@ -174,6 +177,7 @@ class GepgVerificationSender:
                         account.save(username=self.user.username)
                     GepgVerificationItem.objects.bulk_create(items)
                     requests.append(request)
+            emit_accounts_withdrawn(self.withdrawn_accounts, self.user)
         return requests, skipped
 
     def send(self, request):
