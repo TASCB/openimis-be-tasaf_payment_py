@@ -52,6 +52,13 @@ class GepgMessageTest(SimpleTestCase):
         self.assertEqual(gm.items_of(gm.find(one, gm.RESPONSE)), [{'AccVerifItemId': '1'}])
         self.assertIsNone(gm.load('<not xml'))
 
+    def test_a_json_ack_inside_an_xml_envelope_is_read(self):
+        text = ('{"Gepg":{"gepgAccVerifSubReqAck":{"AccVerifId":"TVTEST0002","AccVerifStsCode":"7322",'
+                '"AccVerifStsDesc":"Inactive communication protocol"},"gepgSignature":"EKTu"}}')
+        ack = gm.find(text, gm.REQUEST_ACK)
+        self.assertEqual((ack['AccVerifId'], ack['AccVerifStsCode']), ('TVTEST0002', '7322'))
+        self.assertIsNone(gm.load('{not json'))
+
     def test_format_switch(self):
         from unittest import mock
         b = body()

@@ -1,3 +1,4 @@
+import json
 import re
 import uuid
 import xml.etree.ElementTree as ET
@@ -117,9 +118,17 @@ def parse_xml(text):
 
 
 def load(body):
-    if isinstance(body, (str, bytes)):
+    if isinstance(body, bytes):
+        body = body.decode('utf-8', 'replace')
+    if isinstance(body, str):
+        text = body.strip()
+        if text[:1] in ('{', '['):
+            try:
+                return json.loads(text)
+            except ValueError:
+                return None
         try:
-            return parse_xml(body)
+            return parse_xml(text)
         except ET.ParseError:
             return None
     return body
