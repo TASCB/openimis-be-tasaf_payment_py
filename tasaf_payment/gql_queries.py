@@ -229,6 +229,8 @@ class PaylistGQLType(DjangoObjectType):
         connection_class = ExtendedConnection
 
     def resolve_item_count(root, info):
+        if hasattr(root, '_item_count'):
+            return root._item_count or 0
         return root.items.filter(is_deleted=False).count()
 
     def resolve_summary(root, info):

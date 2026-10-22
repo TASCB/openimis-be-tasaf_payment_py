@@ -2,7 +2,7 @@ import graphene
 import graphene_django_optimizer as gql_optimizer
 from gettext import gettext as _
 from django.contrib.auth.models import AnonymousUser
-from django.db.models import Q, Count, Sum
+from django.db.models import Count, OuterRef, Q, Subquery, Sum
 
 from core.schema import OrderedDjangoFilterConnectionField
 from core.services import wait_for_mutation
@@ -432,7 +432,10 @@ class Query(graphene.ObjectType):
         if kwargs.get("payment_cycle_id"):
             filters.append(Q(payment_cycle_id=kwargs["payment_cycle_id"]))
 
-        return gql_optimizer.query(Paylist.objects.filter(*filters), info)
+        items = (PaylistItem.objects.filter(paylist=OuterRef('pk'), is_deleted=False)
+                 .order_by().values('paylist').annotate(n=Count('id')).values('n'))
+        return gql_optimizer.query(
+            Paylist.objects.filter(*filters).annotate(_item_count=Subquery(items)), info)
 
     def resolve_paylist_item(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
