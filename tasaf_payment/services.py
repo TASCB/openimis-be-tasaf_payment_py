@@ -1253,7 +1253,8 @@ def describe_paylist(paylist):
     fsps = sorted(set(items.values_list('payment_account__fsp_name', flat=True)) - {None, ''})
     channel = CHANNEL_LABELS.get(paylist.batch_type, paylist.batch_type)
     destination = paylist.get_destination_display() if paylist.destination else 'MUSE'
-    title = ' · '.join(p for p in (getattr(payroll, 'name', None), channel) if p) or 'Paylist'
+    provider = fsps[0] if len(fsps) == 1 else None
+    title = ' · '.join(p for p in (getattr(payroll, 'name', None), channel, provider) if p) or 'Paylist'
     if (paylist.batch_total or 1) > 1:
         title += f' (batch {paylist.batch_sequence} of {paylist.batch_total})'
     details = [

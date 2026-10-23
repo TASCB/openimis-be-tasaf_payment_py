@@ -186,6 +186,18 @@ def paylist_item_filters(**kwargs):
     return filters
 
 
+def _account_status_counts():
+    rows = (
+        PaymentAccount.objects.filter(is_deleted=False)
+        .values("verification_status").annotate(c=Count("id"))
+    )
+    by_status = {row["verification_status"]: row["c"] for row in rows}
+    return [
+        DashboardAccountStatGQLType(status=st.name, count=by_status.get(st.value, 0))
+        for st in VerificationStatus
+    ]
+
+
 class Query(graphene.ObjectType):
 
     verification_batch_preview = graphene.Field(
@@ -386,6 +398,7 @@ class Query(graphene.ObjectType):
 
     # ── Dashboard summary (counts + amounts in one query) ─────────────────────
     payment_dashboard_summary = graphene.Field(PaymentDashboardSummaryGQLType)
+    payment_account_status_counts = graphene.List(DashboardAccountStatGQLType)
 
     # ─── Resolvers ───────────────────────────────────────────────────────────
 
@@ -611,19 +624,16 @@ class Query(graphene.ObjectType):
             totals=to_row(result['totals']),
         )
 
+    def resolve_payment_account_status_counts(self, info, **kwargs):
+        Query._check_any_permission(info.context.user, [
+            TasafPaymentConfig.gql_payment_account_search_perms,
+            TasafPaymentConfig.gql_pre_audit_search_perms,
+        ])
+        return _account_status_counts()
+
     def resolve_payment_dashboard_summary(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_dashboard_perms)
-
-        # Account counts by verification_status (accounts hold no money → count only).
-        acct_rows = (
-            PaymentAccount.objects.filter(is_deleted=False)
-            .values("verification_status").annotate(c=Count("id"))
-        )
-        acct_map = {row["verification_status"]: row["c"] for row in acct_rows}
-        accounts = [
-            DashboardAccountStatGQLType(status=st.name, count=acct_map.get(st.value, 0))
-            for st in VerificationStatus
-        ]
+        accounts = _account_status_counts()
 
         # Paylist counts by status.
         pl_rows = (
@@ -663,7 +673,7 @@ class Query(graphene.ObjectType):
         return PaymentDashboardSummaryGQLType(
             accounts=accounts,
             paylists=paylists,
-            total_accounts=sum(acct_map.values()),
+            total_accounts=sum(a.count for a in accounts),
             total_paylists=sum(pl_count_map.values()),
             in_process_amount=float(in_process),
             paid_amount=float(paid),
