@@ -24,6 +24,8 @@ class ChargeError(Exception):
 
 NO_BAND = 'NO_BAND_CONFIGURED'
 NO_FSP_CODE = 'FSP_CODE_UNMAPPED'
+INVALID_BANDS = 'INVALID_BANDS'
+APPLIED, PROPOSED, UNCHANGED = 'APPLIED', 'PROPOSED', 'UNCHANGED'
 
 
 def normalise_fsp(value):
@@ -138,13 +140,8 @@ def coverage(fsp_code, on_date=None):
     }
 
 
-def import_rows(rows, user, effective_from=None, replace=False):
-    """Load tariff rows. Validates rather than assuming: blank bounds and overlaps are
-    rejected, gaps are reported for configuration but do not block the import.
-
-    rows: dicts with EPAYMENT_CODE, LOWER_AMOUNT, UPPER_AMOUNT, WITHDRAWAL.
-    """
-    created, errors = [], []
+def read_rows(rows):
+    per_fsp, errors = {}, []
     for idx, raw in enumerate(rows, start=2):
         code = (raw.get('EPAYMENT_CODE') or '').strip()
         lo, hi, wd = (str(raw.get(k) or '').strip()
@@ -163,30 +160,38 @@ def import_rows(rows, user, effective_from=None, replace=False):
         if lo_d > hi_d:
             errors.append({'line': idx, 'error': 'LOWER_AMOUNT above UPPER_AMOUNT', 'fsp': code})
             continue
-        created.append(WithdrawalCharge(
-            id=uuid.uuid4(), fsp_code=normalise_fsp(code),
-            lower_amount=lo_d, upper_amount=hi_d, withdrawal=wd_d,
-            effective_from=effective_from, is_deleted=False, version=1,
-            user_created=user, user_updated=user, json_ext={},
-        ))
-
-    if replace:
-        WithdrawalCharge.objects.filter(is_deleted=False).update(is_deleted=True)
-    WithdrawalCharge.objects.bulk_create(created, batch_size=500)
-
-    codes = sorted({c.fsp_code for c in created})
-    return {
-        'imported': len(created),
-        'skipped': len(errors),
-        'errors': errors,
-        'coverage': [coverage(c) for c in codes],
-    }
+        per_fsp.setdefault(normalise_fsp(code), []).append(
+            {'lower_amount': lo_d, 'upper_amount': hi_d, 'withdrawal': wd_d})
+    return per_fsp, errors
 
 
-def import_csv(content, user, effective_from=None, replace=False):
+def import_rows(rows, user, replace=False, reason=''):
+    from django.db import transaction
+
+    per_fsp, errors = read_rows(rows)
+    if errors:
+        first = errors[0]
+        raise ChargeError(INVALID_BANDS, f"{len(errors)} row(s) have problems. First: line {first['line']}, "
+                                         f"{first['error']}. Nothing was imported.")
+    if not per_fsp:
+        raise ChargeError(INVALID_BANDS, "The file has no bands")
+    outcome = {}
+    with transaction.atomic():
+        for code, bands in sorted(per_fsp.items()):
+            if not replace:
+                bands = band_set(code) + bands
+            try:
+                outcome[code] = save_band_set(user, code, bands, reason=reason)
+            except Exception as exc:
+                raise ChargeError(INVALID_BANDS, f"{code}: {exc}") from exc
+    if all(v == UNCHANGED for v in outcome.values()):
+        raise ChargeError(INVALID_BANDS, "Nothing was changed: the file matches the current bands")
+    return outcome
+
+
+def import_csv(content, user, replace=False, reason=''):
     text = content.decode('utf-8-sig') if isinstance(content, bytes) else content
-    return import_rows(list(csv.DictReader(io.StringIO(text))), user,
-                       effective_from=effective_from, replace=replace)
+    return import_rows(list(csv.DictReader(io.StringIO(text))), user, replace=replace, reason=reason)
 
 
 def known_fsps():
@@ -267,3 +272,30 @@ def band_set(fsp_code):
         .order_by('lower_amount')
         .values('lower_amount', 'upper_amount', 'withdrawal', 'effective_from')
     )
+
+
+def canonical_bands(bands):
+    cent = Decimal('0.01')
+    rows = [{'lower_amount': str(Decimal(str(b['lower_amount'])).quantize(cent)),
+             'upper_amount': str(Decimal(str(b['upper_amount'])).quantize(cent)),
+             'withdrawal': str(Decimal(str(b.get('withdrawal') or 0)).quantize(cent))} for b in bands]
+    return sorted(rows, key=lambda r: Decimal(r['lower_amount']))
+
+
+def save_band_set(user, fsp_code, bands, reason=''):
+    from tasaf_payment.apps import TasafPaymentConfig
+
+    code = normalise_fsp(fsp_code)
+    errors = validate_band_set(bands)
+    if errors:
+        raise ChargeError(INVALID_BANDS, '; '.join(errors))
+    new = canonical_bands(bands)
+    if new == canonical_bands(band_set(code)):
+        return UNCHANGED
+    if not TasafPaymentConfig.charges_require_approval:
+        apply_band_set(code, new, user)
+        return APPLIED
+    from tasaf_payment.models import MuseChangeKind
+    from tasaf_payment.muse.setup import propose
+    propose(user, MuseChangeKind.FSP_CHARGES, {'bands': new}, fsp_code=code, reason=reason)
+    return PROPOSED

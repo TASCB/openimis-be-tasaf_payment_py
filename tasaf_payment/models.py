@@ -537,6 +537,8 @@ class MuseChangeKind(models.TextChoices):
     SETTINGS    = 'SETTINGS',    _("SETTINGS")
     FSP_PROFILE = 'FSP_PROFILE', _("FSP_PROFILE")
     GEPG_SETTINGS = 'GEPG_SETTINGS', _("GEPG_SETTINGS")
+    FSP_CHARGES = 'FSP_CHARGES', _("FSP_CHARGES")
+    FSP_NAMES = 'FSP_NAMES', _("FSP_NAMES")
 
 
 class MuseChangeStatus(models.TextChoices):

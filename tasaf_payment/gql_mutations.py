@@ -299,7 +299,7 @@ class RunPreAuditMutation(BaseMutation):
         account_ids = _resolve_account_ids(data.get('account_uuids', []))
         result = PreAuditService(user).run_pre_audit(account_ids)
         if not result.get('success'):
-            raise Exception(result.get('error', 'Pre-audit failed'))
+            raise Exception(result.get('error') or result.get('detail') or 'Pre-audit failed')
 
     class Input(RunPreAuditInputType):
         pass
@@ -458,39 +458,18 @@ class SaveWithdrawalChargeMutation(OpenIMISMutation):
     def async_mutate(cls, user, **data):
         try:
             _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
-            data.pop('client_mutation_id', None)
-            data.pop('client_mutation_label', None)
-            from tasaf_payment.charges import normalise_fsp
-            uuid_ = data.pop('uuid', None)
-            if data['lower_amount'] > data['upper_amount']:
-                return [{'message': _("Lower amount is above upper amount")}]
-            data['fsp_code'] = normalise_fsp(data['fsp_code'])
-
-            # Overlaps make the band that applies ambiguous, so reject rather than guess.
-            clash = WithdrawalCharge.objects.filter(
-                is_deleted=False, fsp_code=data['fsp_code'],
-                lower_amount__lte=data['upper_amount'],
-                upper_amount__gte=data['lower_amount'])
-            if uuid_:
-                clash = clash.exclude(uuid=uuid_)
-            if clash.exists():
-                return [{'message': _("Band overlaps an existing band for this FSP")}]
-
-            from tasaf_payment.services import WithdrawalChargeService
-            service = WithdrawalChargeService(user)
-
-            if uuid_:
-                obj = WithdrawalCharge.objects.filter(uuid=uuid_, is_deleted=False).first()
-                if not obj:
+            from tasaf_payment.charges import band_set, normalise_fsp, save_band_set
+            code = normalise_fsp(data['fsp_code'])
+            bands = band_set(code)
+            if data.get('uuid'):
+                old = WithdrawalCharge.objects.filter(uuid=data['uuid'], is_deleted=False).first()
+                if not old:
                     return [{'message': _("Withdrawal charge not found")}]
-                data['id'] = str(obj.id)
-                if TasafPaymentConfig.charges_require_approval:
-                    result = service.create_update_task(data)
-                else:
-                    result = service.update(data)
-            else:
-                result = service.create(data)
-            return result if not result.get('success') else None
+                bands = [b for b in bands
+                         if (b['lower_amount'], b['upper_amount']) != (old.lower_amount, old.upper_amount)]
+            bands.append({k: data[k] for k in ('lower_amount', 'upper_amount', 'withdrawal')})
+            save_band_set(user, code, bands)
+            return None
         except Exception as exc:
             return [{'message': str(exc)}]
 
@@ -510,11 +489,15 @@ class DeleteWithdrawalChargeMutation(OpenIMISMutation):
     def async_mutate(cls, user, **data):
         try:
             _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
-            from tasaf_payment.services import WithdrawalChargeService
-            service = WithdrawalChargeService(user)
-            for obj in WithdrawalCharge.objects.filter(uuid__in=data.get('uuids', []),
-                                                       is_deleted=False):
-                service.delete({'id': str(obj.id)})
+            from django.db import transaction
+            from tasaf_payment.charges import band_set, save_band_set
+            ranges = {}
+            for obj in WithdrawalCharge.objects.filter(uuid__in=data.get('uuids', []), is_deleted=False):
+                ranges.setdefault(obj.fsp_code, set()).add((obj.lower_amount, obj.upper_amount))
+            with transaction.atomic():
+                for code, doomed in ranges.items():
+                    save_band_set(user, code, [b for b in band_set(code)
+                                               if (b['lower_amount'], b['upper_amount']) not in doomed])
             return None
         except Exception as exc:
             return [{'message': str(exc)}]
@@ -523,13 +506,11 @@ class DeleteWithdrawalChargeMutation(OpenIMISMutation):
 class ImportWithdrawalChargesInputType(OpenIMISMutation.Input):
     # Raw CSV text: EPAYMENT_CODE, LOWER_AMOUNT, UPPER_AMOUNT, WITHDRAWAL
     csv_content = graphene.String(required=True)
-    effective_from = graphene.Date(required=False)
     replace = graphene.Boolean(required=False)
+    reason = graphene.String(required=False)
 
 
 class ImportWithdrawalChargesMutation(OpenIMISMutation):
-    """Load a tariff CSV. Malformed rows are skipped and reported rather than aborting the
-    import; gaps are reported for configuration but are not errors."""
     _mutation_module = TasafPaymentConfig.name
     _mutation_class = "ImportWithdrawalChargesMutation"
 
@@ -541,14 +522,7 @@ class ImportWithdrawalChargesMutation(OpenIMISMutation):
         try:
             _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
             from tasaf_payment.charges import import_csv
-            result = import_csv(data['csv_content'], user,
-                                effective_from=data.get('effective_from'),
-                                replace=bool(data.get('replace')))
-            if result['skipped']:
-                first = result['errors'][0]
-                return [{'message': _("Imported %d row(s), skipped %d. First problem: line %s, %s")
-                         % (result['imported'], result['skipped'],
-                            first['line'], first['error'])}]
+            import_csv(data['csv_content'], user, replace=bool(data.get('replace')), reason=data.get('reason') or '')
             return None
         except Exception as exc:
             return [{'message': str(exc)}]
@@ -558,11 +532,10 @@ class SaveFspMappingInputType(OpenIMISMutation.Input):
     uuid = graphene.UUID(required=False)
     fsp_name = graphene.String(required=True)
     fsp_code = graphene.String(required=True)
+    reason = graphene.String(required=False)
 
 
 class SaveFspMappingMutation(OpenIMISMutation):
-    """Add or edit an FSP display-name -> tariff-code mapping, so onboarding a new FSP is a
-    UI action rather than a configuration change."""
     _mutation_module = TasafPaymentConfig.name
     _mutation_class = "SaveFspMappingMutation"
 
@@ -573,18 +546,16 @@ class SaveFspMappingMutation(OpenIMISMutation):
     def async_mutate(cls, user, **data):
         try:
             _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
-            data.pop('client_mutation_id', None)
-            data.pop('client_mutation_label', None)
-            uuid_ = data.pop('uuid', None)
-            if uuid_:
-                obj = FspMapping.objects.filter(uuid=uuid_, is_deleted=False).first()
-                if not obj:
+            from tasaf_payment.charges import normalise_fsp
+            from tasaf_payment.muse.setup import fsp_names, save_names
+            code = normalise_fsp(data['fsp_code'])
+            names = fsp_names(code)
+            if data.get('uuid'):
+                old = FspMapping.objects.filter(uuid=data['uuid'], is_deleted=False).first()
+                if not old:
                     return [{'message': _("FSP mapping not found")}]
-                obj.fsp_name = data['fsp_name']
-                obj.fsp_code = data['fsp_code']
-                obj.save(username=user.username)
-            else:
-                FspMapping(**data).save(username=user.username)
+                names = [n for n in names if n != old.fsp_name]
+            save_names(user, code, names + [data['fsp_name']], reason=data.get('reason') or '')
             return None
         except Exception as exc:
             return [{'message': str(exc)}]
@@ -605,8 +576,14 @@ class DeleteFspMappingMutation(OpenIMISMutation):
     def async_mutate(cls, user, **data):
         try:
             _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
+            from django.db import transaction
+            from tasaf_payment.muse.setup import fsp_names, save_names
+            doomed = {}
             for obj in FspMapping.objects.filter(uuid__in=data.get('uuids', []), is_deleted=False):
-                obj.delete(username=user.username)
+                doomed.setdefault(obj.fsp_code, set()).add(obj.fsp_name)
+            with transaction.atomic():
+                for code, gone in doomed.items():
+                    save_names(user, code, [n for n in fsp_names(code) if n not in gone])
             return None
         except Exception as exc:
             return [{'message': str(exc)}]
@@ -640,17 +617,10 @@ class ChargeBandInputType(graphene.InputObjectType):
 class SaveFspChargesInputType(OpenIMISMutation.Input):
     fsp_code = graphene.String(required=True)
     bands = graphene.List(ChargeBandInputType, required=True)
-    effective_from = graphene.Date(required=False)
+    reason = graphene.String(required=False)
 
 
 class SaveFspChargesMutation(OpenIMISMutation):
-    """Apply a whole FSP tariff in one action, like the PMT formula: the config editor sends
-    every band for one FSP and this replaces the set atomically. A partially applied tariff
-    would misprice payments, so it is all-or-nothing.
-
-    With charges_require_approval on, the set is parked as a tasks_management Task and nothing
-    changes until a second user approves.
-    """
     _mutation_module = TasafPaymentConfig.name
     _mutation_class = "SaveFspChargesMutation"
 
@@ -661,38 +631,9 @@ class SaveFspChargesMutation(OpenIMISMutation):
     def async_mutate(cls, user, **data):
         try:
             _require_perms(user, TasafPaymentConfig.gql_withdrawal_charge_manage_perms)
-            data.pop('client_mutation_id', None)
-            data.pop('client_mutation_label', None)
-            from tasaf_payment.charges import (
-                FSP_CHARGES_EVENT, apply_band_set, normalise_fsp, validate_band_set,
-            )
-            fsp_code = normalise_fsp(data['fsp_code'])
-            bands = [dict(b) for b in (data.get('bands') or [])]
-            errors = validate_band_set(bands)
-            if errors:
-                return [{'message': '; '.join(errors)}]
-
-            effective_from = data.get('effective_from')
-            if not TasafPaymentConfig.charges_require_approval:
-                apply_band_set(fsp_code, bands, user, effective_from)
-                return None
-
-            from tasks_management.services import TaskService
-            payload = {
-                'fsp_code': fsp_code,
-                'effective_from': str(effective_from) if effective_from else None,
-                'bands': [{k: str(v) for k, v in b.items()} for b in bands],
-            }
-            result = TaskService(user).create({
-                'source': 'tasaf_payment',
-                'entity_id': None,
-                'entity_type': None,
-                'business_event': FSP_CHARGES_EVENT,
-                'business_status': {},
-                'data': payload,
-            })
-            if not result.get('success'):
-                return [{'message': result.get('detail') or _("Could not queue the change")}]
+            from tasaf_payment.charges import save_band_set
+            save_band_set(user, data['fsp_code'], [dict(b) for b in (data.get('bands') or [])],
+                          reason=data.get('reason') or '')
             return None
         except Exception as exc:
             return [{'message': str(exc)}]

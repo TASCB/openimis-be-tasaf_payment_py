@@ -472,6 +472,10 @@ class FspProviderGQLType(graphene.ObjectType):
     accounts = graphene.Int()
     missing = graphene.List(graphene.String)
     pending = graphene.Boolean()
+    bands_pending = graphene.Boolean()
+    names_pending = graphene.Boolean()
+    band_gaps = graphene.JSONString()
+    band_lowest = graphene.String()
 
 
 class MuseSettingsGQLType(graphene.ObjectType):

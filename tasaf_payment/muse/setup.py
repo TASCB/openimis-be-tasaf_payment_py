@@ -4,6 +4,7 @@ approves it in the approval engine."""
 import logging
 import re
 from datetime import datetime
+from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Count
@@ -29,8 +30,8 @@ def main_fsp_name(row, bank_name=''):
 def provider_list():
     """One row per FSP code: its MUSE routing data, the account display names that map to
     it, whether it has charge bands, how many accounts use it, and what is still missing."""
-    from tasaf_payment.charges import known_fsps, normalise_fsp, resolve_fsp_code
-    from tasaf_payment.models import FspMapping, FspProfile, PaymentAccount, WithdrawalCharge
+    from tasaf_payment.charges import coverage, known_fsps, normalise_fsp, resolve_fsp_code
+    from tasaf_payment.models import FspMapping, FspProfile, MuseChangeKind, PaymentAccount, WithdrawalCharge
 
     rows = {r['fsp_code']: {'fsp_code': r['fsp_code'], 'names': [], 'has_bands': r['has_bands'],
                             'accounts': 0, 'account_types': set(), 'usage': {}} for r in known_fsps()}
@@ -59,6 +60,11 @@ def provider_list():
     band_counts = dict(WithdrawalCharge.objects.filter(is_deleted=False).values('fsp_code')
                        .annotate(n=Count('id')).values_list('fsp_code', 'n'))
     pending = set(pending_fsp_codes())
+    bands_pending = set(pending_fsp_codes(MuseChangeKind.FSP_CHARGES))
+    names_pending = set(pending_fsp_codes(MuseChangeKind.FSP_NAMES))
+    for code in pending | names_pending:
+        rows.setdefault(code, {'fsp_code': code, 'names': [], 'has_bands': False,
+                               'accounts': 0, 'account_types': set(), 'usage': {}})
     out = []
     for code, row in sorted(rows.items()):
         p = profiles.get(code)
@@ -68,6 +74,7 @@ def provider_list():
         bank_name = p.bank_name if p else ''
         bic = p.bic if p else ''
         missing = [f for f, v in (('bankName', bank_name), ('bic', bic), ('fspType', fsp_type)) if not v]
+        cover = coverage(code) if band_counts.get(code) else None
         out.append({
             'uuid': str(p.uuid) if p else None,
             'fsp_code': code, 'name': main_fsp_name(row, bank_name), 'band_count': band_counts.get(code, 0),
@@ -76,6 +83,9 @@ def provider_list():
             'prefixes_from_config': fsp_type == 'MOBILE' and not (p and p.mobile_prefixes),
             'names': sorted(row['names']), 'has_bands': row['has_bands'],
             'accounts': row['accounts'], 'missing': missing, 'pending': code in pending,
+            'bands_pending': code in bands_pending, 'names_pending': code in names_pending,
+            'band_gaps': cover['gaps'] if cover else [],
+            'band_lowest': cover['lowest'] if cover else None,
         })
     return out
 
@@ -242,8 +252,16 @@ FIELD_LABELS = {
     'gl_accounts': 'GL accounts', 'bank_name': 'Bank name', 'fsp_type': 'Channel', 'bic': 'BIC',
     'mobile_prefixes': 'Mobile prefixes',
 }
+CHARGES_EFFECT = ('Sets the withdrawal charge added to each payment to this FSP in payments generated '
+                  'after approval. Paylists already generated keep their charges.')
+NAMES_EFFECT = ('Payment accounts whose FSP name is one of these are treated as this FSP: its charge '
+                'bands and MUSE details apply to them once approved.')
 CHANGE_EFFECT = ('Applies to every paylist submitted to MUSE from this server once approved. '
                  'Paylists already sent are not affected.')
+
+
+def _money(value):
+    return f'{Decimal(str(value)):,.0f}'
 
 
 def _readable(value):
@@ -251,6 +269,9 @@ def _readable(value):
         return None
     if isinstance(value, bool):
         return 'Yes' if value else 'No'
+    if isinstance(value, list) and value and isinstance(value[0], dict) and 'withdrawal' in value[0]:
+        return '; '.join(f"{_money(b['lower_amount'])}–{_money(b['upper_amount'])}: {_money(b['withdrawal'])}"
+                         for b in value)
     if isinstance(value, list) and all(isinstance(v, str) for v in value):
         return ', '.join(value)
     if isinstance(value, list):
@@ -269,6 +290,10 @@ def describe_change(kind, fsp_code, current, proposed, reason=''):
         title, labels, effect = 'GePG settings', gepg_setup.FIELD_LABELS, gepg_setup.CHANGE_EFFECT
     elif kind == 'SETTINGS':
         title = 'MUSE settings'
+    elif kind == 'FSP_CHARGES':
+        title, effect = f'Withdrawal charges: {fsp_code}', CHARGES_EFFECT
+    elif kind == 'FSP_NAMES':
+        title, effect = f'Other names: {fsp_code}', NAMES_EFFECT
     else:
         name = proposed.get('bank_name') or current.get('bank_name')
         title = f'FSP routing: {name} ({fsp_code})' if name else f'FSP routing: {fsp_code}'
@@ -285,10 +310,10 @@ def describe_change(kind, fsp_code, current, proposed, reason=''):
             'effect': effect, 'integration': 'gepg' if kind == 'GEPG_SETTINGS' else 'muse'}
 
 
-def pending_fsp_codes():
+def pending_fsp_codes(kind=None):
     from tasaf_payment.models import MuseChangeKind, MuseChangeRequest, MuseChangeStatus
     return (MuseChangeRequest.objects
-            .filter(is_deleted=False, kind=MuseChangeKind.FSP_PROFILE, status=MuseChangeStatus.PENDING)
+            .filter(is_deleted=False, kind=kind or MuseChangeKind.FSP_PROFILE, status=MuseChangeStatus.PENDING)
             .values_list('fsp_code', flat=True))
 
 
@@ -301,6 +326,11 @@ def propose(user, kind, proposed, fsp_code='', reason=''):
     if kind == MuseChangeKind.GEPG_SETTINGS:
         from tasaf_payment.gepg.setup import settings_values as gepg_settings_values
         current = gepg_settings_values()
+    elif kind == MuseChangeKind.FSP_CHARGES:
+        from tasaf_payment.charges import band_set, canonical_bands
+        current = {'bands': canonical_bands(band_set(fsp_code))}
+    elif kind == MuseChangeKind.FSP_NAMES:
+        current = {'names': fsp_names(fsp_code)}
     else:
         current = settings_values() if kind == MuseChangeKind.SETTINGS else profile_values(fsp_code)
     if current and all(current.get(k) == v for k, v in proposed.items()):
@@ -338,15 +368,61 @@ def delete_fsp(user, fsp_code):
         raise SetupError(f'No FSP {code}')
     if row['accounts']:
         raise SetupError(f'{code} is used by {row["accounts"]} payment account(s) and cannot be deleted')
-    if MuseChangeRequest.objects.filter(is_deleted=False, kind=MuseChangeKind.FSP_PROFILE, fsp_code=code,
-                                        status=MuseChangeStatus.PENDING).exists():
-        raise SetupError(f'{code} has a MUSE change awaiting approval; decide it first')
+    if MuseChangeRequest.objects.filter(is_deleted=False, fsp_code=code, status=MuseChangeStatus.PENDING).exists():
+        raise SetupError(f'{code} has a change awaiting approval; decide it first')
     with transaction.atomic():
         for model in (FspMapping, WithdrawalCharge, FspProfile):
             for obj in model.objects.filter(is_deleted=False, fsp_code=code):
                 obj.is_deleted = True
                 obj.save(username=user.username)
     return code
+
+
+def fsp_names(fsp_code):
+    from tasaf_payment.models import FspMapping
+    return sorted(set(FspMapping.objects.filter(is_deleted=False, fsp_code=fsp_code)
+                      .values_list('fsp_name', flat=True)))
+
+
+def save_names(user, fsp_code, names, reason=''):
+    from tasaf_payment.apps import TasafPaymentConfig
+    from tasaf_payment.charges import APPLIED, PROPOSED, UNCHANGED, normalise_fsp
+    from tasaf_payment.models import FspMapping, MuseChangeKind
+
+    code = normalise_fsp(fsp_code or '')
+    if not code:
+        raise SetupError('FSP code is required')
+    by_key = {}
+    for name in names:
+        name = ' '.join((name or '').split())
+        if name and normalise_fsp(name) not in by_key:
+            by_key[normalise_fsp(name)] = name
+    taken = (FspMapping.objects.filter(is_deleted=False, fsp_name_key__in=by_key).exclude(fsp_code=code)
+             .values_list('fsp_name', 'fsp_code'))
+    if taken:
+        raise SetupError('; '.join(f'"{n}" is already a name of {c}' for n, c in taken))
+    new = sorted(by_key.values())
+    if new == fsp_names(code):
+        return UNCHANGED
+    if not TasafPaymentConfig.charges_require_approval:
+        with transaction.atomic():
+            apply_names(code, new, user)
+        return APPLIED
+    propose(user, MuseChangeKind.FSP_NAMES, {'names': new}, fsp_code=code, reason=reason)
+    return PROPOSED
+
+
+def apply_names(fsp_code, names, user):
+    from tasaf_payment.models import FspMapping
+
+    keep = set(names)
+    for mapping in FspMapping.objects.filter(is_deleted=False, fsp_code=fsp_code):
+        if mapping.fsp_name in keep:
+            keep.discard(mapping.fsp_name)
+        else:
+            mapping.delete(username=user.username)
+    for name in sorted(keep):
+        FspMapping(fsp_name=name, fsp_code=fsp_code).save(username=user.username)
 
 
 def propose_profile(user, fsp_code, bank_name, fsp_type, bic, reason='', mobile_prefixes=None):
@@ -362,6 +438,13 @@ def _apply(change, user):
     if change.kind == MuseChangeKind.GEPG_SETTINGS:
         from tasaf_payment.gepg.setup import apply
         apply(change, user)
+        return
+    if change.kind == MuseChangeKind.FSP_CHARGES:
+        from tasaf_payment.charges import apply_band_set
+        apply_band_set(change.fsp_code, values['bands'], user)
+        return
+    if change.kind == MuseChangeKind.FSP_NAMES:
+        apply_names(change.fsp_code, values['names'], user)
         return
     if change.kind == MuseChangeKind.SETTINGS:
         target = get_settings() or MuseSettings()
