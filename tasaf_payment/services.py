@@ -482,18 +482,20 @@ class PreAuditService:
             with transaction.atomic():
                 for account in accounts:
                     reasons = self._check_account(account)
+                    ext = dict(account.json_ext or {})
                     if reasons:
-                        account.pre_audit_status = PreAuditStatus.FAILED
-                        ext = account.json_ext or {}
+                        status = PreAuditStatus.FAILED
                         ext['pre_audit_failures'] = reasons
-                        account.json_ext = ext
                         failed += 1
                     else:
-                        account.pre_audit_status = PreAuditStatus.PASSED
-                        failed_key = 'pre_audit_failures'
-                        if failed_key in (account.json_ext or {}):
-                            del account.json_ext[failed_key]
+                        status = PreAuditStatus.PASSED
+                        ext.pop('pre_audit_failures', None)
                         passed += 1
+                    # HistoryModel.save refuses a save with no changes, which would fail the whole run.
+                    if status == account.pre_audit_status and ext == (account.json_ext or {}):
+                        continue
+                    account.pre_audit_status = status
+                    account.json_ext = ext
                     account.save(username=self.user.username)
 
             return {
