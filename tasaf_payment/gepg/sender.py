@@ -42,8 +42,10 @@ def _settings_missing():
 
 
 def _headers():
+    # Gepg-Code: spec §2 header, the SP code GePG issued (same value as SpCode)
+    sp_code = gepg_setup.settings_values().get('sp_code')
     code = gepg_setup.service_code()
-    return {'service-code': code} if code else {}
+    return {**({'service-code': code} if code else {}), **({'Gepg-Code': sp_code} if sp_code else {})}
 
 
 WITHDRAWN_KEY = 'verification_withdrawn'

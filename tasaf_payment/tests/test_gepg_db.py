@@ -80,12 +80,13 @@ class GepgVerificationDbTest(TestCase):
         with mock.patch('tasaf_payment.gepg.setup.settings_values',
                         return_value={**SETTINGS, 'service_code': 'SRVC1'}):
             result, producer = self.dispatch(ack())
-        self.assertEqual(producer.publish.call_args[1]['extra_headers'], {'service-code': 'SRVC1'})
+        self.assertEqual(producer.publish.call_args[1]['extra_headers'],
+                         {'service-code': 'SRVC1', 'Gepg-Code': 'SP991'})
         self.assertEqual(result['count'], 2)
 
-    def test_no_service_code_sends_no_header(self):
+    def test_no_service_code_still_sends_gepg_code(self):
         result, producer = self.dispatch(ack())
-        self.assertNotIn('extra_headers', producer.publish.call_args[1])
+        self.assertEqual(producer.publish.call_args[1]['extra_headers'], {'Gepg-Code': 'SP991'})
 
     def test_json_format_sends_the_dict(self):
         with mock.patch('tasaf_payment.apps.TasafPaymentConfig.gepg_message_format', 'JSON'):
