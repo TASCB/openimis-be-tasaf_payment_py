@@ -197,6 +197,24 @@ class GepgVerificationDbTest(TestCase):
         second.refresh_from_db()
         self.assertEqual(second.acc_name, '')
 
+    def test_an_answer_arriving_before_the_ack_is_kept(self):
+        def publish(*args, **kwargs):
+            request = GepgVerificationRequest.objects.get()
+            self.respond(request, [{'AccVerifItemId': i.item_id, 'AccNum': i.acc_num, 'AccName': 'Someone Else',
+                                    'AccStsCode': '7101', 'AccStsDesc': 'Successful'}
+                                   for i in request.items.order_by('id')])
+            return ack()
+
+        producer = mock.Mock(**{'publish.side_effect': publish})
+        with mock.patch('coremis_app_integration.govesb.GovESBProducer', return_value=producer):
+            GepgVerificationSender(self.user, sleep=lambda s: None).dispatch(self.ids)
+        request = GepgVerificationRequest.objects.get()
+        self.assertEqual((request.status, request.status_code), (GepgRequestStatus.ANSWERED, '7101'))
+        self.assertIsNotNone(request.answered_at)
+        self.assertIsNotNone(request.response_body)
+        self.assertIsNotNone(request.ack_body)
+        self.assertEqual(request.items.filter(status=GepgItemStatus.ANSWERED).count(), 2)
+
     def test_an_answer_signals_once_with_the_decisions(self):
         from tasaf_payment.events import gepg_answered
         receiver = mock.Mock()

@@ -257,11 +257,22 @@ class GepgVerificationSender:
             return self._finish(request, items, GepgRequestStatus.ACCEPTED, desc, keep=True)
         return self._finish(request, items, GepgRequestStatus.REJECTED, f'GePG rejected the request: {code} {desc}')
 
+    SEND_FIELDS = ('status', 'status_code', 'status_desc', 'attempts', 'esb_request_id', 'sent_at',
+                   'request_body', 'ack_body')
+
     def _finish(self, request, items, status, desc, keep=False):
+        from tasaf_payment.models import GepgRequestStatus, GepgVerificationRequest
+
         request.status = status
         request.status_desc = desc[:2000]
         with transaction.atomic():
-            request.save()
+            # GePG's answer can arrive before GovESB hands back the ack: keep it, save only the send
+            answered = GepgVerificationRequest.objects.select_for_update().filter(
+                pk=request.pk, status=GepgRequestStatus.ANSWERED).exists()
+            if answered:
+                request.status = GepgRequestStatus.ANSWERED
+                keep = True
+            request.save(update_fields=self.SEND_FIELDS)
             if not keep:
                 _release(items, desc, self.user)
         logger.info("GePG verification %s -> %s %s", request.acc_verif_id, status, desc[:200])
