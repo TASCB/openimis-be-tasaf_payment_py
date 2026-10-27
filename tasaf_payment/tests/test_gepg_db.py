@@ -136,6 +136,17 @@ class GepgVerificationDbTest(TestCase):
         self.assertEqual(GepgVerificationRequest.objects.get().status, GepgRequestStatus.FAILED)
         self.assertEqual(self.statuses(), [VerificationStatus.PENDING, VerificationStatus.FAILED])
 
+    def test_govesb_failure_carrying_a_gepg_ack_records_gepg_code(self):
+        reply = {**ack('7201', 'Error :Connection refused'), 'ok': False, 'error': 'GovESB refused: failed'}
+        result, producer = self.dispatch(reply)
+        self.assertFalse(result['success'])
+        self.assertEqual(producer.publish.call_count, 1)
+        request = GepgVerificationRequest.objects.get()
+        self.assertEqual((request.status, request.status_code), (GepgRequestStatus.REJECTED, '7201'))
+        self.assertIn('Connection refused', request.status_desc)
+        self.assertIsNotNone(request.ack_body)
+        self.assertEqual(self.statuses(), [VerificationStatus.PENDING, VerificationStatus.FAILED])
+
     def test_server_errors_are_retried(self):
         result, producer = self.dispatch({'published': True, 'ok': False, 'status_code': 503})
         self.assertEqual(producer.publish.call_count, 3)

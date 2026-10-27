@@ -230,7 +230,8 @@ class GepgVerificationSender:
                                     'GovESB is not configured on this server; nothing was sent')
             status_code = response.get('status_code')
             request.esb_request_id = str(response.get('request_id') or '')[:100] or request.esb_request_id
-            if response.get('ok'):
+            # GovESB reports "failed" whenever GePG's ack is not 7101; the ack still says why
+            if response.get('ok') or gepg_message.find(response.get('esb_body'), gepg_message.REQUEST_ACK):
                 request.sent_at = _now()
                 return self._apply_ack(request, items, response.get('esb_body'))
             error = f"GovESB refused the request: {response.get('error') or f'HTTP {status_code}'}"
