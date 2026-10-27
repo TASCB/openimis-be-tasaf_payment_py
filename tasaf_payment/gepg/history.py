@@ -12,6 +12,7 @@ def request_rows(status=None, limit=50):
         verified=Count('items', filter=Q(items__decision='VERIFIED')),
         failed=Count('items', filter=Q(items__decision='FAILED')),
         manual=Count('items', filter=Q(items__decision='MANUAL')),
+        unchecked=Count('items', filter=Q(items__decision='UNCHECKED')),
     )
     if status:
         qs = qs.filter(status=status)
@@ -19,6 +20,7 @@ def request_rows(status=None, limit=50):
         'acc_verif_id': r.acc_verif_id, 'fsp_code': r.fsp_code, 'bic': r.bic, 'status': r.status,
         'status_code': r.status_code, 'status_desc': r.status_desc, 'item_count': r.item_count,
         'answered': r.answered, 'verified': r.verified, 'failed': r.failed, 'manual': r.manual,
+        'unchecked': r.unchecked,
         'attempts': r.attempts, 'requested_by': r.requested_by, 'after_change': r.after_change,
         'esb_request_id': r.esb_request_id,
         'created_at': _iso(r.created_at), 'sent_at': _iso(r.sent_at), 'answered_at': _iso(r.answered_at),

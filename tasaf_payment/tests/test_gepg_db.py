@@ -197,6 +197,21 @@ class GepgVerificationDbTest(TestCase):
         second.refresh_from_db()
         self.assertEqual(second.acc_name, '')
 
+    def test_a_provider_that_did_not_answer_leaves_the_account_unchecked(self):
+        self.dispatch(ack())
+        request = GepgVerificationRequest.objects.get()
+        first, second = request.items.order_by('id')
+        ok, _ = self.respond(request, [
+            {'AccVerifItemId': i.item_id, 'AccNum': i.acc_num, 'AccName': '',
+             'AccStsCode': '7355', 'AccStsDesc': 'No response from payment service provider'}
+            for i in (first, second)])
+        self.assertTrue(ok)
+        first.refresh_from_db()
+        self.assertEqual((first.status, first.decision, first.acc_sts_code), (GepgItemStatus.ANSWERED, 'UNCHECKED', '7355'))
+        self.assertEqual(self.statuses(), [VerificationStatus.PENDING, VerificationStatus.FAILED])
+        from tasaf_payment.gepg.history import request_rows
+        self.assertEqual(request_rows()[0]['unchecked'], 2)
+
     def test_an_answer_arriving_before_the_ack_is_kept(self):
         def publish(*args, **kwargs):
             request = GepgVerificationRequest.objects.get()

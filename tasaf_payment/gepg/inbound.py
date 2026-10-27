@@ -8,6 +8,11 @@ from tasaf_payment.gepg import message as gepg_message
 logger = logging.getLogger(__name__)
 
 
+def _retry_codes():
+    from tasaf_payment.apps import TasafPaymentConfig
+    return {str(c) for c in (TasafPaymentConfig.gepg_retry_codes or [])}
+
+
 def _apply_item(item, entry, acc_verif_id):
     from tasaf_payment.models import GepgItemStatus, VerificationStatus
     from tasaf_payment.services import MuseVerificationInboundService
@@ -22,6 +27,14 @@ def _apply_item(item, entry, acc_verif_id):
     account = item.payment_account
     if account.verification_status not in (VerificationStatus.PENDING_MUSE, VerificationStatus.PENDING):
         item.decision = 'IGNORED'
+        return
+    if code in _retry_codes():
+        # Nobody compared the name: the account returns to its earlier status so it is sent again
+        from tasaf_payment.services import _inbound_audit_user
+        if account.verification_status == VerificationStatus.PENDING_MUSE:
+            account.verification_status = item.previous_status
+            account.save(user=_inbound_audit_user())
+        item.decision = 'UNCHECKED'
         return
     payload = {'account_uuid': str(account.uuid), 'muse_reference': acc_verif_id,
                'returned_name': name, 'raw_response': {'channel': 'GEPG', **entry}}
