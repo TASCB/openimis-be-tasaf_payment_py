@@ -264,6 +264,27 @@ class GepgVerificationDbTest(TestCase):
         self.assertEqual(GepgVerificationRequest.objects.get().status, GepgRequestStatus.EXPIRED)
         self.assertEqual(self.statuses(), [VerificationStatus.PENDING, VerificationStatus.FAILED])
 
+    def test_an_unanswered_request_is_announced_once(self):
+        self.dispatch(ack())
+        GepgVerificationRequest.objects.update(sent_at=datetime.now(tz=timezone.utc) - timedelta(minutes=45))
+        self.assertEqual(len(sweeper.remind(60)), 0)
+        with mock.patch('tasaf_payment.events.emit_gepg_unanswered') as emit:
+            self.assertEqual(len(sweeper.remind(30, apply=True)), 1)
+            self.assertEqual(len(sweeper.remind(30, apply=True)), 0)
+        emit.assert_called_once()
+        request = GepgVerificationRequest.objects.get()
+        self.assertIsNotNone(request.reminded_at)
+        self.assertEqual(request.status, GepgRequestStatus.ACCEPTED)
+
+    def test_command_takes_a_zero_deadline(self):
+        from io import StringIO
+        from django.core.management import call_command
+        self.dispatch(ack())
+        GepgVerificationRequest.objects.update(sent_at=datetime.now(tz=timezone.utc) - timedelta(minutes=5))
+        out = StringIO()
+        call_command('expire_gepg_verifications', hours=0, warn_minutes=0, stdout=out)
+        self.assertIn('1 request(s) older than 0 h', out.getvalue())
+
     def test_a_request_without_an_ack_can_be_released_and_sent_fresh(self):
         self.dispatch({'published': True, 'ok': True, 'status_code': 200, 'request_id': 'R1', 'esb_body': {}})
         stuck = GepgVerificationRequest.objects.get()

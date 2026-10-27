@@ -3,12 +3,28 @@ from datetime import datetime, timedelta, timezone
 from django.db import transaction
 
 
-def overdue(hours):
+def overdue(hours=0, minutes=0):
     from tasaf_payment.models import GepgRequestStatus, GepgVerificationRequest
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours, minutes=minutes)
     return GepgVerificationRequest.objects.filter(
         status__in=(GepgRequestStatus.SENT, GepgRequestStatus.ACCEPTED), sent_at__lt=cutoff,
     ).order_by('sent_at')
+
+
+def remind(minutes, apply=False):
+    """Requests GePG has not answered within `minutes`; each one is announced once."""
+    from tasaf_payment.events import emit_gepg_unanswered
+
+    rows = []
+    for request in overdue(minutes=minutes).filter(reminded_at__isnull=True):
+        rows.append({'acc_verif_id': request.acc_verif_id, 'fsp_code': request.fsp_code,
+                     'sent_at': request.sent_at.isoformat() if request.sent_at else None})
+        if apply:
+            with transaction.atomic():
+                request.reminded_at = datetime.now(tz=timezone.utc)
+                request.save(update_fields=['reminded_at'])
+                emit_gepg_unanswered(request, minutes)
+    return rows
 
 
 RELEASABLE = ('SENDING', 'SENT', 'ACCEPTED')
@@ -47,7 +63,7 @@ def expire(hours, apply=False):
     from tasaf_payment.services import _inbound_audit_user
 
     rows = []
-    for request in overdue(hours):
+    for request in overdue(hours=hours):
         rows.append({'acc_verif_id': request.acc_verif_id, 'fsp_code': request.fsp_code,
                      'sent_at': request.sent_at.isoformat() if request.sent_at else None,
                      'accounts': request.items.filter(status=GepgItemStatus.PENDING).count()})

@@ -17,6 +17,9 @@ accounts_withdrawn = Signal()
 # kwargs: request (GepgVerificationRequest), counts {decision: n}
 gepg_answered = Signal()
 
+# kwargs: request (GepgVerificationRequest), minutes (how long it has waited)
+gepg_unanswered = Signal()
+
 
 def emit_muse_event(paylist, event, **details):
     if not muse_event.has_listeners():
@@ -60,4 +63,15 @@ def emit_gepg_answered(request, counts):
         for receiver, result in gepg_answered.send_robust(sender=None, request=request, counts=counts):
             if isinstance(result, Exception):
                 logger.warning("gepg_answered receiver %s failed: %s", receiver, result)
+    transaction.on_commit(send)
+
+
+def emit_gepg_unanswered(request, minutes):
+    if not gepg_unanswered.has_listeners():
+        return
+
+    def send():
+        for receiver, result in gepg_unanswered.send_robust(sender=None, request=request, minutes=minutes):
+            if isinstance(result, Exception):
+                logger.warning("gepg_unanswered receiver %s failed: %s", receiver, result)
     transaction.on_commit(send)

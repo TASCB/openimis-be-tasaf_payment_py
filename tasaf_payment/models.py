@@ -612,6 +612,7 @@ class GepgVerificationRequest(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     sent_at = models.DateTimeField(null=True, blank=True)
     answered_at = models.DateTimeField(null=True, blank=True)
+    reminded_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'tasaf_GepgVerificationRequest'
