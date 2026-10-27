@@ -639,3 +639,17 @@ class GepgVerificationItem(models.Model):
     class Meta:
         db_table = 'tasaf_GepgVerificationItem'
         constraints = [models.UniqueConstraint(fields=['request', 'item_id'], name='tasaf_gepg_item_uniq')]
+
+
+class GepgMessageLog(models.Model):
+    """Every message GePG sends to our End Point, exactly as received, with the reply we gave."""
+    id = models.BigAutoField(primary_key=True)
+    received_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    acc_verif_id = models.CharField(max_length=50, blank=True, default='', db_index=True)
+    data_format = models.CharField(max_length=4, blank=True, default='')
+    body = models.TextField(blank=True, default='')
+    accepted = models.BooleanField(default=False)
+    reply = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'tasaf_GepgMessageLog'

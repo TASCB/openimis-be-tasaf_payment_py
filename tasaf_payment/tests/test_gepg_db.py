@@ -123,6 +123,19 @@ class GepgVerificationDbTest(TestCase):
         item.refresh_from_db()
         self.assertEqual(item.status, GepgItemStatus.ANSWERED)
 
+        from tasaf_payment.models import GepgMessageLog
+        log = GepgMessageLog.objects.get()
+        self.assertEqual((log.acc_verif_id, log.data_format, log.accepted), (request.acc_verif_id, 'XML', True))
+        self.assertIn('Someone Else', log.body)
+        self.assertIn('<AccVerifStsCode>7101</AccVerifStsCode>', log.reply)
+
+        unknown = envelope.replace(request.acc_verif_id, 'TVNOTOURS')
+        with override_settings(ESB=None):
+            GepgMessageView.as_view()(RequestFactory().post('/api/tasaf_payment/gepg/message/', data=unknown,
+                                                            content_type='application/xml'))
+        log = GepgMessageLog.objects.order_by('-id').first()
+        self.assertEqual((log.acc_verif_id, log.accepted), ('TVNOTOURS', False))
+
     def test_rejected_request_restores_previous_statuses(self):
         result, _ = self.dispatch(ack('7201', 'Invalid SpCode'))
         self.assertFalse(result['success'])

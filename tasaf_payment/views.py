@@ -198,6 +198,8 @@ class GepgMessageView(View):
     def post(self, request, *args, **kwargs):
         from tasaf_payment.gepg.inbound import handle
 
+        from tasaf_payment.gepg.log import record
+
         if request.body.lstrip().startswith(b'<'):
             return self._xml(request.body.decode('utf-8', 'replace'), handle)
 
@@ -205,6 +207,7 @@ class GepgMessageView(View):
 
         def reply(success, body):
             text = signed_reply(True, esb_body=body) if success else signed_reply(False, message=body)
+            record(request.body, 'JSON', success, text)
             return HttpResponse(text, content_type='application/json', status=200)
 
         payload, error = _parse_json_body(request)
@@ -220,10 +223,12 @@ class GepgMessageView(View):
     def _xml(raw, handle):
         from coremis_app_integration.govesb_inbound import signed_reply_xml, verify_inbound_xml
         from tasaf_payment.gepg import message as gepg_message
+        from tasaf_payment.gepg.log import record
 
         def reply(success, body):
             text = (signed_reply_xml(True, esb_body=gepg_message.as_xml(body)) if success
                     else signed_reply_xml(False, message=body))
+            record(raw, 'XML', success, text)
             return HttpResponse(text, content_type='application/xml', status=200)
 
         body, _, verr = verify_inbound_xml(raw)
