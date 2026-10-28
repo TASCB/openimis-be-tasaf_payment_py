@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from django.db import transaction
 from django.utils.translation import gettext as _
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Exists, OuterRef, Q, Sum
 
 from core.services import BaseService
 from core.signals import register_service_signal
@@ -645,7 +645,7 @@ class PaylistService:
             )
             if not accepted.exists():
                 return {'success': False, 'error': _("tasaf_payment.error.no_accepted_benefits")}
-            benefit_count = accepted.exclude(id__in=benefits_on_a_paylist()).count()
+            benefit_count = not_on_a_paylist(accepted).count()
             if benefit_count == 0:
                 return {'success': False, 'error': _("tasaf_payment.error.benefits_already_on_paylists")}
 
@@ -762,7 +762,7 @@ class PaylistService:
                 )
                 if not accepted.exists():
                     return {'success': False, 'error': _("tasaf_payment.error.no_accepted_benefits")}
-                benefits = list(accepted.exclude(id__in=benefits_on_a_paylist()).select_related('individual'))
+                benefits = list(not_on_a_paylist(accepted).select_related('individual'))
                 skipped_on_paylist = accepted.count() - len(benefits)
                 if not benefits:
                     return {'success': False, 'error': _("tasaf_payment.error.benefits_already_on_paylists")}
@@ -871,7 +871,7 @@ class PaylistService:
             status=BenefitConsumptionStatus.ACCEPTED, is_deleted=False,
         )
         accepted_count = accepted.count()
-        benefits = list(accepted.exclude(id__in=benefits_on_a_paylist()))
+        benefits = list(not_on_a_paylist(accepted))
         all_pairs = payable_pairs(benefits, fsp_type)
         codes = {}
         fsp_codes = sorted({fsp_code_of(a.fsp_name, codes) for _, a in all_pairs})
@@ -1254,13 +1254,17 @@ def benefits_on_a_paylist():
         returned_for_repayment()).values('benefit_consumption_id')
 
 
+def not_on_a_paylist(benefits):
+    return benefits.filter(~Exists(benefits_on_a_paylist().filter(benefit_consumption_id=OuterRef('pk'))))
+
+
 def withdrawn_awaiting_payment(payroll_id):
     from tasaf_payment.withdrawn_hold import LAPSED_KEY
-    paid = PaylistItem.objects.filter(is_deleted=False, paylist__is_deleted=False,
-                                      status=PaylistItemStatus.PROCESSED).values('benefit_consumption_id')
+    paid = PaylistItem.objects.filter(is_deleted=False, paylist__is_deleted=False, status=PaylistItemStatus.PROCESSED,
+                                      benefit_consumption_id=OuterRef('benefit_consumption_id'))
     return PaylistItem.objects.filter(
-        held_for_payment(), is_deleted=False, paylist__is_deleted=False, paylist__payroll_id=payroll_id,
-    ).exclude(benefit_consumption_id__in=paid).exclude(json_ext__has_key=LAPSED_KEY)
+        held_for_payment(), ~Exists(paid), is_deleted=False, paylist__is_deleted=False, paylist__payroll_id=payroll_id,
+    ).exclude(json_ext__has_key=LAPSED_KEY)
 
 
 LOCKED_PAYMENT_FIELDS = ('account_number', 'fsp_name', 'fsp_type', 'account_name')

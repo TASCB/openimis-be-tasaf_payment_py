@@ -11,7 +11,7 @@ from tasaf_payment.models import (
     ReturnFeedbackType, VerificationStatus,
 )
 from tasaf_payment.services import (
-    _notify_payroll_if_all_closed, benefits_on_a_paylist, paid_elsewhere, unpayable_items,
+    _notify_payroll_if_all_closed, benefits_on_a_paylist, not_on_a_paylist, paid_elsewhere, unpayable_items,
     withdrawn_awaiting_payment,
 )
 
@@ -85,6 +85,11 @@ class MuseRejectionDbTest(TestCase):
         on_paylist = set(benefits_on_a_paylist().values_list('benefit_consumption_id', flat=True))
         self.assertNotIn(self.bad.benefit_consumption_id, on_paylist)
         self.assertIn(self.ok.benefit_consumption_id, on_paylist)
+        from payroll.models import BenefitConsumption
+        free = not_on_a_paylist(BenefitConsumption.objects.filter(
+            id__in=[self.bad.benefit_consumption_id, self.ok.benefit_consumption_id]))
+        self.assertEqual(list(free.values_list('id', flat=True)), [self.bad.benefit_consumption_id])
+        self.assertIn('NOT EXISTS', str(free.query))
 
         paylist = Paylist.objects.get(id=self.paylist.id)
         sent = {r['payeeAccountNumber'] for r in muse_message.payee_rows(paylist)}
