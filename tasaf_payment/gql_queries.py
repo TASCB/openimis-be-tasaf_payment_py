@@ -6,6 +6,7 @@ from graphene_django.filter import TypedFilter
 
 from core import ExtendedConnection
 from tasaf_payment.models import (
+    AccountCheckJob,
     PaylistItemStatus,
     WithdrawalCharge,
     FspMapping,
@@ -414,6 +415,27 @@ class ReturnFeedbackGQLType(DjangoObjectType):
             "is_deleted": ["exact"],
             "paylist_item__id": ["exact"],
             "paylist_item__paylist__id": ["exact"],
+        }
+        connection_class = ExtendedConnection
+
+
+class AccountCheckJobGQLType(DjangoObjectType):
+    uuid = graphene.String(source='uuid')
+    results = graphene.JSONString()
+
+    def resolve_results(self, info):
+        return dict(self.rows.values_list('result').annotate(n=Count('id')))
+
+    class Meta:
+        model = AccountCheckJob
+        interfaces = (graphene.relay.Node,)
+        fields = ('id', 'uuid', 'file_name', 'status', 'created_by', 'row_count', 'valid_count',
+                  'created_at', 'sent_at', 'finished_at')
+        filter_fields = {
+            "id": ["exact"],
+            "status": ["exact"],
+            "file_name": ["icontains"],
+            "created_by": ["icontains"],
         }
         connection_class = ExtendedConnection
 

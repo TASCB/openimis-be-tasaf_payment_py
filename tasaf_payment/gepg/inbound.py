@@ -24,6 +24,11 @@ def _apply_item(item, entry, acc_verif_id):
     item.answered_at = datetime.now(tz=timezone.utc)
     item.status = GepgItemStatus.ANSWERED
 
+    if item.payment_account_id is None:
+        from tasaf_payment.account_check import apply_answer
+        apply_answer(item, code, desc, name, _retry_codes())
+        return
+
     account = item.payment_account
     if account.verification_status not in (VerificationStatus.PENDING_MUSE, VerificationStatus.PENDING):
         item.decision = 'IGNORED'
@@ -83,7 +88,10 @@ def handle(payload):
                 request.answered_at = datetime.now(tz=timezone.utc)
                 request.response_body = payload
                 request.save(update_fields=['status', 'answered_at', 'response_body'])
-            if applied:
+            if applied and request.check_job_id:
+                from tasaf_payment.account_check import complete
+                complete(request.check_job_id)
+            elif applied:
                 from collections import Counter
                 from tasaf_payment.events import emit_gepg_answered
                 emit_gepg_answered(request, dict(Counter(i.decision or 'PENDING' for i in items.values())))

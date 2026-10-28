@@ -75,3 +75,17 @@ def emit_gepg_unanswered(request, minutes):
             if isinstance(result, Exception):
                 logger.warning("gepg_unanswered receiver %s failed: %s", receiver, result)
     transaction.on_commit(send)
+
+
+account_check_done = Signal()
+
+
+def emit_account_check_done(job):
+    if not account_check_done.has_listeners():
+        return
+
+    def send():
+        for receiver, result in account_check_done.send_robust(sender=None, job=job):
+            if isinstance(result, Exception):
+                logger.warning("account_check_done receiver %s failed: %s", receiver, result)
+    transaction.on_commit(send)

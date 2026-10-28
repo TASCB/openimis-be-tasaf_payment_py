@@ -236,3 +236,29 @@ class GepgMessageView(View):
             logger.warning("[GovESB] inbound GePG XML message rejected: %s", verr)
             return reply(False, verr)
         return reply(*handle(gepg_message.load(body) or {}))
+
+
+# ── Bulk account check upload ────────────────────────────────────────────────
+
+from rest_framework import status as _status
+from rest_framework.decorators import api_view, parser_classes, permission_classes
+from rest_framework.parsers import MultiPartParser
+from rest_framework.response import Response
+
+from core.views import check_user_rights
+from tasaf_payment.apps import TasafPaymentConfig
+
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser])
+@permission_classes([check_user_rights(TasafPaymentConfig.gql_account_check_perms or ['270104'])])
+def account_check_upload(request):
+    from tasaf_payment.account_check import AccountCheckError, create_job, summary
+    upload = request.FILES.get('file')
+    if not upload:
+        return Response({'success': False, 'error': 'No file'}, status=_status.HTTP_400_BAD_REQUEST)
+    try:
+        job = create_job(request.user, upload.name, upload.read())
+    except AccountCheckError as exc:
+        return Response({'success': False, 'error': str(exc)}, status=_status.HTTP_400_BAD_REQUEST)
+    return Response({'success': True, **summary(job)})

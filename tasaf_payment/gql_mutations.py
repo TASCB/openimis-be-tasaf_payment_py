@@ -876,3 +876,23 @@ class SendUnappliedWithdrawalsMutation(OpenIMISMutation):
             return None
         except Exception as exc:
             return [{'message': str(exc)}]
+
+
+class SendAccountCheckMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SendAccountCheckMutation"
+
+    class Input(OpenIMISMutation.Input):
+        job_uuid = graphene.UUID(required=True)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.account_check import send
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_account_check_perms)
+            result = send(user, data['job_uuid'])
+            if result['refused'] and result['refused'] == result['requests']:
+                return [{'message': result['error'] or 'GePG did not accept the request'}]
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]

@@ -67,7 +67,16 @@ def _withdraw(account, problem, at, user):
 
 def _release(items, reason, user):
     from tasaf_payment.models import GepgItemStatus, PaymentAccount, VerificationStatus
+    checks = [i for i in items if i.payment_account_id is None]
+    if checks:
+        from tasaf_payment.account_check import release
+        release(checks, reason)
     for item in items:
+        if item.payment_account_id is None:
+            item.status = GepgItemStatus.RELEASED
+            item.acc_sts_desc = reason[:255]
+            item.save(update_fields=['status', 'acc_sts_desc'])
+            continue
         account = PaymentAccount.objects.select_for_update().get(pk=item.payment_account_id)
         sent = (account.json_ext or {}).get('verification_sent') or {}
         if account.verification_status == VerificationStatus.PENDING_MUSE and \
@@ -280,7 +289,7 @@ class GepgVerificationSender:
 
     @staticmethod
     def _fsp_type(items):
-        types = {i.payment_account.fsp_type for i in items}
+        types = {i.payment_account.fsp_type for i in items if i.payment_account_id}
         return types.pop() if len(types) == 1 else ''
 
     def resend(self, acc_verif_id):
@@ -288,6 +297,8 @@ class GepgVerificationSender:
         request = GepgVerificationRequest.objects.filter(acc_verif_id=acc_verif_id).first()
         if not request:
             raise ValueError(f'No GePG verification request {acc_verif_id}')
+        if request.check_job_id:
+            raise ValueError(f'Request {acc_verif_id} belongs to a bulk account check; upload the file again')
         if request.status not in (GepgRequestStatus.FAILED, GepgRequestStatus.REFUSED,
                                   GepgRequestStatus.REJECTED, GepgRequestStatus.EXPIRED):
             raise ValueError(f'Request {acc_verif_id} is {request.status}; only failed, refused, '

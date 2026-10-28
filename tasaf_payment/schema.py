@@ -19,6 +19,7 @@ from tasaf_payment.gql_mutations import (
     RejectMuseChangeMutation,
     CancelMuseChangeMutation,
     DecideUnappliedPaymentMutation,
+    SendAccountCheckMutation,
     SendUnappliedWithdrawalsMutation,
     SaveGepgSettingsMutation,
     ResendGepgVerificationMutation,
@@ -39,6 +40,7 @@ from tasaf_payment.gql_mutations import (
     SubmitPaylistMutation,
 )
 from tasaf_payment.gql_queries import (
+    AccountCheckJobGQLType,
     WithdrawalChargeGQLType,
     ChargeGapGQLType,
     FspMappingGQLType,
@@ -56,6 +58,7 @@ from tasaf_payment.gql_queries import (
     ReturnFeedbackGQLType,
 )
 from tasaf_payment.models import (
+    AccountCheckJob,
     WithdrawalCharge,
     FspMapping,
     PaymentAccount,
@@ -216,6 +219,14 @@ class Query(graphene.ObjectType):
 
     unapplied_withdrawals_pending = graphene.Int(
         description="Unapplied-withdrawn payments not yet reported to MUSE (or that MUSE refused).")
+
+    account_check_job = OrderedDjangoFilterConnectionField(
+        AccountCheckJobGQLType, orderBy=graphene.List(of_type=graphene.String))
+    account_check_summary = graphene.Field(graphene.JSONString, uuid=graphene.UUID(required=True),
+                                           description="One bulk account check: rows per FSP and invalid rows.")
+    account_check_export = graphene.String(uuid=graphene.UUID(required=True),
+                                           description="The check's results as CSV, built now for the caller; "
+                                                       "returns the export name for core's fetch_export.")
 
     paylist_generation_preview = graphene.Field(
         graphene.JSONString,
@@ -832,6 +843,22 @@ class Query(graphene.ObjectType):
                 .filter(is_deleted=False, fsp_code=normalise_fsp(fsp_code))
                 .order_by('lower_amount'))
 
+    def resolve_account_check_job(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_account_check_perms)
+        return gql_optimizer.query(AccountCheckJob.objects.all(), info)
+
+    def resolve_account_check_summary(self, info, uuid):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_account_check_perms)
+        from tasaf_payment.account_check import summary
+        job = AccountCheckJob.objects.filter(uuid=uuid).first()
+        return summary(job) if job else None
+
+    def resolve_account_check_export(self, info, uuid):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_account_check_perms)
+        from tasaf_payment.account_check import export
+        job = AccountCheckJob.objects.filter(uuid=uuid).first()
+        return export(info.context.user, job) if job else None
+
     def resolve_unapplied_withdrawals_pending(self, info, **kwargs):
         from tasaf_payment.muse.withdrawal import pending
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
@@ -900,6 +927,7 @@ class Mutation(graphene.ObjectType):
     reject_muse_change = RejectMuseChangeMutation.Field()
     cancel_muse_change = CancelMuseChangeMutation.Field()
     decide_unapplied_payment = DecideUnappliedPaymentMutation.Field()
+    send_account_check = SendAccountCheckMutation.Field()
     send_unapplied_withdrawals = SendUnappliedWithdrawalsMutation.Field()
     save_gepg_settings = SaveGepgSettingsMutation.Field()
     resend_gepg_verification = ResendGepgVerificationMutation.Field()

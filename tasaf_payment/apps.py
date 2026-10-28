@@ -23,6 +23,9 @@ DEFAULT_CONFIG = {
     # Entity 01: Verification workflow
     "gql_run_verification_perms":        ["270101"],
     "gql_approve_account_perms":         ["270102"],
+    "gql_account_check_perms":           ["270104"],
+    "account_check_max_rows": 40000,
+    "account_check_retention_days": 90,
     # Entity 02: Pre-audit
     "gql_pre_audit_search_perms":        ["270202"],
     "gql_run_pre_audit_perms":           ["270201"],
@@ -173,6 +176,9 @@ class TasafPaymentConfig(AppConfig):
     sub_budget_classes = []
     batch_inline_fallback_limit = 1000
     verification_batch_max_rows = 50000
+    gql_account_check_perms = None
+    account_check_max_rows = 40000
+    account_check_retention_days = 90
     gepg_message_format = 'XML'
     gepg_send_max_attempts = 3
     gepg_send_backoff_seconds = 2

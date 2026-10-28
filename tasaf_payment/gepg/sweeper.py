@@ -16,7 +16,7 @@ def remind(minutes, apply=False):
     from tasaf_payment.events import emit_gepg_unanswered
 
     rows = []
-    for request in overdue(minutes=minutes).filter(reminded_at__isnull=True):
+    for request in overdue(minutes=minutes).filter(reminded_at__isnull=True, check_job__isnull=True):
         rows.append({'acc_verif_id': request.acc_verif_id, 'fsp_code': request.fsp_code,
                      'sent_at': request.sent_at.isoformat() if request.sent_at else None})
         if apply:
@@ -42,6 +42,9 @@ def release_request(request, reason, user):
         request.status = GepgRequestStatus.EXPIRED
         request.status_desc = reason
         request.save(update_fields=['status', 'status_desc'])
+        if request.check_job_id:
+            from tasaf_payment.account_check import complete
+            complete(request.check_job_id)
     return len(pending)
 
 

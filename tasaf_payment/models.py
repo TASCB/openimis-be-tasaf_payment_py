@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import models
 from django.db.models import Q
 from django.utils.translation import gettext as _
@@ -636,6 +638,8 @@ class GepgVerificationRequest(models.Model):
     esb_request_id = models.CharField(max_length=100, blank=True, default='')
     requested_by = models.CharField(max_length=150, blank=True, default='')
     after_change = models.BooleanField(default=False)
+    check_job = models.ForeignKey('AccountCheckJob', on_delete=models.CASCADE, null=True, blank=True,
+                                  related_name='gepg_requests')
     request_body = models.JSONField(null=True, blank=True)
     ack_body = models.JSONField(null=True, blank=True)
     response_body = models.JSONField(null=True, blank=True)
@@ -652,7 +656,7 @@ class GepgVerificationItem(models.Model):
     id = models.BigAutoField(primary_key=True)
     request = models.ForeignKey(GepgVerificationRequest, on_delete=models.CASCADE, related_name='items')
     item_id = models.CharField(max_length=50)
-    payment_account = models.ForeignKey(PaymentAccount, on_delete=models.DO_NOTHING,
+    payment_account = models.ForeignKey(PaymentAccount, on_delete=models.DO_NOTHING, null=True, blank=True,
                                         related_name='gepg_verification_items')
     acc_num = models.CharField(max_length=50)
     previous_status = models.IntegerField(choices=VerificationStatus.choices,
@@ -669,6 +673,68 @@ class GepgVerificationItem(models.Model):
     class Meta:
         db_table = 'tasaf_GepgVerificationItem'
         constraints = [models.UniqueConstraint(fields=['request', 'item_id'], name='tasaf_gepg_item_uniq')]
+
+
+class AccountCheckStatus(models.TextChoices):
+    VALIDATED = 'VALIDATED', _("VALIDATED")
+    SENT      = 'SENT',      _("SENT")
+    DONE      = 'DONE',      _("DONE")
+    CANCELLED = 'CANCELLED', _("CANCELLED")
+
+
+class AccountCheckResult(models.TextChoices):
+    INVALID        = 'INVALID',        _("INVALID")
+    WAITING        = 'WAITING',        _("WAITING")
+    VERIFIED       = 'VERIFIED',       _("VERIFIED")
+    REVIEW         = 'REVIEW',         _("REVIEW")
+    NAME_MISMATCH  = 'NAME_MISMATCH',  _("NAME_MISMATCH")
+    NOT_FOUND      = 'NOT_FOUND',      _("NOT_FOUND")
+    PROVIDER_ERROR = 'PROVIDER_ERROR', _("PROVIDER_ERROR")
+    NO_ANSWER      = 'NO_ANSWER',      _("NO_ANSWER")
+
+
+class AccountCheckJob(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    file_name = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=20, choices=AccountCheckStatus.choices,
+                              default=AccountCheckStatus.VALIDATED, db_index=True)
+    created_by = models.CharField(max_length=150, blank=True, default='')
+    created_by_user_id = models.CharField(max_length=36, blank=True, default='')
+    row_count = models.IntegerField(default=0)
+    valid_count = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'tasaf_AccountCheckJob'
+        ordering = ['-created_at']
+
+
+class AccountCheckRow(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    job = models.ForeignKey(AccountCheckJob, on_delete=models.CASCADE, related_name='rows')
+    row_number = models.IntegerField()
+    hhid = models.CharField(max_length=100, blank=True, default='')
+    name = models.CharField(max_length=255, blank=True, default='')
+    account_number = models.CharField(max_length=50, blank=True, default='')
+    fsp = models.CharField(max_length=100, blank=True, default='')
+    fsp_code = models.CharField(max_length=50, blank=True, default='')
+    fsp_type = models.CharField(max_length=20, blank=True, default='')
+    problem = models.CharField(max_length=255, blank=True, default='')
+    gepg_item = models.OneToOneField(GepgVerificationItem, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='check_row')
+    result = models.CharField(max_length=20, choices=AccountCheckResult.choices,
+                              default=AccountCheckResult.WAITING, db_index=True)
+    provider_name = models.CharField(max_length=150, blank=True, default='')
+    match_score = models.IntegerField(null=True, blank=True)
+    reason = models.CharField(max_length=255, blank=True, default='')
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'tasaf_AccountCheckRow'
+        ordering = ['row_number']
 
 
 class GepgMessageLog(models.Model):
