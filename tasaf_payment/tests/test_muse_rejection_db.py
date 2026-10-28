@@ -260,26 +260,99 @@ class UnappliedRepaymentDbTest(TestCase):
             unapply_item(PaylistItem.objects.get(id=item.id), 'U02', 'Account closed')
         return PaylistItem.objects.get(id=item.id)
 
-    def test_unapplied_payee_goes_to_correction(self):
+    def decide(self, item, action):
+        from core.models import User
+        from tasaf_payment.returned import decide_unapplied
+        with self.captureOnCommitCallbacks(execute=False):
+            decide_unapplied(User.objects.filter(username='Admin').first(), item.uuid, action, 'test')
+        return PaylistItem.objects.get(id=item.id)
+
+    def released(self, item):
+        return item.benefit_consumption_id not in set(
+            benefits_on_a_paylist().values_list('benefit_consumption_id', flat=True))
+
+    def clear(self, item):
+        from tasaf_payment.models import PaymentAccount, PreAuditStatus
+        PaymentAccount.objects.filter(id=item.payment_account_id).update(
+            verification_status=VerificationStatus.VERIFIED, pre_audit_status=PreAuditStatus.PASSED)
+
+    def test_unapplied_payee_waits_for_the_pct(self):
         from case_management.models import FollowUpRemark
+        from tasaf_payment.returned import AWAITING_ACTION, resolution_of, suggested_action
+        before = self.bad.payment_account.verification_status
         item = self.unapply(self.bad)
         self.assertEqual(item.status, PaylistItemStatus.UNAPPLIED)
-        self.assertIn('returned_at', item.json_ext)
+        self.assertEqual(resolution_of(item), AWAITING_ACTION)
+        self.assertEqual(suggested_action(item), 'CASE')
+        self.assertEqual(item.payment_account.verification_status, before)
+        self.assertFalse(FollowUpRemark.objects.filter(paylist_item_id=item.id).exists())
+        self.assertFalse(self.released(item))
+        if self.paylist.payroll_id:
+            self.assertIn(item.id, list(withdrawn_awaiting_payment(self.paylist.payroll_id).values_list('id', flat=True)))
+
+    def test_send_to_case_fails_the_account_and_opens_a_follow_up(self):
+        from case_management.models import FollowUpRemark
+        from tasaf_payment.returned import IN_CORRECTION, resolution_of
+        item = self.decide(self.unapply(self.bad), 'CASE')
         self.assertEqual(item.payment_account.verification_status, VerificationStatus.FAILED)
         self.assertEqual(item.payment_account.json_ext['muse_unapplied']['class'], 'UNAPPLIED')
         follow_up = FollowUpRemark.objects.get(paylist_item_id=item.id)
         self.assertEqual(str(follow_up.id), item.json_ext['follow_up_id'])
         self.assertIn('unapplied', follow_up.remark)
+        self.assertEqual(resolution_of(item), IN_CORRECTION)
+        self.assertTrue(self.released(item))
 
-    def test_unapplied_benefit_is_released_and_held_for_repayment(self):
+    def test_repay_keeps_the_account_and_releases_the_benefit(self):
+        from tasaf_payment.returned import REPAYING, resolution_of
+        self.clear(self.bad)
+        item = self.decide(self.unapply(self.bad), 'REPAY')
+        self.assertEqual(item.payment_account.verification_status, VerificationStatus.VERIFIED)
+        self.assertEqual(item.json_ext['unapplied_action']['action'], 'REPAY')
+        self.assertEqual(resolution_of(item), REPAYING)
+        self.assertTrue(self.released(item))
+
+    def test_repay_is_refused_for_an_account_not_cleared(self):
+        from tasaf_payment.models import PaymentAccount
+        from tasaf_payment.returned import UnappliedDecisionError
         item = self.unapply(self.bad)
-        on_paylist = set(benefits_on_a_paylist().values_list('benefit_consumption_id', flat=True))
-        self.assertNotIn(item.benefit_consumption_id, on_paylist)
-        if self.paylist.payroll_id:
-            self.assertIn(item.id, list(withdrawn_awaiting_payment(self.paylist.payroll_id).values_list('id', flat=True)))
+        PaymentAccount.objects.filter(id=item.payment_account_id).update(verification_status=VerificationStatus.FAILED)
+        with self.assertRaises(UnappliedDecisionError):
+            self.decide(item, 'REPAY')
 
-    def test_older_unapplied_items_stay_final(self):
+    def test_withdraw_keeps_the_benefit_and_restarts_the_account(self):
+        from tasaf_payment.models import PreAuditStatus
+        from tasaf_payment.returned import UNAPPLIED_WITHDRAWN, resolution_of, resolution_q
+        item = self.decide(self.unapply(self.bad), 'WITHDRAW')
+        self.assertEqual(resolution_of(item), UNAPPLIED_WITHDRAWN)
+        self.assertTrue(PaylistItem.objects.filter(resolution_q(UNAPPLIED_WITHDRAWN), id=item.id).exists())
+        self.assertEqual(item.payment_account.verification_status, VerificationStatus.PENDING)
+        self.assertEqual(item.payment_account.pre_audit_status, PreAuditStatus.PENDING)
+        self.assertTrue(self.released(item))
+
+    def test_a_decision_is_taken_once(self):
+        from tasaf_payment.returned import UnappliedDecisionError
+        item = self.decide(self.unapply(self.bad), 'WITHDRAW')
+        with self.assertRaises(UnappliedDecisionError):
+            self.decide(item, 'CASE')
+
+    def test_resolution_filter_matches_each_item(self):
+        from tasaf_payment.returned import RESOLUTIONS, resolution_of, resolution_q
+        self.clear(self.flaky)
+        items = [self.unapply(self.bad), self.decide(self.unapply(self.flaky), 'REPAY'),
+                 self.decide(self.unapply(self.ok), 'WITHDRAW')]
+        if len(self.items) > 3:
+            withdrawn_in_batch = self.items[3]
+            PaylistItem.objects.filter(id=withdrawn_in_batch.id).update(
+                status=PaylistItemStatus.WITHDRAWN, json_ext={'withdrawn_at': '2026-10-28T00:00:00+00:00'})
+            items.append(PaylistItem.objects.get(id=withdrawn_in_batch.id))
+        for item in items:
+            matches = [r for r in RESOLUTIONS if PaylistItem.objects.filter(resolution_q(r), id=item.id).exists()]
+            self.assertEqual(matches, [resolution_of(item)])
+
+    def test_unstamped_unapplied_item_also_waits(self):
+        from tasaf_payment.returned import AWAITING_ACTION, resolution_of
         PaylistItem.objects.filter(id=self.bad.id).update(status=PaylistItemStatus.UNAPPLIED, json_ext={})
-        on_paylist = set(benefits_on_a_paylist().values_list('benefit_consumption_id', flat=True))
-        self.assertIn(self.bad.benefit_consumption_id, on_paylist)
+        item = PaylistItem.objects.get(id=self.bad.id)
+        self.assertEqual(resolution_of(item), AWAITING_ACTION)
+        self.assertFalse(self.released(item))
 

@@ -16,6 +16,7 @@ from tasaf_payment import name_match
 from tasaf_payment.events import emit_muse_event, emit_verification_event
 from tasaf_payment.validation import WithdrawalChargeValidation
 from tasaf_payment.models import (
+    held_for_payment,
     returned_for_repayment,
     WithdrawalCharge,
     PaymentAccount,
@@ -33,7 +34,11 @@ from tasaf_payment.models import (
     PaylistItem,
     ReturnFeedback,
     ReturnFeedbackType,
+    MusePaymentType,
+    UnappliedAction,
+    UNAPPLIED_ACTION_KEY,
 )
+from tasaf_payment.unapplied import assign_end_to_end_ids, original_end_to_end_id
 from tasaf_payment.validation import PaymentAccountValidation
 
 logger = logging.getLogger(__name__)
@@ -766,41 +771,51 @@ class PaylistService:
                     pairs = only_fsp(payable_pairs(benefits, fsp_type), fsp_code)
                     if not pairs:
                         continue
+                    origins = self._unapplied_origins(pairs) if destination == PaymentDestination.MUSE else {}
+                    groups = [(MusePaymentType.UNAPPLIED, [p for p in pairs if p[0].id in origins]),
+                              (MusePaymentType.PAYMENT, [p for p in pairs if p[0].id not in origins])]
 
-                    if max_size and len(pairs) > max_size:
-                        chunks = [pairs[i:i + max_size] for i in range(0, len(pairs), max_size)]
-                    else:
-                        chunks = [pairs]
+                    for payment_type, group_pairs in groups:
+                        if not group_pairs:
+                            continue
+                        if max_size and len(group_pairs) > max_size:
+                            chunks = [group_pairs[i:i + max_size] for i in range(0, len(group_pairs), max_size)]
+                        else:
+                            chunks = [group_pairs]
 
-                    group_id = uuid.uuid4()
-                    total = len(chunks)
-                    now = datetime.now(tz=timezone.utc)
-                    for seq, chunk in enumerate(chunks, start=1):
-                        paylist = Paylist(
-                            payroll_id=payroll_id,
-                            payment_cycle_id=payment_cycle_id,
-                            batch_type=stored_type,
-                            destination=destination,
-                            status=PaylistStatus.PENDING_APPROVAL,
-                            generated_at=now,
-                            batch_group=group_id,
-                            batch_sequence=seq,
-                            batch_total=total,
-                        )
-                        paylist.save(user=self.user)
-                        item_objs = [
-                            self._build_paylist_item(paylist, benefit, account, now, user_pk)
-                            for benefit, account in chunk
-                        ]
-                        PaylistItem.objects.bulk_create(item_objs, batch_size=2000)
-                        self._start_paylist_approval(paylist)
-                        created.append({
-                            'paylist_uuid':   str(paylist.uuid),
-                            'batch_type':     stored_type,
-                            'batch_sequence': seq,
-                            'batch_total':    total,
-                            'item_count':     len(chunk),
-                        })
+                        group_id = uuid.uuid4()
+                        total = len(chunks)
+                        now = datetime.now(tz=timezone.utc)
+                        for seq, chunk in enumerate(chunks, start=1):
+                            paylist = Paylist(
+                                payroll_id=payroll_id,
+                                payment_cycle_id=payment_cycle_id,
+                                batch_type=stored_type,
+                                destination=destination,
+                                payment_type=payment_type,
+                                status=PaylistStatus.PENDING_APPROVAL,
+                                generated_at=now,
+                                batch_group=group_id,
+                                batch_sequence=seq,
+                                batch_total=total,
+                            )
+                            paylist.save(user=self.user)
+                            item_objs = [
+                                self._build_paylist_item(paylist, benefit, account, now, user_pk,
+                                                         origins.get(benefit.id))
+                                for benefit, account in chunk
+                            ]
+                            assign_end_to_end_ids(item_objs)
+                            PaylistItem.objects.bulk_create(item_objs, batch_size=2000)
+                            self._start_paylist_approval(paylist)
+                            created.append({
+                                'paylist_uuid':   str(paylist.uuid),
+                                'batch_type':     stored_type,
+                                'payment_type':   payment_type,
+                                'batch_sequence': seq,
+                                'batch_total':    total,
+                                'item_count':     len(chunk),
+                            })
 
                 if not created:
                     return {'success': False, 'error': _("tasaf_payment.error.no_eligible_accounts")}
@@ -899,6 +914,12 @@ class PaylistService:
                                      'awaiting_muse': fsp_type == 'MOBILE'})
         for code, count in no_band.items():
             warnings.append({'code': 'NO_CHARGE_BAND', 'fsp_code': code, 'payments': count})
+        if destination == PaymentDestination.MUSE:
+            from tasaf_payment.unapplied import provider_changed, resend_origins
+            origins = resend_origins([b.id for b, _ in pairs])
+            resends = sum(1 for b, a in pairs if b.id in origins and not provider_changed(origins[b.id], a))
+            if resends:
+                warnings.append({'code': 'UNAPPLIED_RESEND', 'fsp_code': '', 'payments': resends})
 
         return {
             'success': True,
@@ -914,7 +935,23 @@ class PaylistService:
             'warnings': warnings,
         }
 
-    def _build_paylist_item(self, paylist, benefit, account, now, user_pk):
+    def _unapplied_origins(self, pairs):
+        from tasaf_payment.unapplied import PROVIDER_CHANGED, provider_code, provider_changed, resend_origins
+        origins = resend_origins([benefit.id for benefit, _ in pairs])
+        for benefit, account in pairs:
+            origin = origins.get(benefit.id)
+            if origin is None or not provider_changed(origin, account):
+                continue
+            ext = dict(origin.json_ext or {})
+            ext[UNAPPLIED_ACTION_KEY] = {**ext[UNAPPLIED_ACTION_KEY], 'action': UnappliedAction.WITHDRAW,
+                                         'auto': PROVIDER_CHANGED, 'new_provider': provider_code(account),
+                                         'changed_at': datetime.now(tz=timezone.utc).isoformat()}
+            origin.json_ext = ext
+            origin.save(user=self.user)
+            del origins[benefit.id]
+        return origins
+
+    def _build_paylist_item(self, paylist, benefit, account, now, user_pk, origin=None):
         """One line. When charges are enabled the transfer is grossed up so the beneficiary
         withdraws the entitlement in full; net/charge/gross are all stored because
         reconciliation compares MUSE's gross against the benefit's net.
@@ -928,7 +965,9 @@ class PaylistService:
         charge = None
         gross = net
         note = None
-        if TasafPaymentConfig.apply_withdrawal_charges:
+        if origin is not None:
+            net, charge, gross = origin.net_amount, origin.charge_amount, origin.amount
+        elif TasafPaymentConfig.apply_withdrawal_charges:
             from tasaf_payment.charges import ChargeError, gross_up
             try:
                 net, charge, gross = gross_up(account.fsp_name, benefit.amount)
@@ -950,6 +989,7 @@ class PaylistService:
             user_created_id=user_pk,
             user_updated_id=user_pk,
             json_ext=note or {},
+            org_end_to_end_id=original_end_to_end_id(origin) if origin is not None else None,
         )
 
     def _start_paylist_approval(self, paylist):
@@ -1052,6 +1092,13 @@ class PaylistService:
                 return {'success': False, 'outcome': 'REFUSED',
                         'error': 'No payee is left on this paylist to send; every payee was taken out '
                                  'after MUSE rejected the batch'}
+            if paylist.payment_type == MusePaymentType.UNAPPLIED:
+                from tasaf_payment.unapplied import resend_mismatches
+                mismatched = len(resend_mismatches(paylist))
+                if mismatched:
+                    return {'success': False, 'outcome': 'REFUSED',
+                            'error': f'{mismatched} re-sent payment(s) no longer match the payment MUSE returned '
+                                     f'(provider or amount changed); withdraw them and generate again'}
             unpayable = unpayable_items(paylist).count()
             if unpayable:
                 logger.warning("PaylistService.submit: paylist %s refused, %d account(s) not cleared",
@@ -1212,7 +1259,7 @@ def withdrawn_awaiting_payment(payroll_id):
     paid = PaylistItem.objects.filter(is_deleted=False, paylist__is_deleted=False,
                                       status=PaylistItemStatus.PROCESSED).values('benefit_consumption_id')
     return PaylistItem.objects.filter(
-        returned_for_repayment(), is_deleted=False, paylist__is_deleted=False, paylist__payroll_id=payroll_id,
+        held_for_payment(), is_deleted=False, paylist__is_deleted=False, paylist__payroll_id=payroll_id,
     ).exclude(benefit_consumption_id__in=paid).exclude(json_ext__has_key=LAPSED_KEY)
 
 
@@ -1388,9 +1435,7 @@ def settle_item(item, settled_at=None, reference=None):
 
 
 def unapply_item(item, reason_code=None, reason_description=None, reference=None):
-    from tasaf_payment.muse.rejection import flag_returned_account
     user = _inbound_audit_user(item)
-    reason = ' '.join(p for p in (reason_code, reason_description) if p) or 'Payment returned unapplied'
     with transaction.atomic():
         ReturnFeedback(
             paylist_item=item,
@@ -1404,7 +1449,6 @@ def unapply_item(item, reason_code=None, reason_description=None, reference=None
             item.muse_reference = reference
         item.json_ext = {**(item.json_ext or {}), 'returned_at': datetime.now(tz=timezone.utc).isoformat()}
         item.save(user=user)
-        flag_returned_account(item, reason, 'UNAPPLIED', item.paylist, user)
         emit_muse_event(item.paylist, 'unapplied', description=reason_description)
         _close_paylist_if_complete(item.paylist)
 

@@ -134,10 +134,17 @@ def _batch(message_type, header, summary):
     from tasaf_payment.muse.rejection import handle_batch_rejection
     from tasaf_payment.services import apply_muse_batch_status, take_over_send_in_progress
 
+    from tasaf_payment.muse import withdrawal
+
+    org_msg_id = str(summary.get('orgMsgId') or '').strip()
+    if org_msg_id.startswith(withdrawal.MSG_PREFIX):
+        count = withdrawal.acknowledge(org_msg_id, summary.get('status'), summary.get('statusDesc'))
+        if count is not None:
+            return None, Reply(200, _acknowledge(message_type, header, None), 'SUCCESS',
+                               f'withdrawal list {org_msg_id}: {count} payment(s)')
     status = BATCH_STATUSES.get(batch_status_key(summary.get('status')))
     if not status:
         return None, _error(400, f"Unknown batch status: {summary.get('status')!r}", 'FAILED')
-    org_msg_id = str(summary.get('orgMsgId') or '').strip()
     with transaction.atomic():
         paylist = Paylist.objects.select_for_update().filter(
             muse_msg_id=org_msg_id, is_deleted=False, destination=PaymentDestination.MUSE,
@@ -162,11 +169,13 @@ def _batch(message_type, header, summary):
 def _find_item(end_to_end_id, org_msg_id):
     """orgMsgId narrows the search only when it names one of our batches; MUSE's spec also
     sends null or the payment's own reference there."""
+    from django.db.models import Q
     from tasaf_payment.models import (
         PAYLIST_IN_FLIGHT_STATUSES, PaylistItem, PaylistItemStatus, PaymentDestination,
     )
+    sent_as = Q(end_to_end_id=end_to_end_id) | Q(end_to_end_id__isnull=True, benefit_consumption__code=end_to_end_id)
     items = PaylistItem.objects.filter(
-        benefit_consumption__code=end_to_end_id, is_deleted=False,
+        sent_as, is_deleted=False,
         paylist__is_deleted=False, paylist__destination=PaymentDestination.MUSE,
         paylist__muse_msg_id__isnull=False,
     ).exclude(paylist__muse_msg_id='').select_related('paylist', 'payment_account__group_beneficiary__group')
@@ -204,11 +213,16 @@ def _payee_problem(details, item):
     return None
 
 
+def payment_status_key(raw):
+    status = str(raw or '').strip().upper()
+    return 'UNAPPLIED' if status.startswith('UNAPPLIED') else status
+
+
 def _payment(message_type, header, details):
     from tasaf_payment.models import PAYLIST_IN_FLIGHT_STATUSES, PaylistItemStatus
     from tasaf_payment.services import settle_item, unapply_item
 
-    status = str(details.get('status') or '').strip().upper()
+    status = payment_status_key(details.get('status'))
     end_to_end_id = str(details.get('endtoEndId') or details.get('endToEndId') or '').strip()
     if status not in PAYMENT_STATUSES:
         return None, end_to_end_id, _error(400, f"Unknown payment status: {details.get('status')!r}", 'FAILED')

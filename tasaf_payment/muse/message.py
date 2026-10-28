@@ -12,6 +12,7 @@ SENDER = 'TASAFMIS'
 RECEIVER = 'MUSE'
 MESSAGE_TYPE = 'BULK_PAYMENT'
 PAYMENT_TYPE = 'PAYMENT'
+UNAPPLIED_TYPE = 'UNAPPLIED'
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 CHANNELS = ('BANK', 'MOBILE')
 
@@ -33,6 +34,7 @@ PATTERNS = {
     'payeeAccountNumber': (re.compile(r'^[0-9a-zA-Z]{6,35}$'), '6 to 35 letters and digits'),
     'payeeBankBic': (BIC_RE, 'Tanzanian BIC, e.g. NMIBTZTZ'),
     'endtoEndId': (re.compile(r'^[0-9A-Za-z]{1,16}$'), 'letters and digits only, at most 16'),
+    'orgEndToEndId': (re.compile(r'^[0-9A-Za-z]{1,16}$'), 'letters and digits only, at most 16'),
 }
 
 
@@ -84,11 +86,13 @@ def money(value):
 def settings_values(settings):
     if settings is None:
         return {'institutionCode': '', 'payerAccount': '', 'subBudgetClass': None,
+                'unappliedSubBudgetClass': None,
                 'paymentDesc': '', 'currencyCode': CURRENCY, 'isSTP': 'False', 'gl_accounts': []}
     return {
         'institutionCode': settings.institution_code,
         'payerAccount': settings.payer_account,
         'subBudgetClass': settings.sub_budget_class,
+        'unappliedSubBudgetClass': settings.unapplied_sub_budget_class,
         'paymentDesc': settings.payment_desc,
         'currencyCode': CURRENCY,
         'isSTP': 'True' if settings.is_stp else 'False',
@@ -96,8 +100,7 @@ def settings_values(settings):
     }
 
 
-def assemble(ids, settings, payees, now):
-    """The message itself, from plain values. ``ids`` holds msgId and referenceNo."""
+def assemble(ids, settings, payees, now, payment_type=PAYMENT_TYPE):
     total = sum((Decimal(str(p['amount'])) for p in payees), Decimal('0'))
     stamp = now.strftime(DATE_FORMAT)
     summary = {
@@ -111,13 +114,14 @@ def assemble(ids, settings, payees, now):
         'totalAmount': money(total),
         'noofTransaction': len(payees),
         'isSTP': settings['isSTP'],
-        'subBudgetClass': settings['subBudgetClass'],
+        'subBudgetClass': (settings.get('unappliedSubBudgetClass') if payment_type == UNAPPLIED_TYPE
+                           else settings['subBudgetClass']),
         'payerAccount': settings['payerAccount'],
     }
     message = {
         'messageHeader': {
             'sender': SENDER, 'receiver': RECEIVER, 'msgId': ids['msgId'],
-            'messageType': MESSAGE_TYPE, 'paymentType': PAYMENT_TYPE, 'createdAt': stamp,
+            'messageType': MESSAGE_TYPE, 'paymentType': payment_type, 'createdAt': stamp,
         },
         'paymentSummary': summary,
         'payList': payees,
@@ -177,6 +181,7 @@ def payee_rows(paylist):
                  .order_by('date_created', 'id'))
     names = _representative_names(paylist)
     profiles = _fsp_profiles([i.payment_account for i in items])
+    unapplied = getattr(paylist, 'payment_type', PAYMENT_TYPE) == UNAPPLIED_TYPE
     rows = []
     for item in items:
         account = item.payment_account
@@ -184,8 +189,7 @@ def payee_rows(paylist):
         name = names.get(getattr(group, 'id', None)) or str(
             ((getattr(group, 'json_ext', None) or {}).get('primary_recipient')) or '').strip()
         profile = profiles.get(account.fsp_name)
-        benefit = item.benefit_consumption
-        rows.append({
+        row = {
             'payeeCode': payee_code(group),
             'payeeName': name,
             'payeeAccountNumber': account.account_number or '',
@@ -193,10 +197,18 @@ def payee_rows(paylist):
             'payeeBankName': profile.bank_name if profile else '',
             'payeeBankBic': profile.bic if profile else '',
             'amount': money(item.amount),
-            'endtoEndId': benefit.code if benefit else '',
+            'endtoEndId': end_to_end_id(item),
             'paymentChannel': ((profile.fsp_type if profile else '') or account.fsp_type or '').upper(),
-        })
+        }
+        if unapplied:
+            row['orgEndToEndId'] = item.org_end_to_end_id or ''
+        rows.append(row)
     return rows
+
+
+def end_to_end_id(item):
+    benefit = item.benefit_consumption
+    return item.end_to_end_id or (benefit.code if benefit else '')
 
 
 def build(paylist, now=None):
@@ -204,7 +216,8 @@ def build(paylist, now=None):
 
     now = now or message_time(paylist) or datetime.now()
     ids = {'msgId': msg_id(paylist), 'referenceNo': reference_no(paylist)}
-    return assemble(ids, settings_values(get_settings()), payee_rows(paylist), now)
+    return assemble(ids, settings_values(get_settings()), payee_rows(paylist), now,
+                    getattr(paylist, 'payment_type', PAYMENT_TYPE) or PAYMENT_TYPE)
 
 
 # ── Checking ────────────────────────────────────────────────────────────────
@@ -255,12 +268,14 @@ def check(body):
         if _missing(header.get(field)):
             problems.append(_problem('messageHeader', field, 'required', 'Required'))
 
+    unapplied = header.get('paymentType') == UNAPPLIED_TYPE
     for field in SUMMARY_REQUIRED:
         if _missing(summary.get(field)):
+            hint = ('Required — enter the unapplied sub-budget class in MUSE settings'
+                    if unapplied and field == 'subBudgetClass' else 'Required — enter it in MUSE settings')
             problems.append(_problem('paymentSummary', field, 'required',
-                                     'Required — enter it in MUSE settings'
-                                     if field in ('institutionCode', 'payerAccount',
-                                                  'subBudgetClass', 'paymentDesc') else 'Required'))
+                                     hint if field in ('institutionCode', 'payerAccount',
+                                                       'subBudgetClass', 'paymentDesc') else 'Required'))
     currency = summary.get('currencyCode')
     if not _missing(currency) and not PATTERNS['currencyCode'][0].match(str(currency)):
         problems.append(_problem('paymentSummary', 'currencyCode', 'pattern',
@@ -302,6 +317,18 @@ def check(body):
             if reason:
                 problems.append(_problem('payList', 'amount', 'range', reason,
                                          payee['amount'], index, payee))
+        if unapplied:
+            org = payee.get('orgEndToEndId')
+            if _missing(org):
+                problems.append(_problem('payList', 'orgEndToEndId', 'required',
+                                         'An unapplied re-send must name the original payment',
+                                         index=index, payee=payee))
+            elif not PATTERNS['orgEndToEndId'][0].match(str(org)):
+                problems.append(_problem('payList', 'orgEndToEndId', 'pattern',
+                                         PATTERNS['orgEndToEndId'][1], org, index, payee))
+            elif org == payee.get('endtoEndId'):
+                problems.append(_problem('payList', 'endtoEndId', 'not_new',
+                                         'An unapplied re-send needs a new endtoEndId', org, index, payee))
         channel = payee.get('paymentChannel')
         if not _missing(channel) and channel not in CHANNELS:
             problems.append(_problem('payList', 'paymentChannel', 'choice', 'BANK or MOBILE',

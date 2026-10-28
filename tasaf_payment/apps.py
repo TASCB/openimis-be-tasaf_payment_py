@@ -7,7 +7,12 @@ MODULE_NAME = 'tasaf_payment'
 MUSE_REJECTION_REASON_CLASSES = {
     "MSISDN invalid": "DATA",
     "The receiver number must be a customer number": "DATA",
+    "Beneficiary name mismatch": "DATA",
+    "Dormant account": "DATA",
+    "Account closed": "DATA",
     "System internal error": "TRANSIENT",
+    "System not available": "TRANSIENT",
+    "Timeout": "TRANSIENT",
 }
 
 DEFAULT_CONFIG = {
@@ -28,6 +33,7 @@ DEFAULT_CONFIG = {
     "gql_submit_paylist_perms":          ["270304"],
     # Entity 04: Return feedback
     "gql_return_feedback_search_perms":  ["270401"],
+    "gql_unapplied_decide_perms":        ["270402"],
     # Entity 05: Dashboard
     "gql_dashboard_perms":               ["270501"],
     # Auditor-facing reports — deliberately separate from the operational rights.
@@ -143,6 +149,7 @@ class TasafPaymentConfig(AppConfig):
     gql_approve_paylist_perms = None
     gql_submit_paylist_perms = None
     gql_return_feedback_search_perms = None
+    gql_unapplied_decide_perms = None
     gql_dashboard_perms = None
     gql_reports_perms = None
     gql_muse_verification_search_perms = None

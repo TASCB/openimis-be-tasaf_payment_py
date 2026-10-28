@@ -214,6 +214,101 @@ PAYLIST_ITEM_EXPORT_COLUMNS = [
 ]
 
 
+def unapplied_summary(payment_cycle_id=None, date_from=None, date_to=None, destination=None):
+    from django.db.models import Count, DateTimeField, Min, Q, Sum
+    from django.db.models.functions import Coalesce, TruncDate
+    from tasaf_payment.returned import RESOLUTIONS, resolution_q
+
+    qs = PaylistItem.objects.filter(is_deleted=False, status=PaylistItemStatus.UNAPPLIED)
+    if payment_cycle_id:
+        qs = qs.filter(paylist__payment_cycle_id=payment_cycle_id)
+    if destination:
+        qs = qs.filter(paylist__destination=destination)
+    if date_from or date_to:
+        returned = PaylistItem.objects.filter(id__in=qs.values('id')).annotate(returned_on=TruncDate(Coalesce(
+            Min('return_feedbacks__received_at', filter=Q(return_feedbacks__is_deleted=False)),
+            'date_updated', output_field=DateTimeField())))
+        if date_from:
+            returned = returned.filter(returned_on__gte=date_from)
+        if date_to:
+            returned = returned.filter(returned_on__lte=date_to)
+        qs = PaylistItem.objects.filter(id__in=returned.values('id'))
+
+    def totals(subset):
+        row = subset.aggregate(count=Count('id'), amount=Sum('amount'))
+        return {'count': row['count'] or 0, 'amount': float(row['amount'] or 0)}
+
+    return {'total': totals(qs),
+            'by_resolution': {r: totals(qs.filter(resolution_q(r))) for r in RESOLUTIONS}}
+
+
+UNAPPLIED_EXPORT_COLUMNS = [
+    'HHID', 'Payee', 'Account Number', 'FSP', 'Amount', 'MUSE Batch Reference', 'Reason', 'Received At',
+    'Suggested Action', 'Action', 'Decided By', 'Decided At', 'Note', 'Progress', 'Region', 'District',
+]
+RESOLUTION_LABELS = {
+    'AWAITING_ACTION': 'Awaiting action', 'IN_CORRECTION': 'In correction', 'REPAYING': 'Re-paying',
+    'REPAID': 'Re-paid', 'UNAPPLIED_WITHDRAWN': 'Unapplied withdrawn', 'LAPSED': 'Lapsed',
+}
+ACTION_LABELS = {'REPAY': 'Repay', 'CASE': 'Send to Case', 'WITHDRAW': 'Withdraw'}
+
+
+def export_unapplied_items(user, items):
+    import uuid as _uuid
+
+    from django.core.files.base import ContentFile
+    from core.models import ExportableQueryModel
+    from tasaf_payment.models import UNAPPLIED_ACTION_KEY
+    from tasaf_payment.returned import resolution_of, suggested_action
+
+    items = list(items.select_related(
+        'paylist', 'payment_account__group_beneficiary__group__location__parent__parent__parent',
+    ).prefetch_related('return_feedbacks').order_by('-date_created', 'id'))
+    records = []
+    for item in items:
+        account = item.payment_account
+        group = account.group_beneficiary.group if account and account.group_beneficiary_id else None
+        feedbacks = sorted((f for f in item.return_feedbacks.all() if not f.is_deleted),
+                           key=lambda f: f.received_at, reverse=True)
+        feedback = feedbacks[0] if feedbacks else None
+        decision = (item.json_ext or {}).get(UNAPPLIED_ACTION_KEY) or {}
+        region, district, _, _ = _location_names(group.location if group else None)
+        received = (item.json_ext or {}).get('returned_at') or (
+            feedback.received_at.strftime('%Y-%m-%d %H:%M') if feedback else '')
+        records.append(dict(zip(UNAPPLIED_EXPORT_COLUMNS, [
+            group.code if group else '',
+            account.account_name or '' if account else '',
+            account.account_number if account else '',
+            account.fsp_name if account else '',
+            float(item.amount) if item.amount is not None else None,
+            item.paylist.muse_batch_reference or '' if item.paylist_id else '',
+            ' · '.join(p for p in [feedback.reason_code if feedback else None,
+                                   feedback.reason_description if feedback else item.return_reason] if p),
+            str(received)[:16].replace('T', ' '),
+            ACTION_LABELS.get(suggested_action(item), ''),
+            ACTION_LABELS.get(decision.get('action'), ''),
+            decision.get('by', ''),
+            str(decision.get('at', ''))[:16].replace('T', ' '),
+            'Provider changed' if decision.get('auto') else decision.get('note') or '',
+            RESOLUTION_LABELS.get(resolution_of(item), ''),
+            region, district,
+        ])))
+    frame = pd.DataFrame.from_records(records, columns=UNAPPLIED_EXPORT_COLUMNS)
+
+    filename = f"{_uuid.uuid4()}.csv"
+    export = ExportableQueryModel(
+        name=filename,
+        model='PaylistItem',
+        content=ContentFile(frame.to_csv(index=False), filename),
+        user=user,
+        sql_query='tasaf_payment.reports.export_unapplied_items',
+        file_format=ExportableQueryModel.FileFormat.CSV,
+    )
+    export.save()
+    logger.info("export_unapplied_items: %s (%d row(s))", filename, len(records))
+    return export.name
+
+
 def _location_names(location):
     chain = []
     while location is not None and len(chain) < 4:

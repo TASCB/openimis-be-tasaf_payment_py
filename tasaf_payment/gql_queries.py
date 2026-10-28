@@ -322,6 +322,23 @@ class PaylistItemGQLType(DjangoObjectType):
     follow_up = graphene.JSONString()
     return_reason_code = graphene.String()
     returned_at = graphene.String()
+    suggested_action = graphene.String()
+    unapplied_decision = graphene.JSONString()
+    muse_withdrawal = graphene.JSONString()
+
+    def resolve_muse_withdrawal(self, info):
+        from tasaf_payment.muse.withdrawal import KEY
+        return (self.json_ext or {}).get(KEY)
+
+    def resolve_suggested_action(self, info):
+        from tasaf_payment.returned import suggested_action
+        if self.status != PaylistItemStatus.UNAPPLIED:
+            return None
+        return suggested_action(self)
+
+    def resolve_unapplied_decision(self, info):
+        from tasaf_payment.models import UNAPPLIED_ACTION_KEY
+        return (self.json_ext or {}).get(UNAPPLIED_ACTION_KEY)
 
     def resolve_resolution(self, info):
         from tasaf_payment.returned import resolution_of

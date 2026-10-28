@@ -838,3 +838,41 @@ class CancelMuseChangeMutation(OpenIMISMutation):
             return None
         except Exception as exc:
             return [{'message': str(exc)}]
+
+
+class DecideUnappliedPaymentMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "DecideUnappliedPaymentMutation"
+
+    class Input(OpenIMISMutation.Input):
+        item_uuid = graphene.UUID(required=True)
+        action = graphene.String(required=True)
+        note = graphene.String(required=False)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.returned import decide_unapplied
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_unapplied_decide_perms)
+            decide_unapplied(user, str(data['item_uuid']), data['action'], data.get('note'))
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
+class SendUnappliedWithdrawalsMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SendUnappliedWithdrawalsMutation"
+
+    class Input(OpenIMISMutation.Input):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.muse.withdrawal import send
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_unapplied_decide_perms)
+            send(user)
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]

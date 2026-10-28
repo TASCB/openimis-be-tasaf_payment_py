@@ -88,8 +88,8 @@ def _escalate_follow_ups(item, cut_off, payroll, user):
 
 
 def held_payrolls():
-    from tasaf_payment.models import PaylistItem, returned_for_repayment
-    return (PaylistItem.objects.filter(returned_for_repayment(), is_deleted=False, paylist__is_deleted=False,
+    from tasaf_payment.models import PaylistItem, held_for_payment
+    return (PaylistItem.objects.filter(held_for_payment(), is_deleted=False, paylist__is_deleted=False,
                                        paylist__payroll__isnull=False)
             .exclude(json_ext__has_key=LAPSED_KEY)
             .values_list('paylist__payroll_id', flat=True).distinct())

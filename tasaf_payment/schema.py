@@ -18,6 +18,8 @@ from tasaf_payment.gql_mutations import (
     ApproveMuseChangeMutation,
     RejectMuseChangeMutation,
     CancelMuseChangeMutation,
+    DecideUnappliedPaymentMutation,
+    SendUnappliedWithdrawalsMutation,
     SaveGepgSettingsMutation,
     ResendGepgVerificationMutation,
     ReleaseGepgVerificationMutation,
@@ -212,6 +214,9 @@ class Query(graphene.ObjectType):
                     "Read-only: nothing is sent and no account changes.",
     )
 
+    unapplied_withdrawals_pending = graphene.Int(
+        description="Unapplied-withdrawn payments not yet reported to MUSE (or that MUSE refused).")
+
     paylist_generation_preview = graphene.Field(
         graphene.JSONString,
         payroll_id=graphene.UUID(required=True),
@@ -257,6 +262,15 @@ class Query(graphene.ObjectType):
         destination=graphene.String(required=False),
         description="Writes the FSP summary as .xlsx and returns the export name for "
                     "core's /api/core/fetch_export.",
+    )
+
+    unapplied_summary = graphene.Field(
+        graphene.JSONString,
+        payment_cycle_id=graphene.UUID(required=False),
+        date_from=graphene.Date(required=False),
+        date_to=graphene.Date(required=False),
+        destination=graphene.String(required=False),
+        description="Unapplied payments per progress status (count and amount), for the Reports tab.",
     )
 
     epayment_summary_by_fsp = graphene.Field(
@@ -350,6 +364,17 @@ class Query(graphene.ObjectType):
         batch_reference=graphene.String(),
         reason_code=graphene.String(),
         # status, muse_reference handled by filter_fields
+    )
+    unapplied_items_export = graphene.String(
+        hhid=graphene.String(),
+        account_number=graphene.String(),
+        resolution=graphene.String(),
+        batch_reference=graphene.String(),
+        file_format=graphene.String(),
+        fields=graphene.List(graphene.String),
+        fields_columns=graphene.String(),
+        description="The Unapplied Payments page matching the filters as CSV; returns the export name "
+                    "for core's /api/core/fetch_export.",
     )
     paylist_items_export = graphene.String(
         paylist_uuid=graphene.UUID(required=True),
@@ -468,6 +493,15 @@ class Query(graphene.ObjectType):
 
         filters.extend(paylist_item_filters(**kwargs))
         return gql_optimizer.query(PaylistItem.objects.filter(*filters), info)
+
+    def resolve_unapplied_items_export(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
+        from tasaf_payment.reports import export_unapplied_items
+        for key in ('file_format', 'fields', 'fields_columns'):
+            kwargs.pop(key, None)
+        items = PaylistItem.objects.filter(*paylist_item_filters(**kwargs), is_deleted=False,
+                                           status=PaylistItemStatus.UNAPPLIED)
+        return export_unapplied_items(info.context.user, items)
 
     def resolve_paylist_items_export(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
@@ -591,6 +625,12 @@ class Query(graphene.ObjectType):
             date_to=kwargs.get('date_to'),
             destination=kwargs.get('destination'),
         )
+
+    def resolve_unapplied_summary(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_reports_perms)
+        from tasaf_payment.reports import unapplied_summary
+        return unapplied_summary(**{k: kwargs.get(k) for k in
+                                    ('payment_cycle_id', 'date_from', 'date_to', 'destination')})
 
     def resolve_epayment_summary_by_fsp(self, info, **kwargs):
         """Summary of e-Payment by FSP."""
@@ -792,6 +832,11 @@ class Query(graphene.ObjectType):
                 .filter(is_deleted=False, fsp_code=normalise_fsp(fsp_code))
                 .order_by('lower_amount'))
 
+    def resolve_unapplied_withdrawals_pending(self, info, **kwargs):
+        from tasaf_payment.muse.withdrawal import pending
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
+        return pending().count()
+
     def resolve_paylist_generation_preview(self, info, payroll_id, batch_type, destination=None, fsp_code=None,
                                            **kwargs):
         from tasaf_payment.services import PaylistService
@@ -854,6 +899,8 @@ class Mutation(graphene.ObjectType):
     approve_muse_change = ApproveMuseChangeMutation.Field()
     reject_muse_change = RejectMuseChangeMutation.Field()
     cancel_muse_change = CancelMuseChangeMutation.Field()
+    decide_unapplied_payment = DecideUnappliedPaymentMutation.Field()
+    send_unapplied_withdrawals = SendUnappliedWithdrawalsMutation.Field()
     save_gepg_settings = SaveGepgSettingsMutation.Field()
     resend_gepg_verification = ResendGepgVerificationMutation.Field()
     release_gepg_verification = ReleaseGepgVerificationMutation.Field()

@@ -66,6 +66,11 @@ PAYLIST_IN_FLIGHT_STATUSES = (
 )
 
 
+class MusePaymentType(models.TextChoices):
+    PAYMENT = 'PAYMENT', _("PAYMENT")
+    UNAPPLIED = 'UNAPPLIED', _("UNAPPLIED")
+
+
 class PaylistItemStatus(models.TextChoices):
     PENDING    = 'PENDING',    _("PENDING")
     PROCESSED  = 'PROCESSED',  _("PROCESSED")
@@ -85,9 +90,30 @@ PAYLIST_ITEM_RETURNED_STATUSES = (
 )
 
 
+UNAPPLIED_ACTION_KEY = 'unapplied_action'
+
+
+class UnappliedAction(models.TextChoices):
+    REPAY = 'REPAY', _("REPAY")
+    CASE = 'CASE', _("CASE")
+    WITHDRAW = 'WITHDRAW', _("WITHDRAW")
+
+
+def returned_unapplied(prefix=''):
+    return Q(**{f'{prefix}status': PaylistItemStatus.UNAPPLIED})
+
+
+def awaiting_action(prefix=''):
+    return returned_unapplied(prefix) & ~Q(**{f'{prefix}json_ext__has_key': UNAPPLIED_ACTION_KEY})
+
+
 def returned_for_repayment(prefix=''):
     return (Q(**{f'{prefix}status': PaylistItemStatus.WITHDRAWN})
-            | Q(**{f'{prefix}status': PaylistItemStatus.UNAPPLIED, f'{prefix}json_ext__has_key': 'returned_at'}))
+            | returned_unapplied(prefix) & Q(**{f'{prefix}json_ext__has_key': UNAPPLIED_ACTION_KEY}))
+
+
+def held_for_payment(prefix=''):
+    return returned_for_repayment(prefix) | awaiting_action(prefix)
 
 
 class MuseVerificationResult(models.TextChoices):
@@ -312,6 +338,8 @@ class Paylist(HistoryBusinessModel):
     # MUSE's last batch-level reply, in MUSE's own words.
     muse_status_desc = models.TextField(null=True, blank=True)
     muse_status_at = models.DateTimeField(null=True, blank=True)
+    payment_type = models.CharField(max_length=10, choices=MusePaymentType.choices,
+                                    default=MusePaymentType.PAYMENT)
     batch_group = models.UUIDField(null=True, blank=True, db_index=True)
     batch_sequence = models.IntegerField(null=True, blank=True)
     batch_total = models.IntegerField(null=True, blank=True)
@@ -368,6 +396,8 @@ class PaylistItem(HistoryModel):
     return_reason = models.TextField(null=True, blank=True)
     # Set when the gateway confirms the money landed.
     settled_at = models.DateTimeField(null=True, blank=True)
+    end_to_end_id = models.CharField(max_length=16, null=True, blank=True, db_index=True)
+    org_end_to_end_id = models.CharField(max_length=16, null=True, blank=True)
 
     class Meta:
         managed = True
