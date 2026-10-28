@@ -40,7 +40,7 @@ class AccountCheckError(Exception):
 
 def max_rows():
     from tasaf_payment.apps import TasafPaymentConfig
-    return int(getattr(TasafPaymentConfig, 'account_check_max_rows', 40000) or 40000)
+    return int(getattr(TasafPaymentConfig, 'account_check_max_rows', 50000) or 50000)
 
 
 # ── Upload ──────────────────────────────────────────────────────────────────
