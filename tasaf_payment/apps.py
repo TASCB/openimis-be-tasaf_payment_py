@@ -108,7 +108,7 @@ DEFAULT_CONFIG = {
     "gepg_answer_timeout_hours": 6,
     # GePG codes meaning "could not check" (provider unreachable or silent): the account goes back to
     # where it was instead of failing. Add codes here as GePG confirms them.
-    "gepg_retry_codes": ["7201", "7355"],
+    "gepg_retry_codes": ["7355"],
     "require_first_payment_check": True,
     "check_mobile_prefix": True,
     "name_match": {
@@ -184,7 +184,7 @@ class TasafPaymentConfig(AppConfig):
     gepg_send_backoff_seconds = 2
     gepg_answer_warning_minutes = 30
     gepg_answer_timeout_hours = 6
-    gepg_retry_codes = ["7201", "7355"]
+    gepg_retry_codes = ["7355"]
     require_first_payment_check = True
     check_mobile_prefix = True
     name_match = {}

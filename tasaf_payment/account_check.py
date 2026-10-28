@@ -29,6 +29,7 @@ RESULT_LABELS = {
     AccountCheckResult.REVIEW: 'Check manually',
     AccountCheckResult.NAME_MISMATCH: 'Name mismatch',
     AccountCheckResult.NOT_FOUND: 'Account not found / invalid',
+    AccountCheckResult.DORMANT: 'Account dormant',
     AccountCheckResult.PROVIDER_ERROR: 'Provider error',
     AccountCheckResult.NO_ANSWER: 'No answer',
 }
@@ -245,7 +246,7 @@ def apply_answer(item, code, desc, name, retry_codes):
     if code in retry_codes:
         row.result, row.reason = AccountCheckResult.PROVIDER_ERROR, f'GePG {code}: {desc or "not checked"}'[:255]
     elif code != gepg_message.SUCCESS or not name:
-        row.result = AccountCheckResult.NOT_FOUND
+        row.result = AccountCheckResult.DORMANT if 'dormant' in (desc or '').lower() else AccountCheckResult.NOT_FOUND
         row.reason = f"GePG {code or '(no code)'}: {desc or 'account could not be verified'}"[:255]
     else:
         match = name_match.decide(row.name, name)

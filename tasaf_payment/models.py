@@ -689,6 +689,7 @@ class AccountCheckResult(models.TextChoices):
     REVIEW         = 'REVIEW',         _("REVIEW")
     NAME_MISMATCH  = 'NAME_MISMATCH',  _("NAME_MISMATCH")
     NOT_FOUND      = 'NOT_FOUND',      _("NOT_FOUND")
+    DORMANT        = 'DORMANT',        _("DORMANT")
     PROVIDER_ERROR = 'PROVIDER_ERROR', _("PROVIDER_ERROR")
     NO_ANSWER      = 'NO_ANSWER',      _("NO_ANSWER")
 

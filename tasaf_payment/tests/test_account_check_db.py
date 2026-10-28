@@ -77,6 +77,15 @@ class AccountCheckDbTest(TestCase):
         self.assertEqual(PaymentAccount.objects.order_by('-date_updated').values_list('id', 'date_updated').first(),
                          accounts_before)
 
+    def test_dormant_is_its_own_result(self):
+        from tasaf_payment.gepg import inbound
+        job = self.job()
+        request = self.send(job)
+        with self.captureOnCommitCallbacks(execute=True):
+            inbound.handle(answer(request, [('', '7201', 'Account is dormant'), ('', '7201', 'Account not found')]))
+        results = dict(job.rows.exclude(result=AccountCheckResult.INVALID).values_list('row_number', 'result'))
+        self.assertEqual(results, {2: AccountCheckResult.DORMANT, 3: AccountCheckResult.NOT_FOUND})
+
     def test_unanswered_rows_expire(self):
         from tasaf_payment.gepg.sweeper import release_request
         job = self.job()

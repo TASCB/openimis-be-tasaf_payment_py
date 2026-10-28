@@ -225,6 +225,20 @@ class GepgVerificationDbTest(TestCase):
         from tasaf_payment.gepg.history import request_rows
         self.assertEqual(request_rows()[0]['unchecked'], 2)
 
+    def test_a_dormant_or_missing_account_fails(self):
+        self.dispatch(ack())
+        request = GepgVerificationRequest.objects.get()
+        first, second = request.items.order_by('id')
+        ok, _ = self.respond(request, [
+            {'AccVerifItemId': first.item_id, 'AccNum': first.acc_num, 'AccName': '',
+             'AccStsCode': '7201', 'AccStsDesc': 'Account is dormant'},
+            {'AccVerifItemId': second.item_id, 'AccNum': second.acc_num, 'AccName': '',
+             'AccStsCode': '7201', 'AccStsDesc': 'Account not found'}])
+        self.assertTrue(ok)
+        self.assertEqual(self.statuses(), [VerificationStatus.FAILED, VerificationStatus.FAILED])
+        record = PaymentAccount.objects.get(id=self.ids[0]).muse_verification_records.order_by('-id').first()
+        self.assertIn('dormant', record.failure_reason)
+
     def test_an_answer_arriving_before_the_ack_is_kept(self):
         def publish(*args, **kwargs):
             request = GepgVerificationRequest.objects.get()
