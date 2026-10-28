@@ -71,7 +71,7 @@ def check_enabled():
     return bool(getattr(TasafPaymentConfig, 'check_mobile_prefix', True))
 
 
-def problem(account, current=None):
+def problem(account, current=None, saved=None):
     from tasaf_payment.charges import resolve_fsp_code
 
     if account.fsp_type != 'MOBILE':
@@ -82,7 +82,8 @@ def problem(account, current=None):
                 'reason': f"'{account.account_number or ''}' is not a mobile number (255 followed by 9 digits)"}
     if not check_enabled():
         return None
-    saved = resolve_fsp_code(account.fsp_name) or ''
+    if saved is None:
+        saved = resolve_fsp_code(account.fsp_name) or ''
     belongs_to, prefix = owner(number, current)
     if not belongs_to or belongs_to == saved:
         return None

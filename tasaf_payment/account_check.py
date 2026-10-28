@@ -103,7 +103,7 @@ def _problem(row, provider, seen, table):
         return f'{code} has no BIC in FSP providers'
     if fsp_type == 'MOBILE':
         mismatch = prefixes.problem(SimpleNamespace(fsp_type='MOBILE', account_number=row['account_number'],
-                                                    fsp_name=row['fsp']), table)
+                                                    fsp_name=row['fsp']), table, saved=code)
         if mismatch:
             return mismatch['reason'][:255]
         row['account_number'] = msisdn.normalise(row['account_number'])
@@ -160,6 +160,28 @@ def summary(job, problems=200):
 
 
 # ── Send ────────────────────────────────────────────────────────────────────
+
+def queue_send(user, job_uuid):
+    from tasaf_payment.gepg.sender import blocked
+    from tasaf_payment.tasks import send_account_check_task
+
+    problem = blocked()
+    if problem:
+        raise AccountCheckError(problem)
+    job = AccountCheckJob.objects.filter(uuid=job_uuid).first()
+    if not job:
+        raise AccountCheckError('No such account check')
+    if job.status != AccountCheckStatus.VALIDATED:
+        raise AccountCheckError(f'This check is {job.status}; it was already sent')
+    if not job.valid_count:
+        raise AccountCheckError('No valid row to send')
+    try:
+        send_account_check_task.delay(str(job.uuid), user.id)
+        return None
+    except Exception:  # noqa: BLE001 — no broker: send inline
+        logger.warning("Account check %s: enqueue failed, sending inline", job.uuid, exc_info=True)
+    return send(user, job.uuid)
+
 
 def send(user, job_uuid):
     from tasaf_payment.apps import TasafPaymentConfig

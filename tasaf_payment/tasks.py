@@ -276,6 +276,18 @@ def generate_paylists_task(self, user_id, payroll_id, batch_type,
         raise self.retry(exc=exc)
 
 
+# ─── Bulk account check ───────────────────────────────────────────────────────
+
+@shared_task(bind=True, max_retries=0, name='tasaf_payment.send_account_check_task')
+def send_account_check_task(self, job_uuid, user_id):
+    from core.models import User
+    from tasaf_payment.account_check import send
+
+    result = send(User.objects.get(id=user_id), job_uuid)
+    logger.info("send_account_check_task: job=%s %s", job_uuid, result)
+    return result
+
+
 # ─── Pre-audit batch ──────────────────────────────────────────────────────────
 
 @shared_task(

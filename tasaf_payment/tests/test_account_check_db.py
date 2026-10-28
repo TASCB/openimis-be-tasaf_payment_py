@@ -100,6 +100,18 @@ class AccountCheckDbTest(TestCase):
         self.assertTrue(text.startswith('HHID,Name (uploaded),Account number,FSP,Name at provider'))
         self.assertEqual(len(text.strip().splitlines()), 6)
 
+    def test_send_is_queued_or_inline_without_a_broker(self):
+        job = self.job()
+        with mock.patch('tasaf_payment.gepg.sender.blocked', return_value=None), \
+                mock.patch('tasaf_payment.tasks.send_account_check_task.delay') as delay, \
+                mock.patch.object(account_check, 'send') as send:
+            self.assertIsNone(account_check.queue_send(self.user, job.uuid))
+            delay.assert_called_once_with(str(job.uuid), self.user.id)
+            send.assert_not_called()
+            delay.side_effect = OSError('no broker')
+            account_check.queue_send(self.user, job.uuid)
+            send.assert_called_once_with(self.user, job.uuid)
+
     def test_old_checks_are_pruned(self):
         from datetime import datetime, timedelta, timezone
         from tasaf_payment.models import AccountCheckJob, AccountCheckRow
