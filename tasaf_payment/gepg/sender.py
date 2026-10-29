@@ -287,6 +287,10 @@ class GepgVerificationSender:
         logger.info("GePG verification %s -> %s %s", request.acc_verif_id, status, desc[:200])
         return None if keep else desc
 
+    def fail(self, request, desc):
+        from tasaf_payment.models import GepgRequestStatus
+        return self._finish(request, list(request.items.order_by('id')), GepgRequestStatus.FAILED, desc)
+
     @staticmethod
     def _fsp_type(items):
         types = {i.payment_account.fsp_type for i in items if i.payment_account_id}

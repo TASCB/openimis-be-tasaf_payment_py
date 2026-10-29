@@ -98,6 +98,31 @@ class AccountCheckDbTest(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.status, AccountCheckStatus.DONE)
 
+    def test_request_never_sent_expires(self):
+        from datetime import datetime, timedelta, timezone
+        from tasaf_payment.gepg.sweeper import expire
+        job = self.job()
+        request = self.send(job)
+        self.assertEqual(request.status, 'SENDING')
+        self.assertEqual(expire(6), [])
+        GepgVerificationRequest.objects.filter(id=request.id).update(
+            created_at=datetime.now(tz=timezone.utc) - timedelta(hours=7))
+        with self.captureOnCommitCallbacks(execute=False):
+            self.assertEqual(len(expire(6, apply=True)), 1)
+        job.refresh_from_db()
+        self.assertEqual(job.status, AccountCheckStatus.DONE)
+
+    def test_send_error_releases_the_request(self):
+        job = self.job()
+        with mock.patch('tasaf_payment.gepg.sender.blocked', return_value=None), \
+                mock.patch('tasaf_payment.gepg.sender.GepgVerificationSender.send', side_effect=RuntimeError('boom')), \
+                self.captureOnCommitCallbacks(execute=False):
+            result = account_check.send(self.user, job.uuid)
+        self.assertEqual(result['refused'], 1)
+        self.assertEqual(GepgVerificationRequest.objects.get(check_job=job).status, 'FAILED')
+        job.refresh_from_db()
+        self.assertEqual(job.status, AccountCheckStatus.DONE)
+
     def test_sent_once_and_export(self):
         job = self.job()
         self.send(job)

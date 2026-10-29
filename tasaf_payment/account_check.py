@@ -227,7 +227,15 @@ def send(user, job_uuid):
         job.save(update_fields=['status', 'sent_at'])
 
     sender = GepgVerificationSender(user)
-    refused = [error for error in (sender.send(r) for r in requests) if error]
+    refused = []
+    for request in requests:
+        try:
+            error = sender.send(request)
+        except Exception as exc:  # noqa: BLE001 — one bad request must not leave the rest unsent
+            logger.exception("Account check %s: request %s failed", job.uuid, request.acc_verif_id)
+            error = sender.fail(request, f'Could not send: {exc}')
+        if error:
+            refused.append(error)
     complete(job.id)
     return {'requests': len(requests), 'refused': len(refused), 'error': '; '.join(refused[:3]) or None}
 

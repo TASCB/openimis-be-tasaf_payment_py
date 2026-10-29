@@ -1,14 +1,17 @@
 from datetime import datetime, timedelta, timezone
 
 from django.db import transaction
+from django.db.models import Q
 
 
 def overdue(hours=0, minutes=0):
     from tasaf_payment.models import GepgRequestStatus, GepgVerificationRequest
     cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours, minutes=minutes)
+    # a request still SENDING was never handed to GePG (worker restarted mid-send): it would wait forever
     return GepgVerificationRequest.objects.filter(
-        status__in=(GepgRequestStatus.SENT, GepgRequestStatus.ACCEPTED), sent_at__lt=cutoff,
-    ).order_by('sent_at')
+        Q(status__in=(GepgRequestStatus.SENT, GepgRequestStatus.ACCEPTED), sent_at__lt=cutoff)
+        | Q(status=GepgRequestStatus.SENDING, created_at__lt=cutoff),
+    ).order_by('created_at')
 
 
 def remind(minutes, apply=False):
