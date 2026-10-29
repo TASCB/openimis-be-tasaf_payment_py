@@ -860,6 +860,29 @@ class DecideUnappliedPaymentMutation(OpenIMISMutation):
             return [{'message': str(exc)}]
 
 
+class CreateUnappliedResendsMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "CreateUnappliedResendsMutation"
+
+    class Input(OpenIMISMutation.Input):
+        pass
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.unapplied import create_resend_batches
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_generate_paylist_perms)
+            result = create_resend_batches(user)
+            if result['errors']:
+                made = f"{len(result['paylists'])} paylist(s) created; " if result['paylists'] else ''
+                return [{'message': made + '; '.join(result['errors'])}]
+            if not result['paylists']:
+                return [{'message': 'No unapplied payment is ready to be re-sent'}]
+            return None
+        except Exception as exc:
+            return [{'message': str(exc)}]
+
+
 class SendUnappliedWithdrawalsMutation(OpenIMISMutation):
     _mutation_module = TasafPaymentConfig.name
     _mutation_class = "SendUnappliedWithdrawalsMutation"

@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     # Entity 04: Return feedback
     "gql_return_feedback_search_perms":  ["270401"],
     "gql_unapplied_decide_perms":        ["270402"],
+    # PCT Manager
+    "gql_unapplied_manage_perms":        ["270403"],
     # Entity 05: Dashboard
     "gql_dashboard_perms":               ["270501"],
     # Auditor-facing reports — deliberately separate from the operational rights.
@@ -62,6 +64,9 @@ DEFAULT_CONFIG = {
     "muse_transient_retry_limit": 2,
     "withdrawn_hold_grace_days": 0,
     "withdrawn_hold_days_without_cycle": 30,
+    # Repay refused once a payment came back this many times.
+    "unapplied_max_returns": 2,
+    "unapplied_reminder_days": 7,
 
     "fsp_code_aliases": {
         "Vodacom M-Pesa": "MPESA",
@@ -153,6 +158,7 @@ class TasafPaymentConfig(AppConfig):
     gql_submit_paylist_perms = None
     gql_return_feedback_search_perms = None
     gql_unapplied_decide_perms = None
+    gql_unapplied_manage_perms = None
     gql_dashboard_perms = None
     gql_reports_perms = None
     gql_muse_verification_search_perms = None
@@ -171,6 +177,8 @@ class TasafPaymentConfig(AppConfig):
     muse_transient_retry_limit = 2
     withdrawn_hold_grace_days = 0
     withdrawn_hold_days_without_cycle = 30
+    unapplied_max_returns = 2
+    unapplied_reminder_days = 7
     fsp_code_aliases = {}
     mobile_prefixes = {}
     sub_budget_classes = []

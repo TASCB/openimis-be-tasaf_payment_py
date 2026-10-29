@@ -41,18 +41,20 @@ class UnappliedResendDbTest(TestCase):
     def decide(self, item, action):
         from tasaf_payment.returned import decide_unapplied
         with self.captureOnCommitCallbacks(execute=False):
-            decide_unapplied(self.user, item.uuid, action)
+            decide_unapplied(self.user, item.uuid, action, 'test')
         return PaylistItem.objects.get(id=item.id)
+
 
     def clear(self, item):
         PaymentAccount.objects.filter(id=item.payment_account_id).update(
             verification_status=VerificationStatus.VERIFIED, pre_audit_status=PreAuditStatus.PASSED)
 
-    def generate(self):
+    def generate(self, resends_only=True):
         from tasaf_payment.services import PaylistService
         before = set(Paylist.objects.values_list('id', flat=True))
         with self.captureOnCommitCallbacks(execute=False):
-            PaylistService(self.user)._generate_sync(self.paylist.payroll_id, self.paylist.batch_type, None, 'MUSE')
+            PaylistService(self.user)._generate_sync(self.paylist.payroll_id, self.paylist.batch_type, None, 'MUSE',
+                                                     resends_only=resends_only)
         return (PaylistItem.objects.filter(benefit_consumption_id=self.item.benefit_consumption_id)
                 .exclude(paylist_id__in=before).select_related('paylist').first())
 
@@ -62,6 +64,9 @@ class UnappliedResendDbTest(TestCase):
         resend = self.generate()
         self.assertIsNotNone(resend)
         self.assertEqual(resend.paylist.payment_type, MusePaymentType.UNAPPLIED)
+        self.assertEqual(resend.paylist.status, PaylistStatus.APPROVED)
+        from approval.models import ApprovalRequest
+        self.assertFalse(ApprovalRequest.objects.filter(object_id=str(resend.paylist_id)).exists())
         self.assertEqual(resend.org_end_to_end_id, self.original_id)
         self.assertNotEqual(resend.end_to_end_id, self.original_id)
         self.assertEqual(resend.amount, original.amount)
@@ -70,6 +75,12 @@ class UnappliedResendDbTest(TestCase):
         row = next(r for r in mm.payee_rows(resend.paylist) if r['endtoEndId'] == resend.end_to_end_id)
         self.assertEqual(row['orgEndToEndId'], self.original_id)
         self.assertEqual(mm.build(resend.paylist)['message']['messageHeader']['paymentType'], 'UNAPPLIED')
+
+    def test_generate_leaves_the_resend_to_the_unapplied_page(self):
+        self.clear(self.item)
+        self.decide(self.unapply(self.item), 'REPAY')
+        self.assertIsNone(self.generate(resends_only=False))
+        self.assertIsNotNone(self.generate())
 
     def test_muse_answer_on_the_new_id_reaches_the_resend(self):
         self.clear(self.item)
@@ -86,7 +97,7 @@ class UnappliedResendDbTest(TestCase):
     def test_withdrawn_payee_is_paid_as_a_new_payment_with_a_new_id(self):
         self.decide(self.unapply(self.item), 'WITHDRAW')
         self.clear(self.item)
-        payment = self.generate()
+        payment = self.generate(resends_only=False)
         self.assertIsNotNone(payment)
         self.assertEqual(payment.paylist.payment_type, MusePaymentType.PAYMENT)
         self.assertIsNone(payment.org_end_to_end_id)

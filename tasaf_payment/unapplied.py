@@ -132,3 +132,69 @@ def resend_mismatches(paylist):
                 or provider_code(item.payment_account) != provider_code(original.payment_account)):
             bad.append(item)
     return bad
+
+
+# ── Re-send batches from the Unapplied page ─────────────────────────────────
+
+def resend_candidates():
+    from tasaf_payment.models import PaymentDestination
+    from tasaf_payment.returned import _paid, _repaying
+    from tasaf_payment.withdrawn_hold import LAPSED_KEY
+    return (PaylistItem.objects.filter(
+        ~_paid(), ~_repaying(), status=PaylistItemStatus.UNAPPLIED, is_deleted=False, paylist__is_deleted=False,
+        paylist__destination=PaymentDestination.MUSE,
+        **{f'json_ext__{UNAPPLIED_ACTION_KEY}__action__in': list(RESEND_ACTIONS)})
+        .exclude(json_ext__has_key=LAPSED_KEY))
+
+
+def resend_preview(user):
+    from tasaf_payment.returned import _account_cleared
+    from tasaf_payment.services import PaylistService
+
+    service = PaylistService(user)
+    rows = {}
+    for item in resend_candidates().select_related('paylist__payroll', 'paylist__payment_cycle', 'payment_account'):
+        paylist = item.paylist
+        key = (str(paylist.payroll_id), paylist.batch_type)
+        row = rows.get(key)
+        if row is None:
+            row = rows[key] = {
+                'payrollId': key[0], 'payrollName': getattr(paylist.payroll, 'name', None),
+                'paymentCycleId': str(paylist.payment_cycle_id) if paylist.payment_cycle_id else None,
+                'batchType': paylist.batch_type, 'ready': 0, 'amount': 0.0,
+                'waitingAccount': 0, 'blocked': service._payroll_status_error(paylist.payroll_id)
+                if paylist.payroll_id else 'No payroll'}
+        if not _account_cleared(item.payment_account):
+            row['waitingAccount'] += 1
+        else:
+            row['ready'] += 1
+            row['amount'] += float(item.amount or 0)
+    return sorted(rows.values(), key=lambda r: (r['payrollName'] or '', r['batchType']))
+
+
+GENERATE_ERRORS = {
+    'tasaf_payment.error.no_accepted_benefits': "the payroll's benefits are not in status ACCEPTED",
+    'tasaf_payment.error.benefits_already_on_paylists': 'these payments are already on an open paylist',
+    'tasaf_payment.error.no_eligible_accounts': 'no account is verified and pre-audited',
+}
+
+
+def create_resend_batches(user):
+    """One UNAPPLIED paylist per payroll and channel: a paylist belongs to one payroll."""
+    from tasaf_payment.models import PaymentDestination
+    from tasaf_payment.services import PaylistService
+
+    service = PaylistService(user)
+    made, errors = [], []
+    for row in resend_preview(user):
+        if not row['ready'] or row['blocked']:
+            continue
+        result = service._generate_sync(row['payrollId'], row['batchType'], row['paymentCycleId'],
+                                        PaymentDestination.MUSE, resends_only=True)
+        if result.get('success'):
+            made.extend(result.get('paylists') or [])
+        else:
+            error = str(result.get('error'))
+            errors.append(f"{row['payrollName'] or row['payrollId']} {row['batchType']}: {GENERATE_ERRORS.get(error, error)}")
+    logger.info("Unapplied re-send batches by %s: %d paylist(s), %d error(s)", user.username, len(made), len(errors))
+    return {'paylists': made, 'errors': errors}

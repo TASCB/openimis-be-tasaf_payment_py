@@ -693,6 +693,7 @@ class PaylistService:
         payment_cycle_id=None,
         destination: str = None,
         fsp_code: str = None,
+        resends_only: bool = False,
     ) -> dict:
         """
         Build the Paylists + items (the heavy worker behind :meth:`generate`).
@@ -771,9 +772,12 @@ class PaylistService:
                     pairs = only_fsp(payable_pairs(benefits, fsp_type), fsp_code)
                     if not pairs:
                         continue
+                    # Re-sends are made only from the Unapplied page.
                     origins = self._unapplied_origins(pairs) if destination == PaymentDestination.MUSE else {}
-                    groups = [(MusePaymentType.UNAPPLIED, [p for p in pairs if p[0].id in origins]),
-                              (MusePaymentType.PAYMENT, [p for p in pairs if p[0].id not in origins])]
+                    if resends_only:
+                        groups = [(MusePaymentType.UNAPPLIED, [p for p in pairs if p[0].id in origins])]
+                    else:
+                        groups = [(MusePaymentType.PAYMENT, [p for p in pairs if p[0].id not in origins])]
 
                     for payment_type, group_pairs in groups:
                         if not group_pairs:
@@ -786,6 +790,8 @@ class PaylistService:
                         group_id = uuid.uuid4()
                         total = len(chunks)
                         now = datetime.now(tz=timezone.utc)
+                        # Approved on the original paylist.
+                        resend = payment_type == MusePaymentType.UNAPPLIED
                         for seq, chunk in enumerate(chunks, start=1):
                             paylist = Paylist(
                                 payroll_id=payroll_id,
@@ -793,7 +799,9 @@ class PaylistService:
                                 batch_type=stored_type,
                                 destination=destination,
                                 payment_type=payment_type,
-                                status=PaylistStatus.PENDING_APPROVAL,
+                                status=PaylistStatus.APPROVED if resend else PaylistStatus.PENDING_APPROVAL,
+                                approved_at=now if resend else None,
+                                json_ext={'approved_by': 'original paylist + PCT decision'} if resend else {},
                                 generated_at=now,
                                 batch_group=group_id,
                                 batch_sequence=seq,
@@ -807,7 +815,8 @@ class PaylistService:
                             ]
                             assign_end_to_end_ids(item_objs)
                             PaylistItem.objects.bulk_create(item_objs, batch_size=2000)
-                            self._start_paylist_approval(paylist)
+                            if not resend:
+                                self._start_paylist_approval(paylist)
                             created.append({
                                 'paylist_uuid':   str(paylist.uuid),
                                 'batch_type':     stored_type,
@@ -876,12 +885,18 @@ class PaylistService:
         codes = {}
         fsp_codes = sorted({fsp_code_of(a.fsp_name, codes) for _, a in all_pairs})
         pairs = only_fsp(all_pairs, fsp_code, codes)
+        resends = 0
+        if destination == PaymentDestination.MUSE:
+            from tasaf_payment.unapplied import provider_changed, resend_origins
+            origins = resend_origins([b.id for b, _ in pairs])
+            kept = [(b, a) for b, a in pairs if b.id not in origins or provider_changed(origins[b.id], a)]
+            resends, pairs = len(pairs) - len(kept), kept
         paired = {b.id for b, _ in all_pairs}
         missing = [b for b in benefits if b.id not in paired]
         reasons = exclusion_reasons([b.individual_id for b in missing], fsp_type)
 
         excluded = {'ALREADY_ON_PAYLIST': accepted_count - len(benefits),
-                    'OTHER_FSP': len(all_pairs) - len(pairs)}
+                    'OTHER_FSP': len(all_pairs) - len(pairs) - resends, 'UNAPPLIED_RESEND': resends}
         for b in missing:
             reason = reasons.get(b.individual_id, 'NO_ACCOUNT')
             excluded[reason] = excluded.get(reason, 0) + 1
@@ -914,12 +929,6 @@ class PaylistService:
                                      'awaiting_muse': fsp_type == 'MOBILE'})
         for code, count in no_band.items():
             warnings.append({'code': 'NO_CHARGE_BAND', 'fsp_code': code, 'payments': count})
-        if destination == PaymentDestination.MUSE:
-            from tasaf_payment.unapplied import provider_changed, resend_origins
-            origins = resend_origins([b.id for b, _ in pairs])
-            resends = sum(1 for b, a in pairs if b.id in origins and not provider_changed(origins[b.id], a))
-            if resends:
-                warnings.append({'code': 'UNAPPLIED_RESEND', 'fsp_code': '', 'payments': resends})
 
         return {
             'success': True,

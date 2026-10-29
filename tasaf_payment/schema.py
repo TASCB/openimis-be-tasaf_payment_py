@@ -19,6 +19,7 @@ from tasaf_payment.gql_mutations import (
     RejectMuseChangeMutation,
     CancelMuseChangeMutation,
     DecideUnappliedPaymentMutation,
+    CreateUnappliedResendsMutation,
     SendAccountCheckMutation,
     SendUnappliedWithdrawalsMutation,
     SaveGepgSettingsMutation,
@@ -42,7 +43,6 @@ from tasaf_payment.gql_mutations import (
 from tasaf_payment.gql_queries import (
     AccountCheckJobGQLType,
     WithdrawalChargeGQLType,
-    ChargeGapGQLType,
     FspMappingGQLType,
     FspProviderGQLType,
     MuseSettingsGQLType,
@@ -219,6 +219,11 @@ class Query(graphene.ObjectType):
 
     unapplied_withdrawals_pending = graphene.Int(
         description="Unapplied-withdrawn payments not yet reported to MUSE (or that MUSE refused).")
+    unapplied_resend_preview = graphene.JSONString(
+        description="Per payroll and channel: unapplied re-sends ready, and those waiting for their account.")
+    unapplied_reconciliation = graphene.JSONString(
+        payment_cycle_id=graphene.UUID(),
+        description="Unapplied payments by cycle and provider: returned = re-paid + withdrawn + lapsed + held.")
 
     account_check_job = OrderedDjangoFilterConnectionField(
         AccountCheckJobGQLType, orderBy=graphene.List(of_type=graphene.String))
@@ -864,6 +869,16 @@ class Query(graphene.ObjectType):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
         return pending().count()
 
+    def resolve_unapplied_resend_preview(self, info, **kwargs):
+        from tasaf_payment.unapplied import resend_preview
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
+        return resend_preview(info.context.user)
+
+    def resolve_unapplied_reconciliation(self, info, payment_cycle_id=None, **kwargs):
+        from tasaf_payment.returned import reconciliation
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_reports_perms)
+        return reconciliation(payment_cycle_id)
+
     def resolve_paylist_generation_preview(self, info, payroll_id, batch_type, destination=None, fsp_code=None,
                                            **kwargs):
         from tasaf_payment.services import PaylistService
@@ -927,6 +942,7 @@ class Mutation(graphene.ObjectType):
     reject_muse_change = RejectMuseChangeMutation.Field()
     cancel_muse_change = CancelMuseChangeMutation.Field()
     decide_unapplied_payment = DecideUnappliedPaymentMutation.Field()
+    create_unapplied_resends = CreateUnappliedResendsMutation.Field()
     send_account_check = SendAccountCheckMutation.Field()
     send_unapplied_withdrawals = SendUnappliedWithdrawalsMutation.Field()
     save_gepg_settings = SaveGepgSettingsMutation.Field()

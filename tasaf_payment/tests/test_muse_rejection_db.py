@@ -2,7 +2,7 @@ import json
 from collections import Counter
 from unittest import mock
 
-from django.db.models import Count, Q
+from django.db.models import Count, Exists, OuterRef
 from django.test import TestCase
 
 from tasaf_payment.muse import inbound as muse_inbound, message as muse_message
@@ -27,18 +27,21 @@ def rejection(msg_id, status_desc):
 
 class MuseRejectionDbTest(TestCase):
     def setUp(self):
-        pending = Q(items__status=PaylistItemStatus.PENDING, items__is_deleted=False,
-                    items__payment_account__group_beneficiary__isnull=False)
-        self.paylist = (Paylist.objects.filter(is_deleted=False)
-                        .annotate(n=Count('items', filter=pending)).filter(n__gt=0).order_by('-n').first())
+        # Payees whose benefit is on no other paylist: seeded databases reuse benefits across paylists.
+        shared = PaylistItem.objects.filter(benefit_consumption_id=OuterRef('benefit_consumption_id'),
+                                            is_deleted=False).exclude(id=OuterRef('id'))
+        alone = PaylistItem.objects.filter(~Exists(shared), status=PaylistItemStatus.PENDING, is_deleted=False,
+                                           benefit_consumption__isnull=False,
+                                           payment_account__group_beneficiary__isnull=False)
+        self.paylist = (Paylist.objects.filter(is_deleted=False, id__in=alone.values('paylist_id'))
+                        .annotate(n=Count('items')).order_by('-n').first())
         if self.paylist is None:
             self.skipTest('no paylist with pending payees in this database')
         Paylist.objects.filter(id=self.paylist.id).update(
             status=PaylistStatus.SUBMITTED, destination=PaymentDestination.MUSE,
             muse_msg_id='TMTESTREJECT0001', muse_batch_reference='TP-TEST', json_ext={})
         self.paylist.refresh_from_db()
-        items = list(self.paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING)
-                     .select_related('payment_account'))
+        items = list(alone.filter(paylist_id=self.paylist.id).select_related('payment_account'))
         uses = Counter(i.payment_account.account_number for i in items)
         self.items = [i for i in items if uses[i.payment_account.account_number] == 1]
         if len(self.items) < 3:
@@ -276,6 +279,10 @@ class UnappliedRepaymentDbTest(TestCase):
         return item.benefit_consumption_id not in set(
             benefits_on_a_paylist().values_list('benefit_consumption_id', flat=True))
 
+    def user(self):
+        from core.models import User
+        return User.objects.filter(username='Admin').first()
+
     def clear(self, item):
         from tasaf_payment.models import PaymentAccount, PreAuditStatus
         PaymentAccount.objects.filter(id=item.payment_account_id).update(
@@ -353,6 +360,72 @@ class UnappliedRepaymentDbTest(TestCase):
         for item in items:
             matches = [r for r in RESOLUTIONS if PaylistItem.objects.filter(resolution_q(r), id=item.id).exists()]
             self.assertEqual(matches, [resolution_of(item)])
+
+    def test_note_required_to_withdraw_or_to_differ_from_the_suggestion(self):
+        from tasaf_payment.returned import UnappliedDecisionError, decide_unapplied
+        item = self.unapply(self.bad)
+        for action in ('WITHDRAW', 'REPAY'):
+            with self.assertRaises(UnappliedDecisionError):
+                decide_unapplied(self.user(), item.uuid, action, '')
+        self.clear(self.bad)
+        with self.assertRaises(UnappliedDecisionError):
+            decide_unapplied(self.user(), item.uuid, 'REPAY', '')
+        decide_unapplied(self.user(), item.uuid, 'CASE', '')
+
+    def test_repay_for_an_account_problem_needs_a_pct_manager(self):
+        from unittest import mock
+        from tasaf_payment.returned import UnappliedDecisionError
+        self.clear(self.bad)
+        item = self.unapply(self.bad)
+        with mock.patch.object(type(self.user()), 'has_perms', return_value=False):
+            with self.assertRaises(UnappliedDecisionError):
+                self.decide(item, 'REPAY')
+        self.assertEqual(self.decide(item, 'REPAY').json_ext['unapplied_action']['action'], 'REPAY')
+
+    def test_repay_refused_after_the_return_limit(self):
+        from tasaf_payment.returned import UnappliedDecisionError
+        self.clear(self.bad)
+        item = self.unapply(self.bad)
+        PaylistItem.objects.filter(id=self.ok.id).update(
+            status=PaylistItemStatus.UNAPPLIED, benefit_consumption_id=item.benefit_consumption_id,
+            json_ext={'unapplied_action': {'action': 'REPAY'}})
+        with self.assertRaises(UnappliedDecisionError):
+            self.decide(item, 'REPAY')
+
+    def test_resend_preview_waits_for_the_account_then_is_ready(self):
+        from tasaf_payment.unapplied import resend_preview
+        item = self.decide(self.unapply(self.bad), 'CASE')
+
+        def row():
+            rows = [r for r in resend_preview(self.user()) if r['payrollId'] == str(item.paylist.payroll_id)]
+            return rows[0] if rows else None
+        self.assertEqual((row()['waitingAccount'], row()['ready']), (1, 0))
+        self.clear(self.bad)
+        self.assertEqual((row()['waitingAccount'], row()['ready']), (0, 1))
+
+    def test_reconciliation_adds_up(self):
+        from tasaf_payment.returned import RESOLUTIONS, reconciliation
+        self.clear(self.flaky)
+        self.decide(self.unapply(self.bad), 'CASE')
+        self.decide(self.unapply(self.flaky), 'REPAY')
+        self.decide(self.unapply(self.ok), 'WITHDRAW')
+        rows = reconciliation(self.paylist.payment_cycle_id)
+        self.assertTrue(rows)
+        for row in rows:
+            parts = sum(row.get(r, {}).get('count', 0) for r in RESOLUTIONS)
+            self.assertEqual(row['returned']['count'], parts)
+
+    def test_undecided_payment_is_reminded_once(self):
+        from tasaf_payment.returned import remind_overdue
+        item = self.unapply(self.bad)
+        PaylistItem.objects.filter(id=item.id).update(
+            json_ext={**(item.json_ext or {}), 'returned_at': '2026-01-01T00:00:00+00:00'})
+        with mock.patch('tasaf_payment.events.emit_muse_event') as emit, \
+                self.captureOnCommitCallbacks(execute=False):
+            self.assertTrue(remind_overdue(7, apply=True))
+            self.assertEqual(remind_overdue(7, apply=True), [])
+        self.assertIn('unapplied_reminded_at', PaylistItem.objects.get(id=item.id).json_ext)
+        self.assertIn((item.paylist, 'unapplied_overdue'), [c.args[:2] for c in emit.call_args_list])
 
     def test_unstamped_unapplied_item_also_waits(self):
         from tasaf_payment.returned import AWAITING_ACTION, resolution_of

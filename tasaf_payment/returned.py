@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 
 from django.db import transaction
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Count, Exists, OuterRef, Q, Sum
 
 from tasaf_payment.models import (
     UNAPPLIED_ACTION_KEY, PaylistItem, PaylistItemStatus, PreAuditStatus, UnappliedAction, VerificationStatus,
@@ -124,6 +124,35 @@ def _account_cleared(account):
             and account.pre_audit_status == PreAuditStatus.PASSED)
 
 
+def times_returned(item):
+    if not item.benefit_consumption_id:
+        return 1
+    return PaylistItem.objects.filter(benefit_consumption_id=item.benefit_consumption_id, is_deleted=False,
+                                      status=PaylistItemStatus.UNAPPLIED).count()
+
+
+def _check_decision(user, item, action, note):
+    from tasaf_payment.apps import TasafPaymentConfig
+    suggested = suggested_action(item)
+    if action == UnappliedAction.REPAY:
+        if not _account_cleared(item.payment_account):
+            raise UnappliedDecisionError(
+                "The account is not verified and pre-audited, so it cannot be repaid as it is; send it to Case")
+        limit = int(getattr(TasafPaymentConfig, 'unapplied_max_returns', 0) or 0)
+        returns = times_returned(item)
+        if limit and returns >= limit:
+            raise UnappliedDecisionError(
+                f"This payment came back unapplied {returns} times, so it cannot be repaid as it is; "
+                f"send it to Case or withdraw it")
+        if suggested == UnappliedAction.CASE and not user.has_perms(
+                TasafPaymentConfig.gql_unapplied_manage_perms or []):
+            raise UnappliedDecisionError(
+                "MUSE's reason points to a problem with the account; only a PCT Manager can repay it as it is")
+    if not note and (action == UnappliedAction.WITHDRAW or (suggested and action != suggested)):
+        raise UnappliedDecisionError(
+            "Write a note: it is required to withdraw a payment or to choose another action than the suggested one")
+
+
 def decide_unapplied(user, item_uuid, action, note=None):
     from tasaf_payment.muse.rejection import flag_returned_account
     from tasaf_payment.unapplied import provider_code
@@ -139,14 +168,13 @@ def decide_unapplied(user, item_uuid, action, note=None):
         if not PaylistItem.objects.filter(awaiting_action(), id=item.id).exists():
             raise UnappliedDecisionError("This payment is not waiting for a decision")
         account = item.payment_account
-        if action == UnappliedAction.REPAY and not _account_cleared(account):
-            raise UnappliedDecisionError(
-                "The account is not verified and pre-audited, so it cannot be repaid as it is; send it to Case")
+        note = (note or '').strip()
+        _check_decision(user, item, action, note)
 
         reason = latest_reason(item)
         item.json_ext = {**(item.json_ext or {}), UNAPPLIED_ACTION_KEY: {
             'action': action, 'by': user.username, 'at': datetime.now(tz=timezone.utc).isoformat(),
-            'note': (note or '').strip() or None, 'suggested': suggested_action(item),
+            'note': note or None, 'suggested': suggested_action(item), 'returns': times_returned(item),
             'provider': provider_code(account),
         }}
         item.save(user=user)
@@ -162,3 +190,64 @@ def decide_unapplied(user, item_uuid, action, note=None):
             account.save(user=user)
     logger.info("Unapplied payment %s: %s by %s", item_uuid, action, user.username)
     return item
+
+
+# ── Where the returned money is (reconciliation) ───────────────────────────
+
+def reconciliation(payment_cycle_id=None):
+    """Per payment cycle and provider: returned = re-paid + withdrawn + lapsed + still held."""
+    base = PaylistItem.objects.filter(status=PaylistItemStatus.UNAPPLIED, is_deleted=False, paylist__is_deleted=False)
+    if payment_cycle_id:
+        base = base.filter(paylist__payment_cycle_id=payment_cycle_id)
+    keys = ('paylist__payment_cycle__code', 'payment_account__fsp_name')
+    rows = {}
+
+    def add(qs, name):
+        for r in qs.values(*keys).annotate(n=Count('id'), amount=Sum('amount')):
+            row = rows.setdefault((r[keys[0]], r[keys[1]]), {'cycle': r[keys[0]], 'fsp': r[keys[1]]})
+            row[name] = {'count': r['n'], 'amount': str(r['amount'] or 0)}
+
+    add(base, 'returned')
+    for resolution in RESOLUTIONS:
+        add(base.filter(resolution_q(resolution)), resolution)
+    return sorted(rows.values(), key=lambda r: (r['cycle'] or '', r['fsp'] or ''))
+
+
+# ── Undecided for too long (ageing) ────────────────────────────────────────
+
+REMINDED_KEY = 'unapplied_reminded_at'
+
+
+def remind_overdue(days, apply=False):
+    """Announces each payment undecided after `days` once."""
+    from datetime import timedelta
+    from tasaf_payment.events import emit_muse_event
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    items = [i for i in PaylistItem.objects.filter(awaiting_action(), is_deleted=False, paylist__is_deleted=False)
+             .exclude(json_ext__has_key=REMINDED_KEY).select_related('paylist')
+             if (_returned_at(i) or cutoff) < cutoff]
+    by_paylist = {}
+    for item in items:
+        by_paylist.setdefault(item.paylist_id, []).append(item)
+    if apply:
+        stamp = datetime.now(tz=timezone.utc).isoformat()
+        for paylist_items in by_paylist.values():
+            with transaction.atomic():
+                for item in paylist_items:
+                    PaylistItem.objects.filter(id=item.id).update(
+                        json_ext={**(item.json_ext or {}), REMINDED_KEY: stamp})
+                emit_muse_event(paylist_items[0].paylist, 'unapplied_overdue', count=len(paylist_items), days=days)
+    return [{'paylist': p[0].paylist.muse_batch_reference or str(p[0].paylist_id), 'count': len(p)}
+            for p in by_paylist.values()]
+
+
+def _returned_at(item):
+    ext = item.json_ext or {}
+    if ext.get('returned_at'):
+        when = datetime.fromisoformat(ext['returned_at'])
+    else:
+        feedback = item.return_feedbacks.filter(is_deleted=False).order_by('-received_at').first()
+        when = feedback.received_at if feedback else None
+    # openIMIS stores naive UTC (USE_TZ off)
+    return when.replace(tzinfo=timezone.utc) if when is not None and when.tzinfo is None else when

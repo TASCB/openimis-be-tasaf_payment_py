@@ -325,7 +325,14 @@ class PaylistItemGQLType(DjangoObjectType):
     returned_at = graphene.String()
     suggested_action = graphene.String()
     unapplied_decision = graphene.JSONString()
+    times_returned = graphene.Int(description="How many times this benefit came back unapplied")
     muse_withdrawal = graphene.JSONString()
+
+    def resolve_times_returned(self, info):
+        from tasaf_payment.returned import times_returned
+        if self.status != PaylistItemStatus.UNAPPLIED:
+            return None
+        return times_returned(self)
 
     def resolve_muse_withdrawal(self, info):
         from tasaf_payment.muse.withdrawal import KEY
