@@ -249,7 +249,9 @@ class PaylistGQLType(DjangoObjectType):
         }
 
     def resolve_last_submit(root, info):
-        return (root.json_ext or {}).get('muse_last_submit')
+        from tasaf_payment.services import submit_lock
+        note = (root.json_ext or {}).get('muse_last_submit')
+        return note and {**note, 'sending': bool(submit_lock(root))}
 
     def resolve_settled_count(root, info):
         return root.items.filter(is_deleted=False, status=PaylistItemStatus.PROCESSED).count()

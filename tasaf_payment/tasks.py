@@ -276,6 +276,31 @@ def generate_paylists_task(self, user_id, payroll_id, batch_type,
         raise self.retry(exc=exc)
 
 
+# ─── Paylist submit ───────────────────────────────────────────────────────────
+
+@shared_task(bind=True, max_retries=0, name='tasaf_payment.submit_paylist_task')
+def submit_paylist_task(self, paylist_uuid, user_id):
+    from core.models import User
+    from tasaf_payment.services import PaylistService
+
+    result = PaylistService(User.objects.get(id=user_id)).send_now(paylist_uuid)
+    logger.info("submit_paylist_task: paylist=%s success=%s outcome=%s",
+                paylist_uuid, result.get('success'), result.get('outcome'))
+    return {'success': bool(result.get('success')), 'outcome': result.get('outcome')}
+
+
+# ─── GePG resend ──────────────────────────────────────────────────────────────
+
+@shared_task(bind=True, max_retries=0, name='tasaf_payment.resend_gepg_request_task')
+def resend_gepg_request_task(self, acc_verif_id, user_id):
+    from core.models import User
+    from tasaf_payment.gepg.sender import GepgVerificationSender
+
+    result = GepgVerificationSender(User.objects.get(id=user_id)).resend(acc_verif_id)
+    logger.info("resend_gepg_request_task: request=%s %s", acc_verif_id, result)
+    return result
+
+
 # ─── Bulk account check ───────────────────────────────────────────────────────
 
 @shared_task(bind=True, max_retries=0, name='tasaf_payment.send_account_check_task')

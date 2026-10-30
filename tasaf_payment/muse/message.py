@@ -5,6 +5,8 @@ from collections import Counter
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
+from django.db.models import Count, Sum
+
 from tasaf_payment.muse.setup import BIC_RE, CURRENCY
 from tasaf_payment.payee_code import PayeeCodeError, decode_payee_code, encode_hhid
 
@@ -141,11 +143,12 @@ def assemble(ids, settings, payees, now, payment_type=PAYMENT_TYPE):
     return {'message': message, 'digitalSignature': ''}
 
 
-def _representative_names(paylist):
+def _representative_names(paylist, group_ids=None):
     from individual.models import GroupIndividual
 
-    group_ids = paylist.items.filter(is_deleted=False).values(
-        'payment_account__group_beneficiary__group_id')
+    if group_ids is None:
+        group_ids = paylist.items.filter(is_deleted=False).values(
+            'payment_account__group_beneficiary__group_id')
     names = {}
     rows = (GroupIndividual.objects
             .filter(group_id__in=group_ids, is_deleted=False, recipient_type='PRIMARY')
@@ -174,12 +177,22 @@ def _fsp_profiles(accounts):
     return by_name
 
 
-def payee_rows(paylist):
+def payable_items(paylist):
     from tasaf_payment.models import PaylistItemStatus
-    items = list(paylist.items.filter(is_deleted=False).exclude(status=PaylistItemStatus.WITHDRAWN)
-                 .select_related('payment_account__group_beneficiary__group', 'benefit_consumption')
-                 .order_by('date_created', 'id'))
-    names = _representative_names(paylist)
+    return paylist.items.filter(is_deleted=False).exclude(status=PaylistItemStatus.WITHDRAWN)
+
+
+def payee_rows(paylist, limit=None):
+    items = (payable_items(paylist)
+             .select_related('payment_account__group_beneficiary__group', 'benefit_consumption')
+             .order_by('date_created', 'id'))
+    if limit is None:
+        items = list(items)
+        names = _representative_names(paylist)
+    else:
+        items = list(items[:limit])
+        names = _representative_names(
+            paylist, [getattr(i.payment_account.group_beneficiary, 'group_id', None) for i in items])
     profiles = _fsp_profiles([i.payment_account for i in items])
     unapplied = getattr(paylist, 'payment_type', PAYMENT_TYPE) == UNAPPLIED_TYPE
     rows = []
@@ -211,12 +224,12 @@ def end_to_end_id(item):
     return item.end_to_end_id or (benefit.code if benefit else '')
 
 
-def build(paylist, now=None):
+def build(paylist, now=None, limit=None):
     from tasaf_payment.muse.setup import get_settings
 
     now = now or message_time(paylist) or datetime.now()
     ids = {'msgId': msg_id(paylist), 'referenceNo': reference_no(paylist)}
-    return assemble(ids, settings_values(get_settings()), payee_rows(paylist), now,
+    return assemble(ids, settings_values(get_settings()), payee_rows(paylist, limit), now,
                     getattr(paylist, 'payment_type', PAYMENT_TYPE) or PAYMENT_TYPE)
 
 
@@ -366,6 +379,10 @@ def _request_type_name():
         return 'NORMAL'
 
 
+# Above this many payees the preview checks only the rows it shows; Submit checks them all.
+PREVIEW_FULL_CHECK_MAX = 5000
+
+
 def preview(paylist, sample_rows=20, max_problems=100):
     """The message a MUSE submit of this paylist would carry and what MUSE would reject in
     it. Read-only; payList and problems are trimmed for display, counts are not."""
@@ -383,15 +400,22 @@ def preview(paylist, sample_rows=20, max_problems=100):
 
     from tasaf_payment.muse.setup import get_settings, server_environment
 
-    body = build(paylist)
+    totals = payable_items(paylist).aggregate(n=Count('id'), amount=Sum('amount'))
+    checked_all = totals['n'] <= PREVIEW_FULL_CHECK_MAX
+    body = build(paylist, limit=None if checked_all else sample_rows)
     problems = check(body)
+    message = body['message']
+    if not checked_all:
+        message['paymentSummary'].update(noofTransaction=totals['n'], totalAmount=money(totals['amount']))
+        for line in message.get('glList') or []:
+            if line['amount'] is not None:
+                line['amount'] = money(totals['amount'])
     stored = get_settings()
     server = server_environment()
     if stored is not None and stored.environment != server:
         problems.insert(0, _problem('settings', 'environment', 'environment',
                                     'MUSE settings were approved on another server',
                                     f"{stored.environment or '—'} ≠ {server or '—'}"))
-    message = body['message']
     shown = {**message, 'payList': message['payList'][:sample_rows]}
     return {
         'paylist_uuid': str(paylist.uuid),
@@ -406,8 +430,9 @@ def preview(paylist, sample_rows=20, max_problems=100):
         'msg_id': message['messageHeader']['msgId'],
         'reference_no': message['paymentSummary']['referenceNo'],
         'attempt': attempt(paylist),
-        'payments': len(message['payList']),
+        'payments': totals['n'],
         'rows_shown': len(shown['payList']),
+        'checked_all': checked_all,
         'valid': not problems,
         'problem_count': len(problems),
         'problem_summary': summarise(problems),

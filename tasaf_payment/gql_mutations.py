@@ -751,9 +751,16 @@ class ResendGepgVerificationMutation(OpenIMISMutation):
     @classmethod
     def async_mutate(cls, user, **data):
         from tasaf_payment.gepg.sender import GepgVerificationSender
+        from tasaf_payment.services import _queue_or_inline
+        from tasaf_payment.tasks import resend_gepg_request_task
         try:
             _require_perms(user, TasafPaymentConfig.gql_run_verification_perms)
-            result = GepgVerificationSender(user).resend(data['acc_verif_id'])
+            sender = GepgVerificationSender(user)
+            ids, after_change = sender.resend_accounts(data['acc_verif_id'])
+            result = _queue_or_inline(
+                task=resend_gepg_request_task, task_args=(data['acc_verif_id'], user.id),
+                inline=lambda account_ids: sender.dispatch(account_ids, after_change=after_change),
+                count_ids=lambda: ids, label='ResendGepgVerificationMutation', bounded=True)
             if not result.get('success'):
                 return [{'message': result.get('error') or 'Nothing was sent'}]
             return None

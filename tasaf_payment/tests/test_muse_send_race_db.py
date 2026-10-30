@@ -99,3 +99,68 @@ class MuseSendRaceDbTest(TestCase):
         result, paylist = self.submit(response=refused)
         self.assertFalse(result['success'])
         self.assertEqual(paylist.status, PaylistStatus.APPROVED)
+
+
+class SubmitQueueDbTest(TestCase):
+    setUp = MuseSendRaceDbTest.setUp
+
+    def queue(self):
+        with mock.patch('tasaf_payment.tasks.submit_paylist_task.delay') as delay:
+            result = PaylistService(self.user).submit(str(self.paylist.uuid))
+        return result, delay, Paylist.objects.get(id=self.paylist.id)
+
+    def test_submit_queues_and_holds_the_paylist(self):
+        result, delay, paylist = self.queue()
+        self.assertTrue(result['success'])
+        self.assertEqual(result['outcome'], 'QUEUED')
+        delay.assert_called_once()
+        self.assertIn('muse_submit_lock', paylist.json_ext)
+        self.assertEqual(paylist.json_ext['muse_last_submit']['outcome'], 'QUEUED')
+
+    def test_second_submit_while_sending_is_refused(self):
+        self.queue()
+        result, delay, _ = self.queue()
+        self.assertFalse(result['success'])
+        self.assertIn('Already being sent', result['error'])
+        delay.assert_not_called()
+
+    def test_expired_lock_does_not_block(self):
+        from tasaf_payment.services import SUBMIT_LOCK_KEY
+        Paylist.objects.filter(id=self.paylist.id).update(
+            json_ext={SUBMIT_LOCK_KEY: {'at': '2026-01-01T00:00:00+00:00', 'by': 'x'}})
+        result, delay, _ = self.queue()
+        self.assertTrue(result['success'])
+        delay.assert_called_once()
+
+    def test_send_releases_the_lock_and_builds_once(self):
+        self.queue()
+        producer = mock.Mock(**{'publish.return_value': OK})
+        with mock.patch('coremis_app_integration.govesb.GovESBProducer', return_value=producer), \
+                mock.patch.object(muse_sender.muse_message, 'build',
+                                  wraps=muse_sender.muse_message.build) as build, \
+                self.captureOnCommitCallbacks(execute=False):
+            result = PaylistService(self.user).send_now(str(self.paylist.uuid))
+        paylist = Paylist.objects.get(id=self.paylist.id)
+        self.assertTrue(result['success'])
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual(paylist.status, PaylistStatus.SUBMITTED)
+        self.assertNotIn('muse_submit_lock', paylist.json_ext)
+        sent = producer.publish.call_args[0][1]['message']['messageHeader']
+        self.assertEqual(sent['msgId'], paylist.muse_msg_id)
+        self.assertEqual(sent['createdAt'], paylist.json_ext['muse_created_at'])
+
+
+class MusePreviewSizeDbTest(TestCase):
+    setUp = MuseSendRaceDbTest.setUp
+
+    def test_large_paylist_previews_a_sample_with_full_totals(self):
+        from tasaf_payment.muse import message
+        full = message.preview(self.paylist, sample_rows=1)
+        with mock.patch.object(message, 'PREVIEW_FULL_CHECK_MAX', 0):
+            sample = message.preview(self.paylist, sample_rows=1)
+        self.assertTrue(full['checked_all'])
+        self.assertFalse(sample['checked_all'])
+        self.assertEqual(sample['payments'], full['payments'])
+        summary = lambda p: p['body']['requestdata']['message']['paymentSummary']  # noqa: E731
+        self.assertEqual(summary(sample)['totalAmount'], summary(full)['totalAmount'])
+        self.assertEqual(summary(sample)['noofTransaction'], full['payments'])

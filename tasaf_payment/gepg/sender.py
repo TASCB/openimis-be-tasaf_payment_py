@@ -297,6 +297,11 @@ class GepgVerificationSender:
         return types.pop() if len(types) == 1 else ''
 
     def resend(self, acc_verif_id):
+        ids, after_change = self.resend_accounts(acc_verif_id)
+        return self.dispatch(ids, after_change=after_change)
+
+    @staticmethod
+    def resend_accounts(acc_verif_id):
         from tasaf_payment.models import GepgRequestStatus, GepgVerificationRequest
         request = GepgVerificationRequest.objects.filter(acc_verif_id=acc_verif_id).first()
         if not request:
@@ -307,8 +312,7 @@ class GepgVerificationSender:
                                   GepgRequestStatus.REJECTED, GepgRequestStatus.EXPIRED):
             raise ValueError(f'Request {acc_verif_id} is {request.status}; only failed, refused, '
                              f'rejected or expired requests can be sent again')
-        ids = list(request.items.values_list('payment_account_id', flat=True))
-        return self.dispatch(ids, after_change=request.after_change)
+        return list(request.items.values_list('payment_account_id', flat=True)), request.after_change
 
     def preview(self, account_ids, sample_rows=20, before_first_payment=False):
         from tasaf_payment.charges import resolve_fsp_code

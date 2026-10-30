@@ -13,6 +13,7 @@ from core.signals import register_service_signal
 from core.services.utils import output_exception, check_authentication
 from tasks_management.services import UpdateCheckerLogicServiceMixin
 from tasaf_payment import name_match
+from tasaf_payment.payee_code import PayeeCodeError, encode_hhid
 from tasaf_payment.events import emit_muse_event, emit_verification_event
 from tasaf_payment.validation import WithdrawalChargeValidation
 from tasaf_payment.models import (
@@ -1072,9 +1073,28 @@ class PaylistService:
 
     @check_authentication
     def submit(self, paylist_uuid: str) -> dict:
+        """Queue the send on the worker; a big paylist outlasts the web request."""
+        refusal = _claim_submit(paylist_uuid, self.user)
+        if refusal:
+            return refusal
+        _record_submit(paylist_uuid, self.user, {'success': True, 'outcome': QUEUED,
+                                                 'message': 'Being sent to MUSE'})
+        try:
+            from tasaf_payment.tasks import submit_paylist_task
+            submit_paylist_task.delay(str(paylist_uuid), self.user.id)
+            return {'success': True, 'error': None, 'outcome': QUEUED}
+        except Exception:  # noqa: BLE001 — no broker: send inline
+            logger.warning("Paylist %s: enqueue failed, submitting inline", paylist_uuid, exc_info=True)
+        return self.send_now(paylist_uuid)
+
+    @check_authentication
+    def send_now(self, paylist_uuid: str) -> dict:
         """APPROVED → SUBMITTED. A MUSE paylist becomes SUBMITTED only once GovESB accepts
         its message (or in RECORD_ONLY mode); otherwise it stays APPROVED."""
-        result = self._submit(paylist_uuid)
+        try:
+            result = self._submit(paylist_uuid)
+        finally:
+            _release_submit(paylist_uuid)
         if result.get('error') in SUBMIT_ERROR_TEXT:
             result['error'] = SUBMIT_ERROR_TEXT[result['error']]
         _record_submit(paylist_uuid, self.user, result)
@@ -1198,7 +1218,17 @@ def eligible_accounts(individual_ids, fsp_type):
         qs = qs.filter(account_number__regex=MSISDN_DB_PATTERN)
     rows = list(qs.values_list('id', 'group_beneficiary__group__groupindividuals__individual_id'))
     accounts = PaymentAccount.objects.select_related('group_beneficiary__group').in_bulk({a for a, _ in rows})
-    return {individual: accounts[account] for account, individual in rows}
+    return {individual: accounts[account] for account, individual in rows
+            if has_p3_hhid(accounts[account].group_beneficiary.group.code)}
+
+
+def has_p3_hhid(code):
+    """MUSE's payeeCode is the encoded P3 HHID; a household without one cannot be sent."""
+    try:
+        encode_hhid(code)
+        return True
+    except PayeeCodeError:
+        return False
 
 
 def payable_pairs(benefits, fsp_type):
@@ -1233,10 +1263,12 @@ def exclusion_reasons(individual_ids, fsp_type):
         group_beneficiary__group__groupindividuals__is_deleted=False,
         is_primary=True, is_deleted=False,
     ).values_list('group_beneficiary__group__groupindividuals__individual_id', 'fsp_type',
-                  'verification_status', 'pre_audit_status', 'account_number')
-    by_individual = {}
-    for individual, account_type, verification, pre_audit, number in rows:
+                  'verification_status', 'pre_audit_status', 'account_number', 'group_beneficiary__group__code')
+    by_individual, no_hhid = {}, set()
+    for individual, account_type, verification, pre_audit, number, code in rows:
         by_individual.setdefault(individual, []).append((account_type, verification, pre_audit, number))
+        if not has_p3_hhid(code):
+            no_hhid.add(individual)
     reasons = {}
     for individual in individual_ids:
         accounts = by_individual.get(individual, [])
@@ -1245,6 +1277,8 @@ def exclusion_reasons(individual_ids, fsp_type):
             reasons[individual] = 'NO_ACCOUNT'
         elif not own:
             reasons[individual] = 'OTHER_CHANNEL'
+        elif individual in no_hhid:
+            reasons[individual] = 'NO_P3_HHID'
         elif any(v == VerificationStatus.VERIFIED and p == PreAuditStatus.PASSED for _, v, p, _ in own):
             reasons[individual] = 'INVALID_MOBILE_NUMBER'
         elif any(v == VerificationStatus.VERIFIED for _, v, _, _ in own):
@@ -1402,6 +1436,53 @@ SUBMIT_ERROR_TEXT = {
         'Only an approved paylist, or one rejected by MUSE, can be submitted',
     'tasaf_payment.error.paylist_not_found': 'Paylist not found',
 }
+
+
+QUEUED = 'QUEUED'
+SUBMIT_LOCK_KEY = 'muse_submit_lock'
+SUBMIT_LOCK_MINUTES = 30  # frees a paylist whose worker died mid-send
+
+
+def submit_lock(paylist):
+    """The running Submit's {'at', 'by'}; None when there is none or it expired."""
+    held = (paylist.json_ext or {}).get(SUBMIT_LOCK_KEY)
+    if not held:
+        return None
+    try:
+        age = datetime.now(tz=timezone.utc) - datetime.fromisoformat(held['at'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return held if age.total_seconds() < SUBMIT_LOCK_MINUTES * 60 else None
+
+
+def _claim_submit(paylist_uuid, user):
+    with transaction.atomic():
+        paylist = Paylist.objects.select_for_update().filter(uuid=paylist_uuid, is_deleted=False).first()
+        if not paylist:
+            return {'success': False, 'error': SUBMIT_ERROR_TEXT['tasaf_payment.error.paylist_not_found']}
+        if paylist.status not in (PaylistStatus.APPROVED, PaylistStatus.REJECTED):
+            return {'success': False, 'error': SUBMIT_ERROR_TEXT['tasaf_payment.error.paylist_not_approved']}
+        held = submit_lock(paylist)
+        if held:
+            return {'success': False, 'outcome': 'REFUSED',
+                    'error': f"Already being sent to MUSE (submitted by {held.get('by')}); "
+                             f"wait for the result before submitting again"}
+        ext = {**(paylist.json_ext or {}), SUBMIT_LOCK_KEY: {
+            'at': datetime.now(tz=timezone.utc).isoformat(), 'by': getattr(user, 'username', None)}}
+        Paylist.objects.filter(pk=paylist.pk).update(json_ext=ext)
+    return None
+
+
+def _release_submit(paylist_uuid):
+    try:
+        with transaction.atomic():
+            paylist = Paylist.objects.select_for_update().filter(uuid=paylist_uuid).first()
+            if paylist and SUBMIT_LOCK_KEY in (paylist.json_ext or {}):
+                ext = dict(paylist.json_ext)
+                ext.pop(SUBMIT_LOCK_KEY)
+                Paylist.objects.filter(pk=paylist.pk).update(json_ext=ext)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not release the submit lock on paylist %s: %s", paylist_uuid, exc)
 
 
 def _record_submit(paylist_uuid, user, result):
