@@ -19,6 +19,10 @@ class PayeeCodeError(ValueError):
     pass
 
 
+def has_p3_hhid(hhid):
+    return isinstance(hhid, str) and bool(HHID_RE.match(hhid))
+
+
 def encode_hhid(hhid):
     match = HHID_RE.match(hhid) if isinstance(hhid, str) else None
     if not match:

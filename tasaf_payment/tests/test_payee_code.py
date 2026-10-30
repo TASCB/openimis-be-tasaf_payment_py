@@ -125,7 +125,7 @@ class PaylistItemPayeeCodeFilterTest(SimpleTestCase):
 
 class HasP3HhidTest(SimpleTestCase):
     def test_only_a_p3_hhid_can_be_paid_through_muse(self):
-        from tasaf_payment.services import has_p3_hhid
+        from tasaf_payment.payee_code import has_p3_hhid
         self.assertTrue(has_p3_hhid('P3-123456789-12345678'))
         for code in (None, '', 'HH-0001', 'P3-12345678-12345678'):
             self.assertFalse(has_p3_hhid(code))

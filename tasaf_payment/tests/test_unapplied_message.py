@@ -30,7 +30,7 @@ class UnappliedMessageTest(SimpleTestCase):
     def test_unapplied_resend_without_its_class_is_refused(self):
         body = mm.assemble(IDS, SETTINGS, [payee(endtoEndId='PA16E5029R2', orgEndToEndId='PA16E50291')],
                            NOW, mm.UNAPPLIED_TYPE)
-        self.assertIn(('paymentSummary', 'subBudgetClass', 'required'), fields(mm.check(body)))
+        self.assertIn(('paymentSummary', 'subBudgetClass', 'no_unapplied_class'), fields(mm.check(body)))
 
     def test_new_id_fits_muse_limit(self):
         self.assertEqual(new_id('1FJ8SKD9', 2), '1FJ8SKD9R2')

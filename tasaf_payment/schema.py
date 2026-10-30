@@ -752,11 +752,12 @@ class Query(graphene.ObjectType):
 
     def resolve_muse_settings(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
-        from tasaf_payment.muse.setup import SETTINGS_FIELDS, get_settings
+        from tasaf_payment.muse.setup import SETTINGS_FIELDS, get_settings, unapplied_sub_budget_class
         s = get_settings()
         if s is None:
             return None
         return MuseSettingsGQLType(date_updated=s.date_updated, environment=s.environment,
+                                   unapplied_sub_budget_class=unapplied_sub_budget_class(s.sub_budget_class),
                                    **{f: getattr(s, f) for f in SETTINGS_FIELDS})
 
     def resolve_muse_change_requests(self, info, status=None, kinds=None, **kwargs):

@@ -95,12 +95,13 @@ DEFAULT_CONFIG = {
         "EZYPESA": ["077"],
     },
     "sub_budget_classes": [
-        {"code": 211, "description": "UN Agencies"},
-        {"code": 212, "description": "Government of Tanzania"},
+        # "unapplied": the class an unapplied re-send of a payment under this class goes with.
+        {"code": 211, "description": "UN Agencies", "unapplied": 353},
+        {"code": 212, "description": "Government of Tanzania", "unapplied": 352},
         {"code": 213, "description": "OPEC"},
-        {"code": 214, "description": "World Bank (IDA)"},
-        {"code": 215, "description": "Development Partners (DPs)"},
-        {"code": 216, "description": "GOT II"},
+        {"code": 214, "description": "World Bank (IDA)", "unapplied": 335},
+        {"code": 215, "description": "Development Partners (DPs)", "unapplied": 337},
+        {"code": 216, "description": "GOT II", "unapplied": 352},
     ],
     "batch_inline_fallback_limit": 1000,
     # Rows per GePG verification request (one FSP each; larger FSPs are split).

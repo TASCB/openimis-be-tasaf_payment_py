@@ -550,8 +550,6 @@ class MuseSettings(HistoryModel):
     institution_code = models.CharField(max_length=50, blank=True, default='')
     payer_account = models.CharField(max_length=50, blank=True, default='')
     sub_budget_class = models.IntegerField(null=True, blank=True)
-    # MUSE's own unapplied example uses a different class from the original payment.
-    unapplied_sub_budget_class = models.IntegerField(null=True, blank=True)
     payment_desc = models.CharField(max_length=255, blank=True, default='')
     is_stp = models.BooleanField(default=False)
     # Optional: [{"glaccount": "...", "glaccountDesc": "...", "grantName": "..."}]

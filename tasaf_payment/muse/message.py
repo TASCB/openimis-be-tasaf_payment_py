@@ -86,6 +86,8 @@ def money(value):
 # ── Building ────────────────────────────────────────────────────────────────
 
 def settings_values(settings):
+    from tasaf_payment.muse.setup import unapplied_sub_budget_class
+
     if settings is None:
         return {'institutionCode': '', 'payerAccount': '', 'subBudgetClass': None,
                 'unappliedSubBudgetClass': None,
@@ -94,7 +96,7 @@ def settings_values(settings):
         'institutionCode': settings.institution_code,
         'payerAccount': settings.payer_account,
         'subBudgetClass': settings.sub_budget_class,
-        'unappliedSubBudgetClass': settings.unapplied_sub_budget_class,
+        'unappliedSubBudgetClass': unapplied_sub_budget_class(settings.sub_budget_class),
         'paymentDesc': settings.payment_desc,
         'currencyCode': CURRENCY,
         'isSTP': 'True' if settings.is_stp else 'False',
@@ -284,8 +286,11 @@ def check(body):
     unapplied = header.get('paymentType') == UNAPPLIED_TYPE
     for field in SUMMARY_REQUIRED:
         if _missing(summary.get(field)):
-            hint = ('Required — enter the unapplied sub-budget class in MUSE settings'
-                    if unapplied and field == 'subBudgetClass' else 'Required — enter it in MUSE settings')
+            if unapplied and field == 'subBudgetClass':
+                problems.append(_problem('paymentSummary', field, 'no_unapplied_class',
+                                         'The sub-budget class in MUSE settings has no unapplied class'))
+                continue
+            hint = 'Required — enter it in MUSE settings'
             problems.append(_problem('paymentSummary', field, 'required',
                                      hint if field in ('institutionCode', 'payerAccount',
                                                        'subBudgetClass', 'paymentDesc') else 'Required'))

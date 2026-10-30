@@ -13,7 +13,7 @@ from core.signals import register_service_signal
 from core.services.utils import output_exception, check_authentication
 from tasks_management.services import UpdateCheckerLogicServiceMixin
 from tasaf_payment import name_match
-from tasaf_payment.payee_code import PayeeCodeError, encode_hhid
+from tasaf_payment.payee_code import has_p3_hhid
 from tasaf_payment.events import emit_muse_event, emit_verification_event
 from tasaf_payment.validation import WithdrawalChargeValidation
 from tasaf_payment.models import (
@@ -130,7 +130,7 @@ def _govesb_publish(topic: str, payload: dict, *, user_id=None, context: str = "
         return {"published": False, "error": True}
 
 
-def _queue_or_inline(task, task_args, inline, count_ids, label, bounded):
+def queue_or_inline(task, task_args, inline, count_ids, label, bounded):
     """Run a batch through Celery, falling back to inline when no broker is reachable.
 
     Dev has no broker; the dockerised PSSN stack does. The feature must work in both, so
@@ -1077,8 +1077,6 @@ class PaylistService:
         refusal = _claim_submit(paylist_uuid, self.user)
         if refusal:
             return refusal
-        _record_submit(paylist_uuid, self.user, {'success': True, 'outcome': QUEUED,
-                                                 'message': 'Being sent to MUSE'})
         try:
             from tasaf_payment.tasks import submit_paylist_task
             submit_paylist_task.delay(str(paylist_uuid), self.user.id)
@@ -1220,15 +1218,6 @@ def eligible_accounts(individual_ids, fsp_type):
     accounts = PaymentAccount.objects.select_related('group_beneficiary__group').in_bulk({a for a, _ in rows})
     return {individual: accounts[account] for account, individual in rows
             if has_p3_hhid(accounts[account].group_beneficiary.group.code)}
-
-
-def has_p3_hhid(code):
-    """MUSE's payeeCode is the encoded P3 HHID; a household without one cannot be sent."""
-    try:
-        encode_hhid(code)
-        return True
-    except PayeeCodeError:
-        return False
 
 
 def payable_pairs(benefits, fsp_type):
@@ -1459,16 +1448,19 @@ def _claim_submit(paylist_uuid, user):
     with transaction.atomic():
         paylist = Paylist.objects.select_for_update().filter(uuid=paylist_uuid, is_deleted=False).first()
         if not paylist:
-            return {'success': False, 'error': SUBMIT_ERROR_TEXT['tasaf_payment.error.paylist_not_found']}
+            return {'success': False, 'outcome': 'REFUSED',
+                    'error': SUBMIT_ERROR_TEXT['tasaf_payment.error.paylist_not_found']}
         if paylist.status not in (PaylistStatus.APPROVED, PaylistStatus.REJECTED):
-            return {'success': False, 'error': SUBMIT_ERROR_TEXT['tasaf_payment.error.paylist_not_approved']}
+            return {'success': False, 'outcome': 'REFUSED',
+                    'error': SUBMIT_ERROR_TEXT['tasaf_payment.error.paylist_not_approved']}
         held = submit_lock(paylist)
         if held:
             return {'success': False, 'outcome': 'REFUSED',
                     'error': f"Already being sent to MUSE (submitted by {held.get('by')}); "
                              f"wait for the result before submitting again"}
-        ext = {**(paylist.json_ext or {}), SUBMIT_LOCK_KEY: {
-            'at': datetime.now(tz=timezone.utc).isoformat(), 'by': getattr(user, 'username', None)}}
+        lock = {'at': datetime.now(tz=timezone.utc).isoformat(), 'by': getattr(user, 'username', None)}
+        ext = {**(paylist.json_ext or {}), SUBMIT_LOCK_KEY: lock, 'muse_last_submit': {
+            **lock, 'success': True, 'outcome': QUEUED, 'message': 'Being sent to MUSE', 'ack': None}}
         Paylist.objects.filter(pk=paylist.pk).update(json_ext=ext)
     return None
 
@@ -1848,7 +1840,7 @@ class BatchVerificationService:
     def dispatch(self, filters: dict) -> dict:
         from tasaf_payment.tasks import _build_account_queryset, run_batch_verification_task
         try:
-            return _queue_or_inline(
+            return queue_or_inline(
                 task=run_batch_verification_task,
                 task_args=(filters, self.user.id),
                 inline=lambda ids: verification_dispatcher(self.user).dispatch(
@@ -1881,7 +1873,7 @@ class BatchPreAuditService:
     def dispatch(self, filters: dict) -> dict:
         from tasaf_payment.tasks import _build_pre_audit_queryset, run_batch_pre_audit_task
         try:
-            return _queue_or_inline(
+            return queue_or_inline(
                 task=run_batch_pre_audit_task,
                 task_args=(filters, self.user.id),
                 inline=lambda ids: PreAuditService(self.user).run_pre_audit(ids),

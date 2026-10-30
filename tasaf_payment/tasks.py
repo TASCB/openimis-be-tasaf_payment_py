@@ -297,7 +297,8 @@ def resend_gepg_request_task(self, acc_verif_id, user_id):
     from tasaf_payment.gepg.sender import GepgVerificationSender
 
     result = GepgVerificationSender(User.objects.get(id=user_id)).resend(acc_verif_id)
-    logger.info("resend_gepg_request_task: request=%s %s", acc_verif_id, result)
+    logger.info("resend_gepg_request_task: request=%s success=%s sent=%s refused=%s", acc_verif_id,
+                result.get('success'), result.get('count'), result.get('refused'))
     return result
 
 

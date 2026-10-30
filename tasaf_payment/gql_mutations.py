@@ -690,7 +690,6 @@ class SaveMuseSettingsInputType(OpenIMISMutation.Input):
     institution_code = graphene.String(required=False)
     payer_account = graphene.String(required=False)
     sub_budget_class = graphene.Int(required=False)
-    unapplied_sub_budget_class = graphene.Int(required=False)
     payment_desc = graphene.String(required=False)
     is_stp = graphene.Boolean(required=False)
     gl_accounts = graphene.JSONString(required=False)
@@ -751,13 +750,13 @@ class ResendGepgVerificationMutation(OpenIMISMutation):
     @classmethod
     def async_mutate(cls, user, **data):
         from tasaf_payment.gepg.sender import GepgVerificationSender
-        from tasaf_payment.services import _queue_or_inline
+        from tasaf_payment.services import queue_or_inline
         from tasaf_payment.tasks import resend_gepg_request_task
         try:
             _require_perms(user, TasafPaymentConfig.gql_run_verification_perms)
             sender = GepgVerificationSender(user)
             ids, after_change = sender.resend_accounts(data['acc_verif_id'])
-            result = _queue_or_inline(
+            result = queue_or_inline(
                 task=resend_gepg_request_task, task_args=(data['acc_verif_id'], user.id),
                 inline=lambda account_ids: sender.dispatch(account_ids, after_change=after_change),
                 count_ids=lambda: ids, label='ResendGepgVerificationMutation', bounded=True)

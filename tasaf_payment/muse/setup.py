@@ -160,8 +160,7 @@ def profile_values(fsp_code):
              'mobile_prefixes': list(p.mobile_prefixes or [])} if p else {})
 
 
-SETTINGS_FIELDS = ('institution_code', 'payer_account', 'sub_budget_class',
-                   'unapplied_sub_budget_class', 'payment_desc', 'is_stp',
+SETTINGS_FIELDS = ('institution_code', 'payer_account', 'sub_budget_class', 'payment_desc', 'is_stp',
                    'gl_accounts')
 REQUIRED_SETTINGS = ('institution_code', 'payer_account', 'sub_budget_class', 'payment_desc')
 
@@ -181,7 +180,7 @@ def _int_or_none(value, label, errors):
         return None
 
 
-SUB_BUDGET_FIELDS = ('sub_budget_class', 'unapplied_sub_budget_class')
+SUB_BUDGET_FIELDS = ('sub_budget_class',)
 
 
 def sub_budget_classes():
@@ -189,10 +188,16 @@ def sub_budget_classes():
     out = []
     for row in TasafPaymentConfig.sub_budget_classes or []:
         try:
-            out.append({'code': int(row['code']), 'description': str(row.get('description') or '')})
+            unapplied = row.get('unapplied')
+            out.append({'code': int(row['code']), 'description': str(row.get('description') or ''),
+                        'unapplied': int(unapplied) if unapplied not in (None, '') else None})
         except (KeyError, TypeError, ValueError):
             continue
     return out
+
+
+def unapplied_sub_budget_class(code):
+    return next((r['unapplied'] for r in sub_budget_classes() if r['code'] == code), None)
 
 
 def _sub_budget_label(value):
@@ -213,8 +218,6 @@ def normalise_settings(data):
         'institution_code': (data.get('institution_code') or '').strip(),
         'payer_account': (data.get('payer_account') or '').strip(),
         'sub_budget_class': _int_or_none(data.get('sub_budget_class'), 'Sub-budget class', errors),
-        'unapplied_sub_budget_class': _int_or_none(data.get('unapplied_sub_budget_class'),
-                                                   'Sub-budget class (unapplied)', errors),
         'payment_desc': (data.get('payment_desc') or '').strip(),
         'is_stp': bool(data.get('is_stp')),
         'gl_accounts': [
