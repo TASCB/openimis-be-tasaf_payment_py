@@ -99,7 +99,7 @@ DEFAULT_CONFIG = {
         {"code": 211, "description": "UN Agencies", "unapplied": 353},
         {"code": 212, "description": "Government of Tanzania", "unapplied": 352},
         {"code": 213, "description": "OPEC"},
-        {"code": 214, "description": "World Bank (IDA)", "unapplied": 335},
+        {"code": 214, "description": "World Bank (IDA)", "unapplied": 355},
         {"code": 215, "description": "Development Partners (DPs)", "unapplied": 337},
         {"code": 216, "description": "GOT II", "unapplied": 352},
     ],

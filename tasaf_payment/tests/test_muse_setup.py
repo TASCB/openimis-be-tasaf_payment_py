@@ -20,7 +20,7 @@ class MuseSetupValidationTest(SimpleTestCase):
             ms.normalise_settings({'sub_budget_class': '202'})
 
     def test_unapplied_class_follows_the_sub_budget_class(self):
-        expected = {211: 353, 212: 352, 213: None, 214: 335, 215: 337, 216: 352, 999: None}
+        expected = {211: 353, 212: 352, 213: None, 214: 355, 215: 337, 216: 352, 999: None}
         self.assertEqual({c: ms.unapplied_sub_budget_class(c) for c in expected}, expected)
 
     def test_gl_line_needs_an_account_code(self):
