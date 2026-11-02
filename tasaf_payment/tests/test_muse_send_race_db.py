@@ -150,6 +150,48 @@ class SubmitQueueDbTest(TestCase):
         self.assertEqual(sent['createdAt'], paylist.json_ext['muse_created_at'])
 
 
+class InvalidHhidWithdrawDbTest(TestCase):
+    setUp = MuseSendRaceDbTest.setUp
+    submit = MuseSendRaceDbTest.submit
+
+    def break_one_hhid(self, code):
+        from individual.models import Group
+        item = (self.paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING)
+                .select_related('payment_account__group_beneficiary').order_by('id').first())
+        group_id = item.payment_account.group_beneficiary.group_id
+        Group.objects.filter(id=group_id).update(code=code)
+        return item, group_id
+
+    def test_payee_without_p3_hhid_is_withdrawn_and_the_rest_sent(self):
+        from case_management.models import FollowUpRemark
+        from tasaf_payment.models import PaylistItem
+        pending = self.paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING).count()
+        bad, group_id = self.break_one_hhid('P3-230111202t-86643914')
+        others = self.paylist.items.filter(
+            is_deleted=False, status=PaylistItemStatus.PENDING,
+            payment_account__group_beneficiary__group_id=group_id).count()
+        result, paylist = self.submit()
+
+        self.assertTrue(result['success'], result)
+        self.assertEqual(result['withdrawn_no_hhid'], others)
+        self.assertEqual(paylist.status, PaylistStatus.SUBMITTED)
+        item = PaylistItem.objects.get(id=bad.id)
+        self.assertEqual(item.status, PaylistItemStatus.WITHDRAWN)
+        self.assertEqual(item.json_ext['withdrawn_reason'], 'NO_P3_HHID')
+        self.assertIn('P3-230111202t-86643914', item.return_reason)
+        self.assertTrue(FollowUpRemark.objects.filter(paylist_item_id=bad.id, category='DATA_QUALITY').exists())
+        self.assertEqual(paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING).count(),
+                         pending - others)
+
+    def test_database_filter_agrees_with_the_hhid_check(self):
+        from tasaf_payment.muse.rejection import withdraw_without_payee_code
+        from tasaf_payment.payee_code import has_p3_hhid
+        expected = sum(1 for code in self.paylist.items.filter(
+            is_deleted=False, status=PaylistItemStatus.PENDING).values_list(
+            'payment_account__group_beneficiary__group__code', flat=True) if not has_p3_hhid(code))
+        self.assertEqual(withdraw_without_payee_code(self.paylist, self.user), expected)
+
+
 class MusePreviewSizeDbTest(TestCase):
     setUp = MuseSendRaceDbTest.setUp
 

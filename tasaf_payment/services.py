@@ -1114,11 +1114,15 @@ class PaylistService:
                 return {'success': False, 'outcome': 'REFUSED',
                         'error': f'{duplicates} payment(s) on this paylist are already paid, or being paid, '
                                  f'on another paylist; submitting would pay them twice'}
+            no_hhid = 0
+            if paylist.destination == PaymentDestination.MUSE:
+                from tasaf_payment.muse.rejection import withdraw_without_payee_code
+                no_hhid = withdraw_without_payee_code(paylist, self.user)
             pending = paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING)
             if not pending.exists():
                 return {'success': False, 'outcome': 'REFUSED',
-                        'error': 'No payee is left on this paylist to send; every payee was taken out '
-                                 'after MUSE rejected the batch'}
+                        'error': 'No payee is left on this paylist to send; every payee was taken out'
+                                 + (f' ({no_hhid} now for an invalid HHID)' if no_hhid else '')}
             if paylist.payment_type == MusePaymentType.UNAPPLIED:
                 from tasaf_payment.unapplied import resend_mismatches
                 mismatched = len(resend_mismatches(paylist))
@@ -1143,7 +1147,8 @@ class PaylistService:
                 if not result.submitted and not _replied_during_send(paylist):
                     logger.info("PaylistService.submit: paylist=%s not submitted (%s): %s",
                                 paylist_uuid, result.outcome, result.message)
-                    return {'success': False, 'error': result.message, 'outcome': result.outcome}
+                    return {'success': False, 'error': _withdrawn_note(no_hhid) + result.message,
+                            'outcome': result.outcome, 'withdrawn_no_hhid': no_hhid}
             else:
                 self._publish_paylist(paylist)
 
@@ -1152,7 +1157,8 @@ class PaylistService:
             from tasaf_payment.muse.sender import apply_reply
             ack = apply_reply(result)
             logger.info("PaylistService.submit: paylist=%s (user=%s) ack=%s", paylist_uuid, self.user.username, ack)
-            return {'success': True, 'error': None, 'muse_ack': ack}
+            return {'success': True, 'error': None, 'muse_ack': ack, 'withdrawn_no_hhid': no_hhid,
+                    'message': _withdrawn_note(no_hhid).rstrip('; ')}
 
         except Paylist.DoesNotExist:
             return {'success': False, 'error': _("tasaf_payment.error.paylist_not_found")}
@@ -1475,6 +1481,10 @@ def _release_submit(paylist_uuid):
                 Paylist.objects.filter(pk=paylist.pk).update(json_ext=ext)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not release the submit lock on paylist %s: %s", paylist_uuid, exc)
+
+
+def _withdrawn_note(count):
+    return f'{count} payee(s) without a P3 HHID were withdrawn (see Case Management); ' if count else ''
 
 
 def _record_submit(paylist_uuid, user, result):

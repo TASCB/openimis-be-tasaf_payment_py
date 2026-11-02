@@ -168,6 +168,64 @@ def flag_returned_account(item, reason, failure_class, paylist, user):
     return follow_up
 
 
+NO_P3_HHID = 'NO_P3_HHID'
+
+
+def withdraw_without_payee_code(paylist, user):
+    """Take out of *paylist* every pending payee whose household has no P3 HHID (no MUSE
+    payeeCode), each with a data-quality follow-up, so the rest can be sent. Paylists generated
+    before Generate checked HHIDs can hold them. The account is left as it is."""
+    from django.db.models import Q
+    from tasaf_payment.models import PaylistItemStatus
+    from tasaf_payment.payee_code import HHID_RE, has_p3_hhid
+
+    field = 'payment_account__group_beneficiary__group__code'
+    candidates = (paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING)
+                  .filter(Q(**{f'{field}__isnull': True}) | ~Q(**{f'{field}__regex': HHID_RE.pattern}))
+                  .select_related('payment_account__group_beneficiary__group'))
+    withdrawn = 0
+    for item in candidates:
+        group = getattr(item.payment_account.group_beneficiary, 'group', None)
+        hhid = getattr(group, 'code', None)
+        if has_p3_hhid(hhid):
+            continue
+        reason = f'Invalid HHID {hhid or "(none)"}: MUSE needs a P3 HHID (P3-#########-########)'
+        with transaction.atomic():
+            item.status = PaylistItemStatus.WITHDRAWN
+            item.return_reason = reason
+            item.json_ext = {**(item.json_ext or {}), 'withdrawn_at': datetime.now(tz=timezone.utc).isoformat(),
+                             'withdrawn_reason': NO_P3_HHID}
+            item.save(user=user)
+        follow_up = _open_hhid_follow_up(item, group, hhid, paylist, user)
+        if follow_up:
+            item.json_ext = {**item.json_ext, 'follow_up_id': str(follow_up)}
+            item.save(user=user)
+        withdrawn += 1
+    if withdrawn:
+        logger.warning("Paylist %s: %d payee(s) without a P3 HHID withdrawn before the MUSE send",
+                       paylist.uuid, withdrawn)
+    return withdrawn
+
+
+def _open_hhid_follow_up(item, group, hhid, paylist, user):
+    if not group:
+        logger.warning("Payee %s without a household withdrawn; no follow-up opened", item.uuid)
+        return None
+    try:
+        from case_management.services import FollowUpService
+    except ImportError:
+        return None
+    remark = (f"The payment on paylist {paylist.uuid} was taken out before it was sent to MUSE: "
+              f"the household's HHID {hhid or '(none)'} is not a P3 HHID (P3-#########-########), "
+              f"so it has no MUSE payee code. Correct the HHID; it is then paid on a new paylist.")
+    result = FollowUpService(user).add(group_id=group.id, category='DATA_QUALITY', remark=remark,
+                                       priority='HIGH', paylist_item_id=item.id)
+    if not result.get('success'):
+        logger.warning("No follow-up for payee %s without a P3 HHID: %s", item.uuid, result)
+        return None
+    return (result.get('data') or {}).get('id')
+
+
 def _open_follow_up(item, reason, paylist, user, unapplied=False):
     try:
         from case_management.services import FollowUpService
