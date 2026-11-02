@@ -240,11 +240,13 @@ class PaylistGQLType(DjangoObjectType):
                           charge=Sum('charge_amount')))
         money = lambda v: float(v or 0)  # noqa: E731
         by_status = {r['status']: {'count': r['count'], 'amount': money(r['amount'])} for r in rows}
+        # Totals = what MUSE is sent: withdrawn payees are left out of the message.
+        sent = [r for r in rows if r['status'] != PaylistItemStatus.WITHDRAWN]
         return {
-            'payees': sum(r['count'] for r in rows),
-            'amount': sum(money(r['amount']) for r in rows),
-            'net_amount': sum(money(r['net']) for r in rows),
-            'charge_amount': sum(money(r['charge']) for r in rows),
+            'payees': sum(r['count'] for r in sent),
+            'amount': sum(money(r['amount']) for r in sent),
+            'net_amount': sum(money(r['net']) for r in sent),
+            'charge_amount': sum(money(r['charge']) for r in sent),
             'by_status': by_status,
         }
 
