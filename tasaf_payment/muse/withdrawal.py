@@ -1,7 +1,7 @@
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from django.db import transaction
@@ -16,14 +16,19 @@ MESSAGE_TYPE = 'UNAPPLIED_WITHDRAWAL'
 TOPIC = 'tasaf.payment.unapplied.withdrawal'
 KEY = 'muse_withdrawal'
 MSG_PREFIX = 'TW'
-SENT, RECEIVED, REJECTED, RECORDED = 'SENT', 'RECEIVED', 'REJECTED', 'RECORDED'
+SENT, RECEIVED, REJECTED, RECORDED, SENDING = 'SENT', 'RECEIVED', 'REJECTED', 'RECORDED', 'SENDING'
+SEND_LOCK_MINUTES = 10  # frees payees whose request died mid-send
 
 
 def pending():
     withdrawn = PaylistItem.objects.filter(
         is_deleted=False, status=PaylistItemStatus.UNAPPLIED,
         **{f'json_ext__{UNAPPLIED_ACTION_KEY}__action': UnappliedAction.WITHDRAW})
-    return withdrawn.filter(~Q(json_ext__has_key=KEY) | Q(**{f'json_ext__{KEY}__status': REJECTED}))
+    stale = (datetime.now(tz=timezone.utc) - timedelta(minutes=SEND_LOCK_MINUTES)).isoformat()
+    return withdrawn.filter(
+        ~Q(json_ext__has_key=KEY)
+        | Q(**{f'json_ext__{KEY}__status': REJECTED})
+        | Q(**{f'json_ext__{KEY}__status': SENDING, f'json_ext__{KEY}__sending_at__lt': stale}))
 
 
 def msg_id():
@@ -80,37 +85,76 @@ class WithdrawalError(Exception):
     pass
 
 
-def send(user):
-    from tasaf_payment.muse.sender import RECORD_ONLY, SEND, _config, muse_reply, request_type
-
-    items = list(pending().select_related('paylist', 'payment_account__group_beneficiary__group',
-                                          'benefit_consumption'))
-    if not items:
-        raise WithdrawalError('There is no withdrawn unapplied payment to report to MUSE')
-    message_id = msg_id()
-    body = build(items, message_id)
-    now = datetime.now(tz=timezone.utc).isoformat()
-
-    if str(_config('muse_submit_mode', SEND)).upper() == RECORD_ONLY:
-        _log(body, 'NOT_SENT', error_message='muse_submit_mode=RECORD_ONLY')
-        with transaction.atomic():
-            _stamp(items, user, msg_id=message_id, sent_at=now, status=RECORDED)
-        return message_id, len(items)
-
+def _producer():
     try:
         from coremis_app_integration.govesb import GovESBProducer, govesb_enabled
     except ImportError:
         raise WithdrawalError('The GovESB adaptor is not installed; nothing was sent')
     if not govesb_enabled():
         raise WithdrawalError('GovESB is not configured on this server; nothing was sent')
+    return GovESBProducer()
+
+
+def _claim(user):
+    """Mark the pending payees SENDING under a row lock, so a second click finds none."""
+    with transaction.atomic():
+        items = list(pending().select_for_update(of=('self',)).select_related(
+            'paylist', 'payment_account__group_beneficiary__group', 'benefit_consumption'))
+        if not items:
+            sending = PaylistItem.objects.filter(**{f'json_ext__{KEY}__status': SENDING}).first()
+            if sending:
+                by = (sending.json_ext or {}).get(KEY, {}).get('by')
+                raise WithdrawalError(f'The withdrawal list is already being sent to MUSE (by {by}); '
+                                      f'wait for the result')
+            raise WithdrawalError('There is no withdrawn unapplied payment to report to MUSE')
+        previous = {item.pk: (item.json_ext or {}).get(KEY) for item in items}
+        _stamp(items, user, status=SENDING, sending_at=datetime.now(tz=timezone.utc).isoformat(),
+               by=getattr(user, 'username', None))
+    return items, previous
+
+
+def _release(items, user, previous):
+    with transaction.atomic():
+        for item in items:
+            ext = dict(item.json_ext or {})
+            if previous.get(item.pk) is None:
+                ext.pop(KEY, None)
+            else:
+                ext[KEY] = previous[item.pk]
+            item.json_ext = ext
+            item.save(user=user)
+
+
+def send(user):
+    from tasaf_payment.muse.sender import RECORD_ONLY, SEND, _config, muse_reply, request_type
+
+    record_only = str(_config('muse_submit_mode', SEND)).upper() == RECORD_ONLY
+    producer = None if record_only else _producer()
+    items, previous = _claim(user)
+    message_id = msg_id()
     try:
-        response = GovESBProducer().publish(TOPIC, body, request_type=request_type())
+        body = build(items, message_id)
+    except Exception:
+        _release(items, user, previous)
+        raise
+    now = datetime.now(tz=timezone.utc).isoformat()
+
+    if record_only:
+        _log(body, 'NOT_SENT', error_message='muse_submit_mode=RECORD_ONLY')
+        with transaction.atomic():
+            _stamp(items, user, msg_id=message_id, sent_at=now, status=RECORDED)
+        return message_id, len(items)
+
+    try:
+        response = producer.publish(TOPIC, body, request_type=request_type())
     except Exception as exc:  # noqa: BLE001
         _log(body, 'FAILED', error_message=str(exc)[:2000])
+        _release(items, user, previous)
         raise WithdrawalError(f'Could not send the withdrawal list: {exc}')
     if not response.get('ok'):
         error = str(response.get('error') or f"HTTP {response.get('status_code')}")
         _log(body, 'FAILED', http_status_code=response.get('status_code'), error_message=error[:2000])
+        _release(items, user, previous)
         raise WithdrawalError(f'GovESB refused the withdrawal list: {error}')
 
     _log(body, 'SUCCESS', http_status_code=response.get('status_code'),

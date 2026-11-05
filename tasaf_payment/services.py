@@ -1014,9 +1014,9 @@ class PaylistService:
             summary = describe_paylist(paylist)
             res = ApprovalService(self.user).request_approval(paylist, 'PAYMENT_APPROVAL', summary=summary)
             if not res.get('success'):
-                logger.warning("tasaf_payment: paylist approval start failed: %s", res)
-        except Exception as exc:
-            logger.warning("tasaf_payment: paylist approval start error (%s)", exc)
+                logger.error("tasaf_payment: paylist %s approval start failed: %s", paylist.uuid, res)
+        except Exception:  # noqa: BLE001 — generation stands; approve() refuses without a request
+            logger.exception("tasaf_payment: paylist %s approval start error", paylist.uuid)
 
     def _engine_request_for(self, paylist):
         """The open (PENDING) engine ApprovalRequest for this paylist, if any."""
@@ -1032,8 +1032,8 @@ class PaylistService:
         """Approve the paylist's CURRENT step in the two-level Approval Engine sign-off.
 
         The paylist only reaches APPROVED once BOTH steps are signed by two DIFFERENT approvers
-        (the engine's finalize adapter flips the status). Falls back to a direct transition for
-        in-flight paylists that predate the engine (no ApprovalRequest)."""
+        (the engine's finalize adapter flips the status). A paylist without an engine request is
+        refused, never approved by one person."""
         try:
             paylist = Paylist.objects.get(uuid=paylist_uuid, is_deleted=False)
             if paylist.status != PaylistStatus.PENDING_APPROVAL:
@@ -1045,24 +1045,20 @@ class PaylistService:
                 return refusal
 
             appr = self._engine_request_for(paylist)
-            if appr:
-                from approval.services import ApprovalService
-                step = appr.steps.filter(order=appr.current_step_order, is_deleted=False).first()
-                res = ApprovalService(self.user).approve(str(appr.id), str(step.id))
-                if not res.get('success'):
-                    return {'success': False,
-                            'error': (res.get('message') or res.get('detail')
-                                      or _("tasaf_payment.error.approval_failed"))}
-                paylist.refresh_from_db()  # adapter sets APPROVED once the final step is signed
-                logger.info("PaylistService.approve: paylist=%s step advanced (status=%s, user=%s)",
-                            paylist_uuid, paylist.status, self.user.username)
-                return {'success': True, 'error': None, 'status': paylist.status}
+            if not appr:
+                logger.error("PaylistService.approve: paylist %s has no open approval request", paylist_uuid)
+                return {'success': False, 'error': _("tasaf_payment.error.no_approval_request")}
 
-            paylist.status = PaylistStatus.APPROVED
-            paylist.approved_at = datetime.now(tz=timezone.utc)
-            paylist.save()
-            logger.info("PaylistService.approve: paylist=%s (legacy direct, user=%s)",
-                        paylist_uuid, self.user.username)
+            from approval.services import ApprovalService
+            step = appr.steps.filter(order=appr.current_step_order, is_deleted=False).first()
+            res = ApprovalService(self.user).approve(str(appr.id), str(step.id))
+            if not res.get('success'):
+                return {'success': False,
+                        'error': (res.get('message') or res.get('detail')
+                                  or _("tasaf_payment.error.approval_failed"))}
+            paylist.refresh_from_db()  # adapter sets APPROVED once the final step is signed
+            logger.info("PaylistService.approve: paylist=%s step advanced (status=%s, user=%s)",
+                        paylist_uuid, paylist.status, self.user.username)
             return {'success': True, 'error': None, 'status': paylist.status}
 
         except Paylist.DoesNotExist:
