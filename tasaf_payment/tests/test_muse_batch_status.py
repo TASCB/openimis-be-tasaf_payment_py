@@ -77,7 +77,7 @@ class MuseBatchStatusTest(SimpleTestCase):
 
 class SendInProgressTest(SimpleTestCase):
     def setUp(self):
-        patcher = mock.patch('tasaf_payment.services._inbound_audit_user', return_value=object())
+        patcher = mock.patch('tasaf_payment.services.inbound_audit_user', return_value=object())
         patcher.start()
         self.addCleanup(patcher.stop)
 

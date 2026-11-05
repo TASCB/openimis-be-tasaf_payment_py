@@ -53,8 +53,8 @@ class UnappliedResendDbTest(TestCase):
         from tasaf_payment.services import PaylistService
         before = set(Paylist.objects.values_list('id', flat=True))
         with self.captureOnCommitCallbacks(execute=False):
-            PaylistService(self.user)._generate_sync(self.paylist.payroll_id, self.paylist.batch_type, None, 'MUSE',
-                                                     resends_only=resends_only)
+            PaylistService(self.user).generate_sync(self.paylist.payroll_id, self.paylist.batch_type, None, 'MUSE',
+                                                    resends_only=resends_only)
         return (PaylistItem.objects.filter(benefit_consumption_id=self.item.benefit_consumption_id)
                 .exclude(paylist_id__in=before).select_related('paylist').first())
 
@@ -132,7 +132,7 @@ class UnappliedResendDbTest(TestCase):
         row = body['message']['withdrawalList'][0]
         self.assertEqual(row['orgEndToEndId'], self.original_id)
         self.assertEqual(body['message']['withdrawalSummary']['noofTransaction'], 1)
-        with mock.patch('tasaf_payment.muse.sender._config', side_effect=lambda n, d: 'RECORD_ONLY' if n == 'muse_submit_mode' else d):
+        with mock.patch('tasaf_payment.muse.sender.muse_config', side_effect=lambda n, d: 'RECORD_ONLY' if n == 'muse_submit_mode' else d):
             message_id, count = withdrawal.send(self.user)
         self.assertGreaterEqual(count, 1)
         self.assertNotIn(item.id, list(withdrawal.pending().values_list('id', flat=True)))

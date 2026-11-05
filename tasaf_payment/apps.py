@@ -1,5 +1,3 @@
-import os
-
 from django.apps import AppConfig
 
 MODULE_NAME = 'tasaf_payment'
@@ -26,6 +24,7 @@ DEFAULT_CONFIG = {
     "gql_approve_account_perms":         ["270102"],
     "gql_account_check_perms":           ["270104"],
     "account_check_max_rows": 50000,
+    "account_check_max_mb": 10,
     "account_check_retention_days": 90,
     # Entity 02: Pre-audit
     "gql_pre_audit_search_perms":        ["270202"],
@@ -135,10 +134,6 @@ DEFAULT_CONFIG = {
     "paylist_async_threshold": 20000,
     # Service account attributed to gateway callbacks (no logged-in user exists).
     "inbound_system_username": "Admin",
-
-    # GovESB integration (TODO: to be configured next after discussion with MUSE team)
-    "govesb_endpoint": os.getenv('GOVESB_ENDPOINT', ''),
-    "govesb_api_key":  os.getenv('GOVESB_API_KEY', ''),
 }
 
 
@@ -188,6 +183,7 @@ class TasafPaymentConfig(AppConfig):
     verification_batch_max_rows = 50000
     gql_account_check_perms = None
     account_check_max_rows = 50000
+    account_check_max_mb = 10
     account_check_retention_days = 90
     gepg_message_format = 'XML'
     gepg_send_max_attempts = 3
@@ -204,8 +200,6 @@ class TasafPaymentConfig(AppConfig):
     paylist_max_batch_size = None
     paylist_async_threshold = None
     inbound_system_username = None
-    govesb_endpoint = None
-    govesb_api_key = None
 
     def ready(self):
         from core.models import ModuleConfiguration

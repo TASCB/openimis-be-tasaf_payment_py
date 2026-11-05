@@ -19,7 +19,7 @@ class PaylistApprovalAdapter:
 
             from approval.models import ApprovalRequest
             from tasaf_payment.models import Paylist, PaylistStatus
-            from tasaf_payment.services import _inbound_audit_user
+            from tasaf_payment.services import inbound_audit_user
 
             appr = ApprovalRequest.objects.filter(id=data.get('id')).first()
             if not appr:
@@ -30,7 +30,7 @@ class PaylistApprovalAdapter:
                 return
 
             # The engine passes its service instance; its user signed the final decision.
-            user = getattr(kwargs.get('cls_'), 'user', None) or _inbound_audit_user(paylist)
+            user = getattr(kwargs.get('cls_'), 'user', None) or inbound_audit_user(paylist)
             decision = data.get('decision')
             if decision == 'APPROVED':
                 paylist.status = PaylistStatus.APPROVED

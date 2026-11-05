@@ -14,6 +14,7 @@ from decimal import Decimal
 import pandas as pd
 
 from tasaf_payment.charges import resolve_fsp_code
+from tasaf_payment.compliance import as_decimal
 from tasaf_payment.models import PaylistItem, PaylistItemStatus
 
 logger = logging.getLogger(__name__)
@@ -36,16 +37,6 @@ def fsp_names_for_code(code):
         .values_list('fsp_name', flat=True).distinct()
     )
     return [name for name in names if (resolve_fsp_code(name) or '').upper() == wanted]
-
-
-def _dec(value):
-    """jsonb numbers arrive as int/float/str/None — normalise to Decimal."""
-    if value in (None, ''):
-        return Decimal('0')
-    try:
-        return Decimal(str(value))
-    except (ArithmeticError, ValueError, TypeError):
-        return Decimal('0')
 
 
 def _blank_row(code):
@@ -107,9 +98,9 @@ def epayment_summary_by_fsp(payment_cycle_id=None, date_from=None, date_to=None,
             row = rows[code] = _blank_row(code)
 
         row['items'] += 1
-        row['withdrawal_charges'] += _dec(item.charge_amount)
+        row['withdrawal_charges'] += as_decimal(item.charge_amount)
         # Entitlement, not the grossed-up transfer -- what beneficiaries received.
-        row['total_paid'] += _dec(item.net_amount if item.net_amount is not None else item.amount)
+        row['total_paid'] += as_decimal(item.net_amount if item.net_amount is not None else item.amount)
 
         benefit = item.benefit_consumption
         ext = (getattr(benefit, 'json_ext', None) or {}) if benefit else {}
@@ -124,15 +115,15 @@ def epayment_summary_by_fsp(payment_cycle_id=None, date_from=None, date_to=None,
         if not breakdown:
             continue
 
-        row['pct_payment'] += _dec(breakdown.get('base_amount'))
-        row['child_grant'] += _dec(breakdown.get('young_child_amount'))
-        row['disability_grant'] += _dec(breakdown.get('disability_amount'))
-        row['component_total'] += _dec(breakdown.get('raw_total'))
+        row['pct_payment'] += as_decimal(breakdown.get('base_amount'))
+        row['child_grant'] += as_decimal(breakdown.get('young_child_amount'))
+        row['disability_grant'] += as_decimal(breakdown.get('disability_amount'))
+        row['component_total'] += as_decimal(breakdown.get('raw_total'))
 
-        if int(_dec(breakdown.get('young_child_count'))) > 0:
+        if int(as_decimal(breakdown.get('young_child_count'))) > 0:
             row['has_child'] += 1
-        row['primary_student'] += int(_dec(breakdown.get('primary_count')))
-        row['secondary_student'] += int(_dec(breakdown.get('secondary_count')))
+        row['primary_student'] += int(as_decimal(breakdown.get('primary_count')))
+        row['secondary_student'] += int(as_decimal(breakdown.get('secondary_count')))
 
     out = []
     for code in sorted(rows):
@@ -372,9 +363,9 @@ def export_paylist_items(user, items):
 
 
 def paylist_pdf_rows(paylist):
-    from tasaf_payment.muse.message import _representative_names
+    from tasaf_payment.muse.message import representative_names
 
-    names = _representative_names(paylist)
+    names = representative_names(paylist)
     rows = (paylist.items.filter(is_deleted=False).exclude(status=PaylistItemStatus.WITHDRAWN)
             .order_by('date_created', 'id')
             .values_list('payment_account__group_beneficiary__group_id',
@@ -399,16 +390,17 @@ def paylist_pdf_breakdown(paylist):
     rows = (paylist.items.filter(is_deleted=False).exclude(status=PaylistItemStatus.WITHDRAWN)
             .values_list('amount', 'charge_amount', 'benefit_consumption__json_ext'))
     for amount, charge, ext in rows:
-        gross += _dec(amount)
-        charges += _dec(charge)
+        gross += as_decimal(amount)
+        charges += as_decimal(charge)
         breakdown = (ext or {}).get('pct_breakdown') or {}
         for key, value in breakdown.items():
             if key in PDF_DEDUCTION_KEYS or key.endswith('_penalty'):
-                deductions[key] += _dec(value)
+                deductions[key] += as_decimal(value)
             elif key.endswith('_amount') and key != 'household_cap_amount':
-                payments[key] += _dec(value)
+                payments[key] += as_decimal(value)
         if breakdown:
-            deductions['household_cap'] += _dec(breakdown.get('raw_total')) - _dec(breakdown.get('capped_total'))
+            deductions['household_cap'] += (as_decimal(breakdown.get('raw_total'))
+                                            - as_decimal(breakdown.get('capped_total')))
     payments['withdrawal_charge'] += charges
     difference = gross - (sum(payments.values()) - sum(deductions.values()))
     if difference > 0:

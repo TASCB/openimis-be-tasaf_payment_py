@@ -138,17 +138,18 @@ def resend_mismatches(paylist):
 
 def resend_candidates():
     from tasaf_payment.models import PaymentDestination
-    from tasaf_payment.returned import _paid, _repaying
+    from tasaf_payment.returned import paid_elsewhere_q, repaying_q
     from tasaf_payment.withdrawn_hold import LAPSED_KEY
     return (PaylistItem.objects.filter(
-        ~_paid(), ~_repaying(), status=PaylistItemStatus.UNAPPLIED, is_deleted=False, paylist__is_deleted=False,
+        ~paid_elsewhere_q(), ~repaying_q(), status=PaylistItemStatus.UNAPPLIED,
+        is_deleted=False, paylist__is_deleted=False,
         paylist__destination=PaymentDestination.MUSE,
         **{f'json_ext__{UNAPPLIED_ACTION_KEY}__action__in': list(RESEND_ACTIONS)})
         .exclude(json_ext__has_key=LAPSED_KEY))
 
 
 def resend_preview(user):
-    from tasaf_payment.returned import _account_cleared
+    from tasaf_payment.returned import account_cleared
     from tasaf_payment.services import PaylistService
 
     service = PaylistService(user)
@@ -162,9 +163,9 @@ def resend_preview(user):
                 'payrollId': key[0], 'payrollName': getattr(paylist.payroll, 'name', None),
                 'paymentCycleId': str(paylist.payment_cycle_id) if paylist.payment_cycle_id else None,
                 'batchType': paylist.batch_type, 'ready': 0, 'amount': 0.0,
-                'waitingAccount': 0, 'blocked': service._payroll_status_error(paylist.payroll_id)
+                'waitingAccount': 0, 'blocked': service.payroll_status_error(paylist.payroll_id)
                 if paylist.payroll_id else 'No payroll'}
-        if not _account_cleared(item.payment_account):
+        if not account_cleared(item.payment_account):
             row['waitingAccount'] += 1
         else:
             row['ready'] += 1
@@ -189,8 +190,8 @@ def create_resend_batches(user):
     for row in resend_preview(user):
         if not row['ready'] or row['blocked']:
             continue
-        result = service._generate_sync(row['payrollId'], row['batchType'], row['paymentCycleId'],
-                                        PaymentDestination.MUSE, resends_only=True)
+        result = service.generate_sync(row['payrollId'], row['batchType'], row['paymentCycleId'],
+                                       PaymentDestination.MUSE, resends_only=True)
         if result.get('success'):
             made.extend(result.get('paylists') or [])
         else:

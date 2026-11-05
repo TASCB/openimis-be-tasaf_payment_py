@@ -24,11 +24,11 @@ def _other_items(status_q):
     ).exclude(id=OuterRef('id'))
 
 
-def _paid():
+def paid_elsewhere_q():
     return Exists(_other_items(Q(status=PaylistItemStatus.PROCESSED)))
 
 
-def _repaying():
+def repaying_q():
     return Exists(_other_items(Q(status=PaylistItemStatus.PENDING)).exclude(paylist__status__in=FINISHED_PAYLISTS))
 
 
@@ -52,8 +52,8 @@ def resolution_q(resolution):
     if resolution == AWAITING_ACTION:
         return awaiting_action()
     base = returned_for_repayment()
-    steps = [(REPAID, _paid()), (LAPSED, _lapsed()), (UNAPPLIED_WITHDRAWN, _withdrawn_by_pct()),
-             (REPAYING, Q(_repaying()) | _ready())]
+    steps = [(REPAID, paid_elsewhere_q()), (LAPSED, _lapsed()), (UNAPPLIED_WITHDRAWN, _withdrawn_by_pct()),
+             (REPAYING, Q(repaying_q()) | _ready())]
     earlier = []
     for name, condition in steps:
         condition = condition if isinstance(condition, Q) else Q(condition)
@@ -94,7 +94,7 @@ def resolution_of(item):
         return LAPSED
     if (ext.get(UNAPPLIED_ACTION_KEY) or {}).get('action') == UnappliedAction.WITHDRAW:
         return UNAPPLIED_WITHDRAWN
-    if other is not None or _account_cleared(item.payment_account):
+    if other is not None or account_cleared(item.payment_account):
         return REPAYING
     return IN_CORRECTION
 
@@ -118,7 +118,7 @@ def suggested_action(item):
     return {TRANSIENT: UnappliedAction.REPAY, DATA: UnappliedAction.CASE}.get(classify(reason))
 
 
-def _account_cleared(account):
+def account_cleared(account):
     return (account is not None and not account.is_deleted
             and account.verification_status == VerificationStatus.VERIFIED
             and account.pre_audit_status == PreAuditStatus.PASSED)
@@ -135,7 +135,7 @@ def _check_decision(user, item, action, note):
     from tasaf_payment.apps import TasafPaymentConfig
     suggested = suggested_action(item)
     if action == UnappliedAction.REPAY:
-        if not _account_cleared(item.payment_account):
+        if not account_cleared(item.payment_account):
             raise UnappliedDecisionError(
                 "The account is not verified and pre-audited, so it cannot be repaid as it is; send it to Case")
         limit = int(getattr(TasafPaymentConfig, 'unapplied_max_returns', 0) or 0)

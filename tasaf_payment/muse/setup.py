@@ -362,7 +362,7 @@ def propose_settings(user, data, reason=''):
 def delete_fsp(user, fsp_code):
     from tasaf_payment.charges import normalise_fsp
     from tasaf_payment.models import (
-        FspMapping, FspProfile, MuseChangeKind, MuseChangeRequest, MuseChangeStatus, WithdrawalCharge,
+        FspMapping, FspProfile, MuseChangeRequest, MuseChangeStatus, WithdrawalCharge,
     )
 
     code = normalise_fsp(fsp_code or '')

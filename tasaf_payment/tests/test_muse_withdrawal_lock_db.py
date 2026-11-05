@@ -26,7 +26,7 @@ class MuseWithdrawalLockDbTest(TestCase):
             mock.patch('tasaf_payment.muse.withdrawal._producer', return_value=self.producer),
             mock.patch('tasaf_payment.muse.withdrawal.build', return_value={}),
             mock.patch('tasaf_payment.muse.withdrawal._log'),
-            mock.patch('tasaf_payment.muse.sender._config', return_value=SEND),
+            mock.patch('tasaf_payment.muse.sender.muse_config', return_value=SEND),
             mock.patch('tasaf_payment.muse.sender.muse_reply', return_value=None),
         ]
         for patch in patches:

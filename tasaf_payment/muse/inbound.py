@@ -202,12 +202,11 @@ def _payee_problem(details, item):
         logger.error("MUSE inbound payeeCode refused: %s", exc)
         return _error(400, str(exc), 'FAILED')
     if not Group.objects.filter(code=hhid, is_deleted=False).exists():
-        logger.error("MUSE inbound payeeCode %s decodes to unknown household %s", code, hhid)
+        logger.error("MUSE inbound payeeCode %s decodes to an unknown household", code)
         return _error(404, f"No household {hhid} for payeeCode {code}", 'REJECTED')
     group = getattr(getattr(item.payment_account, 'group_beneficiary', None), 'group', None)
     if getattr(group, 'code', None) != hhid:
-        logger.error("MUSE inbound payeeCode %s (household %s) does not match payment %s",
-                     code, hhid, item.benefit_consumption_id)
+        logger.error("MUSE inbound payeeCode %s does not match payment %s", code, item.benefit_consumption_id)
         return _error(409, f"payeeCode {code} is household {hhid}, not the household this "
                            f"payment was sent for", 'REJECTED')
     return None

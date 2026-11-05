@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from tasaf_payment.compliance import COMPONENTS, PAID_KEYS, TOLERANCE, _dec, assess, expected, rule_params
+from tasaf_payment.compliance import COMPONENTS, PAID_KEYS, TOLERANCE, as_decimal, assess, expected, rule_params
 
 STILL_TRUE, CHANGED = 'STILL_TRUE', 'CHANGED'
 MAX_MATCHES = 10
@@ -55,7 +55,7 @@ def _payment(benefit, payroll, params, group, reference_date):
         for c in COMPONENTS:
             recorded = breakdown.get(PAID_KEYS[c])
             parts.append({'part': c, 'expected': _num(exp['parts'][c]),
-                          'recorded': _num(_dec(recorded)) if recorded is not None else None})
+                          'recorded': _num(as_decimal(recorded)) if recorded is not None else None})
     return {
         'benefit_id': str(benefit.id), 'benefit_code': benefit.code, 'payroll': payroll.name,
         'payroll_status': payroll.status, 'benefit_status': benefit.status,

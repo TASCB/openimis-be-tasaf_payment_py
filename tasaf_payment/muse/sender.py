@@ -39,7 +39,7 @@ class SendResult:
         return self.outcome in (SENT, RECORDED)
 
 
-def _config(name, default):
+def muse_config(name, default):
     from tasaf_payment.apps import TasafPaymentConfig
     value = getattr(TasafPaymentConfig, name, None)
     return default if value in (None, '') else value
@@ -123,7 +123,7 @@ def apply_reply(result):
 
 def request_type():
     from coremis_app_integration.esb_client import ESBRequestType
-    name = str(_config('muse_request_type', 'NORMAL')).upper()
+    name = str(muse_config('muse_request_type', 'NORMAL')).upper()
     return ESBRequestType.PUSH if name == 'PUSH' else ESBRequestType.NORMAL
 
 
@@ -148,7 +148,7 @@ class MuseSender:
         self.sleep = sleep
 
     def send(self, paylist, topic):
-        mode = str(_config('muse_submit_mode', SEND)).upper()
+        mode = str(muse_config('muse_submit_mode', SEND)).upper()
         body = muse_message.build(paylist)
 
         if mode == RECORD_ONLY:
@@ -179,8 +179,8 @@ class MuseSender:
         _freeze_ids(paylist, body, self.user, sending=True)
         logger.info("MUSE send paylist=%s msgId=%s payees=%s", paylist.uuid,
                     body['message']['messageHeader']['msgId'], len(body['message'].get('payList') or []))
-        max_attempts = max(1, int(_config('muse_send_max_attempts', 3)))
-        backoff = float(_config('muse_send_backoff_seconds', 2))
+        max_attempts = max(1, int(muse_config('muse_send_max_attempts', 3)))
+        backoff = float(muse_config('muse_send_backoff_seconds', 2))
         result = None
 
         for attempt in range(1, max_attempts + 1):

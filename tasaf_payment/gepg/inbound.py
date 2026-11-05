@@ -35,10 +35,10 @@ def _apply_item(item, entry, acc_verif_id):
         return
     if code in _retry_codes():
         # Nobody compared the name: the account returns to its earlier status so it is sent again
-        from tasaf_payment.services import _inbound_audit_user
+        from tasaf_payment.services import inbound_audit_user
         if account.verification_status == VerificationStatus.PENDING_MUSE:
             account.verification_status = item.previous_status
-            account.save(user=_inbound_audit_user())
+            account.save(user=inbound_audit_user())
         item.decision = 'UNCHECKED'
         return
     payload = {'account_uuid': str(account.uuid), 'muse_reference': acc_verif_id,

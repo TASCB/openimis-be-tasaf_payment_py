@@ -126,9 +126,9 @@ def _release(items, user, previous):
 
 
 def send(user):
-    from tasaf_payment.muse.sender import RECORD_ONLY, SEND, _config, muse_reply, request_type
+    from tasaf_payment.muse.sender import RECORD_ONLY, SEND, muse_config, muse_reply, request_type
 
-    record_only = str(_config('muse_submit_mode', SEND)).upper() == RECORD_ONLY
+    record_only = str(muse_config('muse_submit_mode', SEND)).upper() == RECORD_ONLY
     producer = None if record_only else _producer()
     items, previous = _claim(user)
     message_id = msg_id()
@@ -174,9 +174,9 @@ def acknowledge(org_msg_id, status, status_desc=None):
     items = list(PaylistItem.objects.filter(**{f'json_ext__{KEY}__msg_id': org_msg_id}))
     if not items:
         return None
-    from tasaf_payment.services import _inbound_audit_user
+    from tasaf_payment.services import inbound_audit_user
     state = REJECTED if str(status or '').upper() == 'REJECTED' else RECEIVED
     with transaction.atomic():
-        _stamp(items, _inbound_audit_user(items[0]), status=state, status_desc=status_desc,
+        _stamp(items, inbound_audit_user(items[0]), status=state, status_desc=status_desc,
                answered_at=datetime.now(tz=timezone.utc).isoformat())
     return len(items)

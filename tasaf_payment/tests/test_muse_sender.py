@@ -26,7 +26,7 @@ class MuseSenderTest(SimpleTestCase):
             mock.patch.object(ms, '_log', side_effect=lambda *a, **k: self.logs.append([a[3]]) or self.logs[-1]),
             mock.patch.object(ms, '_close_log', side_effect=lambda entry, status, **k: entry.append(status)),
             mock.patch('coremis_app_integration.govesb.govesb_enabled', return_value=True),
-            mock.patch.object(ms, '_config', side_effect=lambda name, default: default),
+            mock.patch.object(ms, 'muse_config', side_effect=lambda name, default: default),
         ]
         for p in patches:
             p.start()
@@ -58,7 +58,7 @@ class MuseSenderTest(SimpleTestCase):
 
     def test_push_when_configured(self):
         from coremis_app_integration.esb_client import ESBRequestType
-        with mock.patch.object(ms, '_config', side_effect=lambda name, default: 'push' if name == 'muse_request_type' else default):
+        with mock.patch.object(ms, 'muse_config', side_effect=lambda name, default: 'push' if name == 'muse_request_type' else default):
             _, producer = self.send(OK)
         self.assertEqual(producer.publish.call_args.kwargs['request_type'], ESBRequestType.PUSH)
 
@@ -105,7 +105,7 @@ class MuseSenderTest(SimpleTestCase):
         producer.publish.assert_not_called()
 
     def test_record_only_mode_marks_without_sending(self):
-        with mock.patch.object(ms, '_config', side_effect=lambda n, d: 'RECORD_ONLY' if n == 'muse_submit_mode' else d):
+        with mock.patch.object(ms, 'muse_config', side_effect=lambda n, d: 'RECORD_ONLY' if n == 'muse_submit_mode' else d):
             result, producer = self.send(OK)
         self.assertEqual((result.outcome, result.submitted), (ms.RECORDED, True))
         self.assertEqual(self.logs, [['NOT_SENT']])

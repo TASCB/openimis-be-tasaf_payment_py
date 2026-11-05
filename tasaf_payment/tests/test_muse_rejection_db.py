@@ -11,7 +11,7 @@ from tasaf_payment.models import (
     ReturnFeedbackType, VerificationStatus,
 )
 from tasaf_payment.services import (
-    _notify_payroll_if_all_closed, benefits_on_a_paylist, not_on_a_paylist, paid_elsewhere, unpayable_items,
+    notify_payroll_if_all_closed, benefits_on_a_paylist, not_on_a_paylist, paid_elsewhere, unpayable_items,
     withdrawn_awaiting_payment,
 )
 
@@ -161,7 +161,7 @@ class MuseRejectionDbTest(TestCase):
         last_day, _ = self._release_day()
         with mock.patch('payroll.payments_registry.PaymentMethodStorage.get_chosen_payment_method') as strategy, \
                 mock.patch('tasaf_payment.withdrawn_hold.today_eat', return_value=last_day):
-            self.assertFalse(_notify_payroll_if_all_closed(paylist))
+            self.assertFalse(notify_payroll_if_all_closed(paylist))
         strategy.assert_not_called()
 
     def test_withdrawn_payee_paid_on_a_later_paylist_releases_the_payroll(self):

@@ -65,7 +65,7 @@ def _withdraw(account, problem, at, user):
     ).save(username=user.username)
 
 
-def _release(items, reason, user):
+def release_items(items, reason, user):
     from tasaf_payment.models import GepgItemStatus, PaymentAccount, VerificationStatus
     checks = [i for i in items if i.payment_account_id is None]
     if checks:
@@ -283,7 +283,7 @@ class GepgVerificationSender:
                 keep = True
             request.save(update_fields=self.SEND_FIELDS)
             if not keep:
-                _release(items, desc, self.user)
+                release_items(items, desc, self.user)
         logger.info("GePG verification %s -> %s %s", request.acc_verif_id, status, desc[:200])
         return None if keep else desc
 

@@ -21,7 +21,7 @@ def _chunks(iterable, size):
         yield chunk
 
 
-def _build_account_queryset(filters: dict):
+def build_account_queryset(filters: dict):
     """Build a PaymentAccount queryset from flexible filter criteria."""
     from tasaf_payment.models import PaymentAccount, VerificationStatus
 
@@ -77,7 +77,7 @@ def verification_batches(accounts):
     return [(code, chunk) for code, ids in sorted(by_fsp.items()) for chunk in _chunks(ids, size)]
 
 
-def _build_pre_audit_queryset(filters: dict):
+def build_pre_audit_queryset(filters: dict):
     """Build a PaymentAccount queryset of pre-audit candidates."""
     from tasaf_payment.models import PaymentAccount, PreAuditStatus, VerificationStatus
     from tasaf_payment.services import location_descendants_q
@@ -122,7 +122,7 @@ def _build_pre_audit_queryset(filters: dict):
 def run_batch_verification_task(self, filters: dict, user_id: int):
     """Split a filtered account set into chunks for dispatch_verification_chunk."""
     try:
-        qs = _build_account_queryset(filters)
+        qs = build_account_queryset(filters)
         accounts = list(qs.values_list('id', 'fsp_name'))
         total = len(accounts)
 
@@ -193,7 +193,7 @@ def generate_paylists_task(self, user_id, payroll_id, batch_type,
         from tasaf_payment.services import PaylistService
 
         user = User.objects.get(id=user_id)
-        result = PaylistService(user)._generate_sync(
+        result = PaylistService(user).generate_sync(
             payroll_id, batch_type, payment_cycle_id, destination, fsp_code,
         )
         logger.info(
@@ -256,7 +256,7 @@ def send_account_check_task(self, job_uuid, user_id):
 def run_batch_pre_audit_task(self, filters: dict, user_id: int):
     """Split a filtered account set into pre-audit chunks."""
     try:
-        qs = _build_pre_audit_queryset(filters)
+        qs = build_pre_audit_queryset(filters)
         account_ids = list(qs.values_list('id', flat=True))
         total = len(account_ids)
 

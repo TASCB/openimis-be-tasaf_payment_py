@@ -71,7 +71,7 @@ class InboundDecisionTest(SimpleTestCase):
         account = mock.MagicMock(json_ext=json_ext or {})
         with mock.patch.object(services.PaymentAccount.objects, 'get', return_value=account), \
                 mock.patch.object(services, 'MuseVerificationRecord') as record, \
-                mock.patch.object(services, '_inbound_audit_user', return_value='system'), \
+                mock.patch.object(services, 'inbound_audit_user', return_value='system'), \
                 mock.patch.object(services.transaction, 'atomic', return_value=nullcontext()), \
                 mock.patch.object(services, 'household_names', return_value=household), \
                 mock.patch.object(services.MuseVerificationInboundService, '_thresholds', return_value={}):
@@ -128,7 +128,7 @@ class VerificationEventTest(SimpleTestCase):
         account = mock.MagicMock(json_ext=json_ext)
         with mock.patch.object(services.PaymentAccount.objects, 'get', return_value=account), \
                 mock.patch.object(services, 'MuseVerificationRecord'), \
-                mock.patch.object(services, '_inbound_audit_user', return_value='system'), \
+                mock.patch.object(services, 'inbound_audit_user', return_value='system'), \
                 mock.patch.object(services.transaction, 'atomic', return_value=nullcontext()), \
                 mock.patch.object(services, 'emit_verification_event') as emit:
             services.MuseVerificationInboundService().handle_result(

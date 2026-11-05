@@ -1,3 +1,5 @@
+import logging
+
 import graphene
 from gettext import gettext as _
 from django.contrib.auth.models import AnonymousUser
@@ -15,6 +17,8 @@ from tasaf_payment.models import (
     PaymentAccount, WithdrawalCharge, FspMapping, PaymentDestination, BatchType,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _resolve_account_ids(uuids):
     """Convert list of UUIDs to DB IDs."""
@@ -29,6 +33,20 @@ def _resolve_account_ids(uuids):
 def _require_perms(user, perms):
     if type(user) is AnonymousUser or not user.id or not user.has_perms(perms):
         raise ValidationError(_("mutation.authentication_required"))
+
+
+def _error(exc):
+    """Mutation error list: our refusals keep their text, anything else is logged and shown plainly."""
+    from tasaf_payment.account_check import AccountCheckError
+    from tasaf_payment.charges import ChargeError
+    from tasaf_payment.muse.withdrawal import WithdrawalError
+    from tasaf_payment.returned import UnappliedDecisionError
+    if isinstance(exc, ValidationError):
+        return [{'message': '; '.join(exc.messages)}]
+    if isinstance(exc, (ValueError, AccountCheckError, ChargeError, WithdrawalError, UnappliedDecisionError)):
+        return [{'message': str(exc)}]
+    logger.exception("tasaf_payment mutation failed")
+    return [{'message': _("Something went wrong. Try again, or ask ICT to check the server log.")}]
 
 
 # ─── Input types ─────────────────────────────────────────────────────────────
@@ -497,7 +515,7 @@ class SaveWithdrawalChargeMutation(OpenIMISMutation):
             save_band_set(user, code, bands)
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class DeleteWithdrawalChargeInputType(OpenIMISMutation.Input):
@@ -526,7 +544,7 @@ class DeleteWithdrawalChargeMutation(OpenIMISMutation):
                                                if (b['lower_amount'], b['upper_amount']) not in doomed])
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class ImportWithdrawalChargesInputType(OpenIMISMutation.Input):
@@ -551,7 +569,7 @@ class ImportWithdrawalChargesMutation(OpenIMISMutation):
             import_csv(data['csv_content'], user, replace=bool(data.get('replace')), reason=data.get('reason') or '')
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class SaveFspMappingInputType(OpenIMISMutation.Input):
@@ -584,7 +602,7 @@ class SaveFspMappingMutation(OpenIMISMutation):
             save_names(user, code, names + [data['fsp_name']], reason=data.get('reason') or '')
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class DeleteFspMappingInputType(OpenIMISMutation.Input):
@@ -612,7 +630,7 @@ class DeleteFspMappingMutation(OpenIMISMutation):
                     save_names(user, code, [n for n in fsp_names(code) if n not in gone])
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class SeedFspMappingsMutation(OpenIMISMutation):
@@ -631,7 +649,7 @@ class SeedFspMappingsMutation(OpenIMISMutation):
             seed_fsp_mappings(user)
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class ChargeBandInputType(graphene.InputObjectType):
@@ -662,7 +680,7 @@ class SaveFspChargesMutation(OpenIMISMutation):
                           reason=data.get('reason') or '')
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class SaveFspProfileInputType(OpenIMISMutation.Input):
@@ -691,7 +709,7 @@ class SaveFspProfileMutation(OpenIMISMutation):
                             reason=data.get('reason') or '', mobile_prefixes=data.get('mobile_prefixes'))
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class DeleteFspMutation(OpenIMISMutation):
@@ -709,7 +727,7 @@ class DeleteFspMutation(OpenIMISMutation):
             delete_fsp(user, data['fsp_code'])
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class SaveMuseSettingsInputType(OpenIMISMutation.Input):
@@ -742,7 +760,7 @@ class SaveMuseSettingsMutation(OpenIMISMutation):
             propose_settings(user, data, reason=reason)
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class SaveGepgSettingsMutation(OpenIMISMutation):
@@ -763,7 +781,7 @@ class SaveGepgSettingsMutation(OpenIMISMutation):
             propose_settings(user, data, reason=data.get('reason') or '')
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class ResendGepgVerificationMutation(OpenIMISMutation):
@@ -790,7 +808,7 @@ class ResendGepgVerificationMutation(OpenIMISMutation):
                 return [{'message': result.get('error') or 'Nothing was sent'}]
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class ReleaseGepgVerificationMutation(OpenIMISMutation):
@@ -808,7 +826,7 @@ class ReleaseGepgVerificationMutation(OpenIMISMutation):
             release(data['acc_verif_id'], user)
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class MuseChangeInputType(OpenIMISMutation.Input):
@@ -832,7 +850,7 @@ class ApproveMuseChangeMutation(OpenIMISMutation):
             decide(user, data['change_id'], True, data.get('comment'))
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class RejectMuseChangeMutation(OpenIMISMutation):
@@ -850,7 +868,7 @@ class RejectMuseChangeMutation(OpenIMISMutation):
             decide(user, data['change_id'], False, data.get('comment'))
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class CancelMuseChangeMutation(OpenIMISMutation):
@@ -869,7 +887,7 @@ class CancelMuseChangeMutation(OpenIMISMutation):
             cancel(user, data['change_id'], data.get('comment'))
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class DecideUnappliedPaymentMutation(OpenIMISMutation):
@@ -889,7 +907,7 @@ class DecideUnappliedPaymentMutation(OpenIMISMutation):
             decide_unapplied(user, str(data['item_uuid']), data['action'], data.get('note'))
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class CreateUnappliedResendsMutation(OpenIMISMutation):
@@ -912,7 +930,7 @@ class CreateUnappliedResendsMutation(OpenIMISMutation):
                 return [{'message': 'No unapplied payment is ready to be re-sent'}]
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class SendUnappliedWithdrawalsMutation(OpenIMISMutation):
@@ -930,7 +948,7 @@ class SendUnappliedWithdrawalsMutation(OpenIMISMutation):
             send(user)
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)
 
 
 class SendAccountCheckMutation(OpenIMISMutation):
@@ -950,4 +968,4 @@ class SendAccountCheckMutation(OpenIMISMutation):
                 return [{'message': result['error'] or 'GePG did not accept the request'}]
             return None
         except Exception as exc:
-            return [{'message': str(exc)}]
+            return _error(exc)

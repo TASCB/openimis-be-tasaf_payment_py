@@ -45,7 +45,7 @@ from tasaf_payment.validation import PaymentAccountValidation
 logger = logging.getLogger(__name__)
 
 
-def _inbound_audit_user(fallback_obj=None):
+def inbound_audit_user(fallback_obj=None):
     """User for a gateway callback write: current user, else inbound_system_username, else the record's creator."""
     try:
         from core.models import HistoryModel  # noqa: F401  (import guard only)
@@ -238,7 +238,7 @@ class MuseVerificationInboundService:
                               f"returned '{returned_name}' (score {match.score})")
 
         try:
-            user = _inbound_audit_user(account)
+            user = inbound_audit_user(account)
             with transaction.atomic():
                 account.verification_status = new_status
                 account.muse_verification_reference = muse_ref
@@ -465,7 +465,7 @@ class PaylistService:
             return value
         return None
 
-    def _payroll_status_error(self, payroll_id):
+    def payroll_status_error(self, payroll_id):
         """Return an error string if the payroll may not be disbursed, else None."""
         from payroll.models import Payroll
 
@@ -500,7 +500,7 @@ class PaylistService:
             )
             from tasaf_payment.apps import TasafPaymentConfig
 
-            status_error = self._payroll_status_error(payroll_id)
+            status_error = self.payroll_status_error(payroll_id)
             if status_error:
                 return {'success': False, 'error': status_error}
 
@@ -552,13 +552,13 @@ class PaylistService:
                         exc_info=True,
                     )
 
-            return self._generate_sync(payroll_id, batch_type, payment_cycle_id, destination, fsp_code)
+            return self.generate_sync(payroll_id, batch_type, payment_cycle_id, destination, fsp_code)
 
         except Exception as exc:
             logger.exception("PaylistService.generate failed")
             return output_exception(model_name="Paylist", method="generate", exception=exc)
 
-    def _generate_sync(
+    def generate_sync(
         self,
         payroll_id,
         batch_type: str,
@@ -578,7 +578,7 @@ class PaylistService:
             )
             from tasaf_payment.apps import TasafPaymentConfig
 
-            status_error = self._payroll_status_error(payroll_id)
+            status_error = self.payroll_status_error(payroll_id)
             if status_error:
                 return {'success': False, 'error': status_error}
 
@@ -719,7 +719,7 @@ class PaylistService:
         from tasaf_payment.charges import ChargeError, gross_up
         from tasaf_payment.models import FspProfile
 
-        error = self._payroll_status_error(payroll_id)
+        error = self.payroll_status_error(payroll_id)
         if error:
             return {'success': False, 'error': error}
         destination = self._resolve_destination(destination)
@@ -1362,12 +1362,12 @@ def settle_item(item, settled_at=None, reference=None):
         item.settled_at = _parse_dt(settled_at) or datetime.now(tz=timezone.utc)
         if reference:
             item.muse_reference = reference
-        item.save(user=_inbound_audit_user(item))
+        item.save(user=inbound_audit_user(item))
         _close_paylist_if_complete(item.paylist)
 
 
 def unapply_item(item, reason_code=None, reason_description=None, reference=None):
-    user = _inbound_audit_user(item)
+    user = inbound_audit_user(item)
     with transaction.atomic():
         ReturnFeedback(
             paylist_item=item,
@@ -1433,7 +1433,7 @@ def take_over_send_in_progress(paylist, org_msg_id) -> bool:
     paylist.json_ext = ext
     paylist.status = PaylistStatus.SUBMITTED
     paylist.submitted_at = datetime.now(tz=timezone.utc)
-    paylist.save(user=_inbound_audit_user(paylist))
+    paylist.save(user=inbound_audit_user(paylist))
     logger.info("Paylist %s: MUSE replied before Submit finished; now SUBMITTED", paylist.uuid)
     return True
 
@@ -1450,7 +1450,7 @@ def apply_muse_batch_status(paylist, status, description=None, at=None, user=Non
     paylist.status = status
     paylist.muse_status_desc = description
     paylist.muse_status_at = at or datetime.now(tz=timezone.utc)
-    paylist.save(user=user or _inbound_audit_user(paylist))
+    paylist.save(user=user or inbound_audit_user(paylist))
     logger.info("Paylist %s -> %s (%s)", paylist.uuid, status, description)
     emit_muse_event(paylist, 'batch_status', status=status, description=description)
     return True
@@ -1467,14 +1467,14 @@ def _close_paylist_if_complete(paylist) -> bool:
         return False
     paylist.status = PaylistStatus.CLOSED
     paylist.closed_at = datetime.now(tz=timezone.utc)
-    paylist.save(user=_inbound_audit_user(paylist))
+    paylist.save(user=inbound_audit_user(paylist))
     logger.info("Paylist %s closed — all items terminal", paylist.uuid)
     emit_muse_event(paylist, 'closed', status=PaylistStatus.CLOSED)
-    _notify_payroll_if_all_closed(paylist)
+    notify_payroll_if_all_closed(paylist)
     return True
 
 
-def _notify_payroll_if_all_closed(paylist) -> bool:
+def notify_payroll_if_all_closed(paylist) -> bool:
     """Hand the payroll to reconciliation once no sibling paylist is in flight; a failure never loses the settlement."""
     payroll_id = paylist.payroll_id
     if not payroll_id:
@@ -1526,7 +1526,7 @@ def _notify_payroll_if_all_closed(paylist) -> bool:
         }
 
         strategy.acknowledge_of_reponse_view(
-            payroll, summary, _inbound_audit_user(paylist), [],
+            payroll, summary, inbound_audit_user(paylist), [],
         )
         logger.info("Payroll %s acknowledged: %s", payroll_id, summary)
         return True
@@ -1642,14 +1642,14 @@ class BatchVerificationService:
         self.user = user
 
     def dispatch(self, filters: dict) -> dict:
-        from tasaf_payment.tasks import _build_account_queryset, run_batch_verification_task
+        from tasaf_payment.tasks import build_account_queryset, run_batch_verification_task
         try:
             return queue_or_inline(
                 task=run_batch_verification_task,
                 task_args=(filters, self.user.id),
                 inline=lambda ids: verification_dispatcher(self.user).dispatch(
                     ids, before_first_payment=bool(filters.get('before_first_payment'))),
-                count_ids=lambda: _build_account_queryset(filters).values_list('id', flat=True),
+                count_ids=lambda: build_account_queryset(filters).values_list('id', flat=True),
                 label='BatchVerificationService.dispatch',
                 # Inline dispatch publishes to GovESB, so it is capped.
                 bounded=True,
@@ -1670,13 +1670,13 @@ class BatchPreAuditService:
         self.user = user
 
     def dispatch(self, filters: dict) -> dict:
-        from tasaf_payment.tasks import _build_pre_audit_queryset, run_batch_pre_audit_task
+        from tasaf_payment.tasks import build_pre_audit_queryset, run_batch_pre_audit_task
         try:
             return queue_or_inline(
                 task=run_batch_pre_audit_task,
                 task_args=(filters, self.user.id),
                 inline=lambda ids: PreAuditService(self.user).run_pre_audit(ids),
-                count_ids=lambda: _build_pre_audit_queryset(filters).values_list('id', flat=True),
+                count_ids=lambda: build_pre_audit_queryset(filters).values_list('id', flat=True),
                 label='BatchPreAuditService.dispatch',
                 bounded=False,
             )

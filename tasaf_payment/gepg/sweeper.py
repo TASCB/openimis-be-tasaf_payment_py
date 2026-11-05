@@ -34,12 +34,12 @@ RELEASABLE = ('SENDING', 'SENT', 'ACCEPTED')
 
 
 def release_request(request, reason, user):
-    from tasaf_payment.gepg.sender import _release
+    from tasaf_payment.gepg.sender import release_items
     from tasaf_payment.models import GepgItemStatus, GepgRequestStatus
 
     with transaction.atomic():
         pending = list(request.items.filter(status=GepgItemStatus.PENDING).select_related('request'))
-        _release(pending, reason, user)
+        release_items(pending, reason, user)
         request.items.filter(status=GepgItemStatus.RELEASED, id__in=[i.id for i in pending]) \
             .update(status=GepgItemStatus.EXPIRED)
         request.status = GepgRequestStatus.EXPIRED
@@ -66,7 +66,7 @@ def release(acc_verif_id, user):
 
 def expire(hours, apply=False):
     from tasaf_payment.models import GepgItemStatus
-    from tasaf_payment.services import _inbound_audit_user
+    from tasaf_payment.services import inbound_audit_user
 
     rows = []
     for request in overdue(hours=hours):
@@ -74,5 +74,5 @@ def expire(hours, apply=False):
                      'sent_at': request.sent_at.isoformat() if request.sent_at else None,
                      'accounts': request.items.filter(status=GepgItemStatus.PENDING).count()})
         if apply:
-            release_request(request, f'No GePG answer within {hours} hours', _inbound_audit_user())
+            release_request(request, f'No GePG answer within {hours} hours', inbound_audit_user())
     return rows

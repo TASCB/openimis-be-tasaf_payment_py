@@ -70,10 +70,10 @@ def decide(failure_class, transient_strikes, limit):
 
 def handle_batch_rejection(paylist, status_desc):
     from tasaf_payment.models import PaylistItemStatus
-    from tasaf_payment.services import _inbound_audit_user
+    from tasaf_payment.services import inbound_audit_user
 
     failures, leftover = parse(status_desc)
-    user = _inbound_audit_user(paylist)
+    user = inbound_audit_user(paylist)
     pending = list(paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING)
                    .select_related('payment_account__group_beneficiary__group'))
     by_account = {}

@@ -105,7 +105,7 @@ class HandleRejectionTest(SimpleTestCase):
     def setUp(self):
         self.withdrawn = []
         for target, kwargs in (
-            ('tasaf_payment.services._inbound_audit_user', {'return_value': object()}),
+            ('tasaf_payment.services.inbound_audit_user', {'return_value': object()}),
             ('tasaf_payment.events.emit_muse_event', {}),
             ('tasaf_payment.muse.rejection.withdraw_item',
              {'side_effect': lambda i, reason, cls, p, u: self.withdrawn.append((i.id, cls)) or 'fu-1'}),

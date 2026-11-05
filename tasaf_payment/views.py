@@ -202,6 +202,10 @@ def account_check_upload(request):
     upload = request.FILES.get('file')
     if not upload:
         return Response({'success': False, 'error': 'No file'}, status=_status.HTTP_400_BAD_REQUEST)
+    max_mb = int(getattr(TasafPaymentConfig, 'account_check_max_mb', 10) or 10)
+    if upload.size > max_mb * 1024 * 1024:
+        error = f'The file is larger than {max_mb} MB; split it and upload each part'
+        return Response({'success': False, 'error': error}, status=_status.HTTP_400_BAD_REQUEST)
     try:
         job = create_job(request.user, upload.name, upload.read())
     except AccountCheckError as exc:

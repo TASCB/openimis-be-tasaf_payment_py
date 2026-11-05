@@ -11,16 +11,19 @@ CACHE_KEY = 'tasaf.preaudit.compliance:{}'
 CACHE_SECONDS = 600
 
 
-def _dec(value):
+def as_decimal(value):
+    """A jsonb number (int, float, str or None) as Decimal; anything unusable is 0."""
+    if value in (None, ''):
+        return Decimal('0')
     try:
-        return Decimal(str(value)) if value not in (None, '') else Decimal('0')
-    except Exception:
+        return Decimal(str(value))
+    except (ArithmeticError, ValueError, TypeError):
         return Decimal('0')
 
 
 def _count(breakdown, key):
     raw = breakdown.get(f'{key}_raw')
-    return int(_dec(raw if raw is not None else breakdown.get(key)))
+    return int(as_decimal(raw if raw is not None else breakdown.get(key)))
 
 
 def rule_params(payment_plan):
@@ -32,7 +35,7 @@ def rule_params(payment_plan):
 
 
 def expected(breakdown, params):
-    disabled = bool(breakdown.get('has_disability')) or _dec(breakdown.get('disability_amount')) > 0
+    disabled = bool(breakdown.get('has_disability')) or as_decimal(breakdown.get('disability_amount')) > 0
     children = _count(breakdown, 'young_child_count')
     primary = _count(breakdown, 'primary_count')
     secondary = _count(breakdown, 'secondary_count')
@@ -45,7 +48,7 @@ def expected(breakdown, params):
     }
     raw_total = sum(parts.values())
     capped = min(raw_total, params['household_cap_amount'])
-    penalties = sum((_dec(v) for k, v in breakdown.items() if k.endswith('_penalty') or k == 'overpayment'),
+    penalties = sum((as_decimal(v) for k, v in breakdown.items() if k.endswith('_penalty') or k == 'overpayment'),
                     Decimal('0'))
     return {'parts': parts, 'raw_total': raw_total, 'cap_cut': raw_total - capped, 'penalties': penalties,
             'total': capped - penalties, 'children': min(children, params['young_child_cap_count']),
@@ -65,14 +68,14 @@ def assess(breakdown, amount, params):
     if amount is None:
         return {'status': DATA_ERROR, 'reason': 'NO_AMOUNT'}
     exp = expected(breakdown, params)
-    paid = _dec(amount)
+    paid = as_decimal(amount)
     variance = paid - exp['total']
     if abs(variance) <= TOLERANCE:
         status = MATCH
     else:
         status = OVERPAID if variance > 0 else UNDERPAID
     differs = [c for c in COMPONENTS if c != 'base' and PAID_KEYS[c] in breakdown
-               and abs(_dec(breakdown.get(PAID_KEYS[c])) - exp['parts'][c]) > TOLERANCE]
+               and abs(as_decimal(breakdown.get(PAID_KEYS[c])) - exp['parts'][c]) > TOLERANCE]
     return {'status': status, 'reason': ','.join(differs), 'expected': exp, 'paid': paid, 'variance': variance}
 
 

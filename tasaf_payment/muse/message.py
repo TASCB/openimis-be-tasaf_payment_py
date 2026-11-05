@@ -145,7 +145,7 @@ def assemble(ids, settings, payees, now, payment_type=PAYMENT_TYPE):
     return {'message': message, 'digitalSignature': ''}
 
 
-def _representative_names(paylist, group_ids=None):
+def representative_names(paylist, group_ids=None):
     from individual.models import GroupIndividual
 
     if group_ids is None:
@@ -190,10 +190,10 @@ def payee_rows(paylist, limit=None):
              .order_by('date_created', 'id'))
     if limit is None:
         items = list(items)
-        names = _representative_names(paylist)
+        names = representative_names(paylist)
     else:
         items = list(items[:limit])
-        names = _representative_names(
+        names = representative_names(
             paylist, [getattr(i.payment_account.group_beneficiary, 'group_id', None) for i in items])
     profiles = _fsp_profiles([i.payment_account for i in items])
     unapplied = getattr(paylist, 'payment_type', PAYMENT_TYPE) == UNAPPLIED_TYPE

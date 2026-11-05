@@ -37,7 +37,7 @@ class MuseSendRaceDbTest(TestCase):
             mock.patch('tasaf_payment.services.paid_elsewhere', return_value=no_rows),
             mock.patch('tasaf_payment.services.unpayable_items', return_value=no_rows),
             mock.patch.object(muse_sender.muse_message, 'check', return_value=[]),
-            mock.patch.object(muse_sender, '_config', side_effect=lambda name, default: default),
+            mock.patch.object(muse_sender, 'muse_config', side_effect=lambda name, default: default),
             mock.patch('coremis_app_integration.govesb.govesb_enabled', return_value=True),
         ]
         for p in patches:

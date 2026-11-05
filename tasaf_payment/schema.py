@@ -901,7 +901,7 @@ class Query(graphene.ObjectType):
 
     def resolve_verification_batch_preview(self, info, sample_rows=20, **kwargs):
         from tasaf_payment.services import verification_dispatcher
-        from tasaf_payment.tasks import _build_account_queryset
+        from tasaf_payment.tasks import build_account_queryset
 
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_run_verification_perms)
         before_first_payment = bool(kwargs.pop('before_first_payment', False))
@@ -909,7 +909,7 @@ class Query(graphene.ObjectType):
         if not filters:
             raise ValueError(_("tasaf_payment.validation.batch_verification_requires_filter"))
         filters['before_first_payment'] = before_first_payment
-        ids = list(_build_account_queryset(filters).values_list('id', flat=True))
+        ids = list(build_account_queryset(filters).values_list('id', flat=True))
         return verification_dispatcher(info.context.user).preview(
             ids, sample_rows=max(0, min(int(sample_rows or 0), 200)), before_first_payment=before_first_payment)
 

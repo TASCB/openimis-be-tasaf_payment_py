@@ -41,7 +41,7 @@ def deadline(payroll, item):
 
 def lapse_expired(payroll_id, today=None, apply=True):
     from payroll.models import Payroll
-    from tasaf_payment.services import _inbound_audit_user, withdrawn_awaiting_payment
+    from tasaf_payment.services import inbound_audit_user, withdrawn_awaiting_payment
 
     today = today or today_eat()
     payroll = Payroll.objects.filter(id=payroll_id).select_related('payment_cycle').first()
@@ -54,7 +54,7 @@ def lapse_expired(payroll_id, today=None, apply=True):
 
     with transaction.atomic():
         for item in due:
-            user = _inbound_audit_user(item)
+            user = inbound_audit_user(item)
             cut_off = deadline(payroll, item)
             ext = dict(item.json_ext or {})
             ext[LAPSED_KEY] = {'at': datetime.now(tz=timezone.utc).isoformat(), 'deadline': cut_off.isoformat()}
@@ -97,7 +97,7 @@ def held_payrolls():
 
 def release_expired_holds(today=None, apply=True):
     from tasaf_payment.models import Paylist, PaylistStatus
-    from tasaf_payment.services import _notify_payroll_if_all_closed
+    from tasaf_payment.services import notify_payroll_if_all_closed
 
     released = {}
     for payroll_id in list(held_payrolls()):
@@ -109,7 +109,7 @@ def release_expired_holds(today=None, apply=True):
             closed = Paylist.objects.filter(payroll_id=payroll_id, is_deleted=False,
                                             status=PaylistStatus.CLOSED).first()
             if closed:
-                _notify_payroll_if_all_closed(closed)
+                notify_payroll_if_all_closed(closed)
     return released
 
 
