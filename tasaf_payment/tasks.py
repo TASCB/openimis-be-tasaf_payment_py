@@ -1,30 +1,4 @@
-"""
-tasaf_payment.tasks
-====================
-Celery tasks for MUSE-driven verification and paylist operations at scale.
-
-Task topology
--------------
-
-Batch verification dispatch:
-
-    run_batch_verification_task(filters)
-        │
-        ├── dispatch_verification_chunk(chunk_1)  ← worker A
-        ├── dispatch_verification_chunk(chunk_2)  ← worker B
-        └── dispatch_verification_chunk(chunk_N)  ← worker C
-
-Each chunk marks accounts as PENDING_MUSE and publishes verification
-requests to GovESB. MUSE will push results back asynchronously via
-MuseVerificationInboundService.handle_result().
-
-Pre-audit batch:
-
-    run_batch_pre_audit_task(filters)
-        │
-        └── pre_audit_chunk(chunk)  ← worker
-
-"""
+"""Celery tasks: batch account verification (GePG), batch pre-audit, paylist generation, Submit and GePG resend."""
 
 import logging
 from itertools import islice
@@ -48,20 +22,7 @@ def _chunks(iterable, size):
 
 
 def _build_account_queryset(filters: dict):
-    """
-    Build a PaymentAccount queryset from flexible filter criteria.
-
-    Supported filters:
-        account_ids:         list[int]  — explicit IDs (from UI selection)
-        account_uuids:       list[str]  — explicit UUIDs
-        benefit_plan_id:     int        — all accounts in this benefit plan
-        verification_status: int        — filter by status (default: PENDING)
-        fsp_type:            str        — 'BANK' or 'MOBILE'
-        fsp_name_icontains:  str        — FSP name contains (the list's FSP filter)
-        account_number_icontains: str   — account number contains (the list's filter)
-        location_id:         int        — households in this PAA (or below it)
-        rerun:               bool       — if True, also include FAILED accounts
-    """
+    """Build a PaymentAccount queryset from flexible filter criteria."""
     from tasaf_payment.models import PaymentAccount, VerificationStatus
 
     qs = PaymentAccount.objects.filter(is_deleted=False)
@@ -117,21 +78,7 @@ def verification_batches(accounts):
 
 
 def _build_pre_audit_queryset(filters: dict):
-    """
-    Build a PaymentAccount queryset of pre-audit candidates.
-
-    Supported filters:
-        account_ids:     list[int]  — explicit IDs (from UI selection)
-        account_uuids:   list[str]  — explicit UUIDs
-        benefit_plan_id: str        — all accounts in this benefit plan
-        fsp_type:        str        — 'BANK' or 'MOBILE'
-        location_id:     int        — households in this PAA (or below it)
-        rerun:           bool       — if True, also re-check accounts already FAILED
-
-    Only VERIFIED accounts are candidates. Pre-auditing an unverified account would just
-    stamp it FAILED with "Account is not VERIFIED" — noise that buries the accounts a
-    person actually has to act on.
-    """
+    """Build a PaymentAccount queryset of pre-audit candidates."""
     from tasaf_payment.models import PaymentAccount, PreAuditStatus, VerificationStatus
     from tasaf_payment.services import location_descendants_q
 
@@ -173,13 +120,7 @@ def _build_pre_audit_queryset(filters: dict):
     name='tasaf_payment.run_batch_verification_task',
 )
 def run_batch_verification_task(self, filters: dict, user_id: int):
-    """
-    Entry-point for large-scale MUSE verification dispatch.
-
-    Accepts *filters* (see _build_account_queryset) and fans out chunks to
-    dispatch_verification_chunk workers. Each chunk marks accounts as
-    PENDING_MUSE and publishes verification requests to GovESB.
-    """
+    """Split a filtered account set into chunks for dispatch_verification_chunk."""
     try:
         qs = _build_account_queryset(filters)
         accounts = list(qs.values_list('id', 'fsp_name'))
@@ -214,11 +155,7 @@ def run_batch_verification_task(self, filters: dict, user_id: int):
 )
 def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_index: int = 0,
                                 before_first_payment: bool = False):
-    """
-    Mark a chunk of PaymentAccounts as PENDING_MUSE and publish to GovESB.
-
-    Results will be received asynchronously via MuseVerificationInboundService.
-    """
+    """Mark a chunk of accounts PENDING_MUSE and send them for verification over GovESB; answers arrive later."""
     try:
         from core.models import User
         from tasaf_payment.services import verification_dispatcher
@@ -250,13 +187,7 @@ def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_ind
 )
 def generate_paylists_task(self, user_id, payroll_id, batch_type,
                            payment_cycle_id=None, destination=None, fsp_code=None):
-    """
-    Build a payroll's Paylists (and bulk-create their items) off the request
-    thread. Used for large payrolls (see PaylistService.generate dispatcher).
-
-    Delegates to PaylistService._generate_sync, which applies the per-FSP
-    50k-batch split and bulk_creates line items.
-    """
+    """Build a payroll's Paylists (and bulk-create their items) off the request thread."""
     try:
         from core.models import User
         from tasaf_payment.services import PaylistService
@@ -323,13 +254,7 @@ def send_account_check_task(self, job_uuid, user_id):
     name='tasaf_payment.run_batch_pre_audit_task',
 )
 def run_batch_pre_audit_task(self, filters: dict, user_id: int):
-    """
-    Entry-point for large-scale pre-audit.
-
-    Accepts *filters* (see _build_pre_audit_queryset) and fans out chunks to
-    pre_audit_chunk workers. Takes filters rather than an id list so a PAA-wide run is
-    never limited to whatever a searcher page had loaded.
-    """
+    """Split a filtered account set into pre-audit chunks."""
     try:
         qs = _build_pre_audit_queryset(filters)
         account_ids = list(qs.values_list('id', flat=True))

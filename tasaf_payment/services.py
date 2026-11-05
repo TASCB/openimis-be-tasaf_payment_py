@@ -46,19 +46,7 @@ logger = logging.getLogger(__name__)
 
 
 def _inbound_audit_user(fallback_obj=None):
-    """
-    Resolve the user to attribute an inbound gateway write to.
-
-    Gateway callbacks are machine-to-machine: there is no logged-in user, and
-    ``HistoryModel.save()`` raises without one. Resolution order:
-
-    1. ``get_current_user()`` — set when a real request context exists;
-    2. ``TasafPaymentConfig.inbound_system_username`` — the configured service account;
-    3. whoever created the record being updated, so the audit chain stays non-null.
-
-    Returns None if none resolve; callers should then let the save raise rather than
-    silently dropping the gateway's message.
-    """
+    """User for a gateway callback write: current user, else inbound_system_username, else the record's creator."""
     try:
         from core.models import HistoryModel  # noqa: F401  (import guard only)
         from core.utils import get_current_user
@@ -84,10 +72,7 @@ def _inbound_audit_user(fallback_obj=None):
 
 
 def _parse_dt(value):
-    """Parse an ISO-8601 timestamp, returning None on anything unusable.
-
-    Naive values are treated as UTC — the gateway sends wall-clock times.
-    """
+    """Parse an ISO-8601 timestamp, returning None on anything unusable."""
     if not value:
         return None
     try:
@@ -103,17 +88,7 @@ def _parse_dt(value):
 
 
 def _govesb_publish(topic: str, payload: dict, *, user_id=None, context: str = "") -> dict:
-    """
-    Send ``payload`` to MUSE over the shared GovESB transport
-    (``coremis_app_integration.govesb.GovESBProducer``).
-
-    This is deliberately fail-soft: if the coremis adaptor is not installed, or
-    GovESB is disabled/misconfigured, or the send raises, it logs and returns a
-    result dict instead of propagating — so the surrounding payment-state
-    transitions (PENDING_MUSE, SUBMITTED, ...) still commit in environments
-    without live ESB credentials, exactly as the previous stub behaved. The
-    ESB-disabled case is itself a clean no-op inside the producer.
-    """
+    """Send to MUSE over GovESB; fail-soft (returns a result, never raises) so state changes still commit."""
     try:
         from coremis_app_integration.govesb import GovESBProducer
     except ImportError:
@@ -131,16 +106,7 @@ def _govesb_publish(topic: str, payload: dict, *, user_id=None, context: str = "
 
 
 def queue_or_inline(task, task_args, inline, count_ids, label, bounded):
-    """Run a batch through Celery, falling back to inline when no broker is reachable.
-
-    Dev has no broker; the dockerised PSSN stack does. The feature must work in both, so
-    an enqueue failure is a fallback, not an error.
-
-    *bounded* caps the inline path against
-    ``TasafPaymentConfig.batch_inline_fallback_limit``. Use it wherever running inline
-    would do outbound I/O -- a synchronous GovESB blast is worse than a clear refusal.
-    Leave it off for DB-only work, where finishing matters more than latency.
-    """
+    """Run a batch through Celery, falling back to inline when no broker is reachable."""
     from tasaf_payment.apps import TasafPaymentConfig
 
     try:
@@ -173,13 +139,7 @@ def queue_or_inline(task, task_args, inline, count_ids, label, bounded):
 
 
 def location_descendants_q(location_id, base='group_beneficiary__group__location'):
-    """Q matching accounts whose household sits at *location_id* or anywhere below it.
-
-    openIMIS locations are a fixed four-level hierarchy (Region/District/Ward/Village),
-    so the parent chain is walked explicitly rather than recursively -- the same shape
-    payroll uses for its beneficiary location filter. A PAA is a district, which is
-    level two, so the deeper levels are what this actually reaches.
-    """
+    """Q matching accounts whose household sits at *location_id* or anywhere below it."""
     return (
         Q(**{f'{base}_id': location_id})
         | Q(**{f'{base}__parent_id': location_id})
@@ -189,13 +149,7 @@ def location_descendants_q(location_id, base='group_beneficiary__group__location
 
 
 class PaymentAccountService(BaseService):
-    """
-    Standard openIMIS CRUD service for PaymentAccount.
-
-    Emits register_service_signal hooks on create/update/delete so other
-    modules can listen (e.g. to enforce business rules without modifying
-    this module).
-    """
+    """Standard openIMIS CRUD service for PaymentAccount."""
 
     OBJECT_TYPE = PaymentAccount
 
@@ -216,15 +170,7 @@ class PaymentAccountService(BaseService):
 
 
 def recipient_name(account) -> str:
-    """The household representative's name -- what the account holder name is matched against.
-
-    NOT the household head: measured on real data, the two differ in 37% of
-    households, so using the head would fail verification for a third of the
-    caseload and look like an FSP mismatch rather than our error.
-
-    NOT PaymentAccount.account_name either -- that currently holds the HHID
-    (the questionnaire never collected account details), so it is unusable as a name.
-    """
+    """The household representative's name -- what the account holder name is matched against."""
     from individual.models import GroupIndividual
 
     group = getattr(getattr(account, 'group_beneficiary', None), 'group', None)
@@ -244,24 +190,7 @@ def recipient_name(account) -> str:
 
 
 class MuseVerificationInboundService:
-    """
-    Applies one account's verification result; called by gepg.inbound for each answered item.
-
-    Expected payload:
-    {
-        "account_uuid":       "...",
-        "muse_reference":     "<AccVerifId>",
-        "verification_type":  "FSP_ACCOUNT" | "MOBILE_VALIDATION" | "ACTIVE_CHECK",
-        "result":             "PASSED" | "FAILED" | "MANUAL",
-        "returned_name":      "..."  (optional),
-        "failure_reason":     "..." | null,
-        "raw_response":       {...}
-    }
-
-    With ``returned_name`` (the holder name the PSP holds) TASAF decides by name match
-    (name_match.py) and ``result`` is optional; only a gateway FAILED overrides that decision.
-    Without it, the gateway's ``result`` is taken as the verdict.
-    """
+    """Applies one account's verification result; called by gepg.inbound for each answered item."""
 
     _DECISION_TO_RESULT = {
         name_match.VERIFIED: 'PASSED',
@@ -276,11 +205,7 @@ class MuseVerificationInboundService:
     }
 
     def handle_result(self, payload: dict) -> dict:
-        """
-        Update the PaymentAccount from one result and write the audit record.
-
-        Returns: {'success': bool, 'account_uuid': str, 'error': str|None}
-        """
+        """Update the PaymentAccount from one result and write the audit record."""
         account_uuid = payload.get('account_uuid')
         try:
             account = PaymentAccount.objects.get(uuid=account_uuid, is_deleted=False)
@@ -403,14 +328,7 @@ def household_names(account):
 
 
 class ManualApprovalService:
-    """
-    Approve or reject accounts whose verification came back MANUAL (borderline).
-
-    approved=True  → VERIFIED  (cleared for payment)
-    approved=False → FAILED    (must resubmit with corrected data)
-
-    Writes reviewer identity and notes into json_ext for audit trail.
-    """
+    """Approve or reject accounts whose verification came back MANUAL (borderline)."""
 
     def __init__(self, user):
         self.user = user
@@ -452,31 +370,14 @@ class ManualApprovalService:
 
 
 class PreAuditService:
-    """
-    Pre-audit and claims validation checks for verified accounts.
-
-    Runs business rule checks before a paylist can be generated.
-    Accounts must be VERIFIED and pass all checks to reach pre_audit_status=PASSED.
-
-    Current checks:
-    - Account must be VERIFIED (not PENDING / FAILED / MANUAL)
-    - Account must be is_primary=True
-    - Account must have a linked active GroupBeneficiary
-
-    Additional claims validation rules can be added here without touching
-    other modules — same signal/hook pattern as PaymentAccountService.
-    """
+    """Pre-audit and claims validation checks for verified accounts."""
 
     def __init__(self, user):
         self.user = user
 
     @check_authentication
     def run_pre_audit(self, account_ids: list) -> dict:
-        """
-        Run pre-audit checks on the supplied account IDs.
-
-        Returns: {'success': bool, 'passed': int, 'failed': int, 'error': str|None}
-        """
+        """Run pre-audit checks on the supplied account IDs."""
         try:
             accounts = PaymentAccount.objects.filter(
                 id__in=account_ids,
@@ -521,15 +422,7 @@ class PreAuditService:
 
     @staticmethod
     def _check_account(account: PaymentAccount) -> list:
-        """
-        Return a list of failure reason CODES for this account.
-        Empty list means the account passes pre-audit.
-
-        Codes, not prose: these are stored on json_ext and rendered in the Pre-audit
-        tab's Reason column, so the wording belongs in the frontend translations
-        (`tasafPayment.preAudit.reason.<CODE>`). Rows written before this change hold
-        English sentences; the frontend falls back to showing those verbatim.
-        """
+        """Return a list of failure reason CODES for this account."""
         reasons = []
         if account.verification_status != VerificationStatus.VERIFIED:
             reasons.append('NOT_VERIFIED')
@@ -549,17 +442,7 @@ class PreAuditService:
 
 
 class PaylistService:
-    """
-    Generate, approve, and submit paylists to MUSE via GovESB.
-
-    One payroll can produce multiple paylists (e.g., one Bank + one MNO).
-    The paylist is the TASAF-specific dispatch batch — not the raw payroll.
-
-    generate():  Build Paylist + PaylistItems from verified + pre-audited accounts.
-    approve():   Move paylist from PENDING_APPROVAL → APPROVED.
-    submit():    Move paylist from APPROVED → SUBMITTED and publish to GovESB.
-
-    """
+    """Generate, approve, and submit paylists to MUSE via GovESB."""
 
     GOVESB_TOPIC_PAYMENT_SUBMIT = 'tasaf.payment.submit'
     GOVESB_TOPIC_PAYMENT_SUBMIT_BY_DESTINATION = {
@@ -574,10 +457,7 @@ class PaylistService:
 
     @staticmethod
     def _resolve_destination(destination):
-        """Normalise a destination to a PaymentDestination value, or None if unknown.
-
-        Absent/blank means MUSE, so pre-GePG callers keep working unchanged.
-        """
+        """Normalise a destination to a PaymentDestination value, or None if unknown."""
         if not destination:
             return PaymentDestination.MUSE.value
         value = str(destination).strip().upper()
@@ -611,16 +491,7 @@ class PaylistService:
         destination: str = None,  # MUSE / GEPG — defaults to MUSE
         fsp_code: str = None,
     ) -> dict:
-        """
-        Generate one or more Paylists from verified + pre-audited accounts.
-
-        Thin dispatcher: for large payrolls (eligible benefits >
-        ``TasafPaymentConfig.paylist_async_threshold``) the work is handed to the
-        ``generate_paylists_task`` Celery task so the request returns immediately;
-        otherwise it runs inline. If enqueuing fails (e.g. no broker in dev) it
-        falls back to running inline. The heavy lifting lives in
-        :meth:`_generate_sync`.
-        """
+        """Generate one or more Paylists from verified + pre-audited accounts."""
         try:
             from payroll.models import (
                 BenefitConsumption,
@@ -696,27 +567,8 @@ class PaylistService:
         fsp_code: str = None,
         resends_only: bool = False,
     ) -> dict:
-        """
-        Build the Paylists + items (the heavy worker behind :meth:`generate`).
-
-        Only accounts with verification_status=VERIFIED, pre_audit_status=PASSED,
-        is_primary=True, is_deleted=False are included.
-
-        Batching rule (MUSE): a paylist is BANK or MNO, never both, and the eligible accounts
-        are split into Paylists of at most ``TasafPaymentConfig.paylist_max_batch_size``
-        transactions (default 50000; 0/None = no cap).
-        Sibling batches from one run share a ``batch_group`` UUID and carry
-        ``batch_sequence`` (1..N) / ``batch_total`` (N).
-
-        Line items are written with ``bulk_create`` (audit columns set explicitly)
-        for throughput; this bypasses per-item simple_history rows by design — the
-        Paylist header keeps full history, and items are immutable batch lines.
-
-        Returns: {'success': bool, 'paylists': [{paylist_uuid, batch_type,
-        batch_sequence, batch_total, item_count}], 'paylist_count': int,
-        'total_items': int, 'paylist_uuid': str (first), 'item_count': int
-        (total), 'error': str|None}
-        """
+        """Build the paylists and items: BANK or MNO only, split at paylist_max_batch_size; items use bulk_create
+        (no per-item history by design)."""
         try:
             from payroll.models import (
                 BenefitConsumption,
@@ -962,14 +814,7 @@ class PaylistService:
         return origins
 
     def _build_paylist_item(self, paylist, benefit, account, now, user_pk, origin=None):
-        """One line. When charges are enabled the transfer is grossed up so the beneficiary
-        withdraws the entitlement in full; net/charge/gross are all stored because
-        reconciliation compares MUSE's gross against the benefit's net.
-
-        A missing tariff band is NOT treated as a zero charge -- that would underpay by the
-        fee, the exact failure this feature prevents -- so the line is left un-grossed and
-        flagged for the operator.
-        """
+        """One line, grossed up when charges are on; a missing tariff band is flagged, never charged as zero."""
         from tasaf_payment.apps import TasafPaymentConfig
         net = benefit.amount
         charge = None
@@ -1029,11 +874,7 @@ class PaylistService:
             return None
 
     def approve(self, paylist_uuid: str) -> dict:
-        """Approve the paylist's CURRENT step in the two-level Approval Engine sign-off.
-
-        The paylist only reaches APPROVED once BOTH steps are signed by two DIFFERENT approvers
-        (the engine's finalize adapter flips the status). A paylist without an engine request is
-        refused, never approved by one person."""
+        """Sign the current step of the two-person approval; a paylist without one is refused."""
         try:
             paylist = Paylist.objects.get(uuid=paylist_uuid, is_deleted=False)
             if paylist.status != PaylistStatus.PENDING_APPROVAL:
@@ -1201,9 +1042,8 @@ GENERATION_FSP_TYPES = {'BANK': 'BANK', 'MNO': 'MOBILE'}
 
 
 def eligible_accounts(individual_ids, fsp_type):
-    """{individual_id: PaymentAccount} — the account a benefit may be paid to: the household's
-    primary account of this channel, VERIFIED, pre-audit PASSED, and for mobile a valid number.
-    The one rule, shared by generation and its preview."""
+    """{individual_id: PaymentAccount}: primary account of this channel, VERIFIED, pre-audit PASSED, valid mobile.
+    The one rule shared by generation and its preview."""
     qs = PaymentAccount.objects.filter(
         group_beneficiary__group__groupindividuals__individual_id__in=individual_ids,
         group_beneficiary__group__groupindividuals__is_deleted=False,
@@ -1599,9 +1439,7 @@ def take_over_send_in_progress(paylist, org_msg_id) -> bool:
 
 
 def apply_muse_batch_status(paylist, status, description=None, at=None, user=None) -> bool:
-    """Record a batch-level reply from MUSE (RECEIVED, ACCEPTED, SENT_TO_BANK, ACCEPTED_BY_BANK,
-    PROCESSED_BY_BANK, REJECTED).
-    Only moves forward; a repeat or an older reply is ignored. Returns True if applied."""
+    """Record a batch-level reply from MUSE (RECEIVED, ACCEPTED, SENT/ACCEPTED/PROCESSED_BY_BANK, REJECTED)."""
     if paylist.status not in PAYLIST_IN_FLIGHT_STATUSES:
         return False
     if status == PaylistStatus.REJECTED:
@@ -1637,10 +1475,7 @@ def _close_paylist_if_complete(paylist) -> bool:
 
 
 def _notify_payroll_if_all_closed(paylist) -> bool:
-    """Hand the payroll to payroll's reconciliation (``acknowledge_of_reponse_view``) once no
-    sibling paylist is still in flight, so a multi-batch run raises one task. Batches that were
-    never dispatched do not block it. Fail-soft: a failed hand-off never loses the settlement.
-    """
+    """Hand the payroll to reconciliation once no sibling paylist is in flight; a failure never loses the settlement."""
     payroll_id = paylist.payroll_id
     if not payroll_id:
         return False
@@ -1702,23 +1537,7 @@ def _notify_payroll_if_all_closed(paylist) -> bool:
 
 
 class PaymentSettlementService:
-    """
-    Records a **successful** payment confirmed by the gateway.
-
-    This is the counterpart to :class:`ReturnFeedbackService`, which only ever records
-    failures. Without this path nothing sets ``PaylistItem.status = PROCESSED``, so the
-    system cannot distinguish "paid" from "sent, no news" — both sit at PENDING.
-
-    Expected payload (one item)::
-
-        {
-            "paylist_item_uuid": "...",
-            "muse_reference":    "...",     # gateway's own reference, optional
-            "settled_at":        "ISO8601", # optional, defaults to now
-        }
-
-    Batch form: ``{"items": [ {...}, {...} ]}`` — see :meth:`handle_batch_settlement`.
-    """
+    """Records a **successful** payment confirmed by the gateway."""
 
     def handle_settlement(self, payload: dict) -> dict:
         """Mark one paylist item as successfully paid."""
@@ -1750,12 +1569,7 @@ class PaymentSettlementService:
             )
 
     def handle_batch_settlement(self, payload: dict) -> dict:
-        """
-        Settle many items in one message — the shape a batch settlement file takes.
-
-        Partial success is normal and is reported rather than raised: one unknown or
-        already-returned item must not discard the rest of the batch.
-        """
+        """Settle many items in one message — the shape a batch settlement file takes."""
         items = payload.get('items') or []
         if not isinstance(items, list):
             return {'success': False, 'error': "'items' must be a list"}
@@ -1782,23 +1596,7 @@ class PaymentSettlementService:
 
 
 class ReturnFeedbackService:
-    """
-    Receives and stores unapplied feedback from MUSE via GovESB (a bank return included).
-
-    Called by:
-    - The stub REST endpoint (POST /api/tasaf_payment/muse/return_feedback/)
-      for development/testing.
-    - The GovESB consumer in coremis_app_integration (when available).
-
-    Expected payload:
-    {
-        "paylist_item_uuid": "...",
-        "feedback_type":     "UNAPPLIED",
-        "reason_code":       "...",
-        "reason_description": "...",
-        "muse_reference":    "..."
-    }
-    """
+    """Receives and stores unapplied feedback from MUSE via GovESB (a bank return included)."""
 
     def handle_feedback(self, payload: dict) -> dict:
         item_uuid = payload.get('paylist_item_uuid')
@@ -1866,12 +1664,7 @@ class BatchVerificationService:
 
 
 class BatchPreAuditService:
-    """Queue a filter-scoped pre-audit run.
-
-    Mirrors :class:`BatchVerificationService`: the caller passes filters and the task
-    rebuilds the queryset worker-side, so a PAA-wide run covers every candidate rather
-    than whatever a searcher page happened to have loaded.
-    """
+    """Queue a filter-scoped pre-audit run."""
 
     def __init__(self, user):
         self.user = user
@@ -1898,14 +1691,7 @@ class BatchPreAuditService:
 # ─── Withdrawal-charge tariff maintenance (maker-checker) ─────────────────────
 
 class WithdrawalChargeService(BaseService, UpdateCheckerLogicServiceMixin):
-    """Maker-checker for tariff bands, mirroring PmtGlobalFormulaService.
-
-    A tariff edit changes what every beneficiary is paid, so when
-    ``charges_require_approval`` is on the mutation records a tasks_management Task via
-    ``create_update_task`` instead of writing. A second user approving that task runs the
-    real ``update`` below, through
-    ``on_task_complete_service_handler(WithdrawalChargeService)`` bound in signals.
-    """
+    """Maker-checker for tariff bands, mirroring PmtGlobalFormulaService."""
     OBJECT_TYPE = WithdrawalCharge
 
     def __init__(self, user, validation_class=WithdrawalChargeValidation):

@@ -1,16 +1,4 @@
-"""
-tasaf_payment.views
-====================
-REST endpoints for receiving MUSE push results via GovESB.
-
-Each inbound request is run through GovESB signature verification
-(:func:`coremis_app_integration.govesb_inbound.verify_inbound`) before any
-business handling. In production (when ``settings.ESB`` is configured) a valid
-ECDSA-signed ``{data, signature}`` envelope is **required**, verified against
-the ESB public key; otherwise the request is rejected with HTTP 401. When ESB
-is not configured these endpoints stay open for development/testing and
-admin-override with bare JSON payloads — see ``govesb_inbound`` for the policy.
-"""
+"""GovESB inbound endpoints (MUSE, GePG), signature-checked first, and the bulk account-check upload."""
 
 import logging
 
@@ -34,13 +22,7 @@ def _parse_json_body(request):
 
 
 def _verify_inbound(payload, raw=None):
-    """
-    Verify an inbound GovESB push and return ``(business_payload, error)``.
-
-    ``error`` non-``None`` ⇒ the caller must reject with HTTP 401. Fail-closed:
-    if signature verification is required (ESB configured) but the verifier
-    cannot be loaded, the request is rejected rather than trusted.
-    """
+    """Verify an inbound GovESB push and return ``(business_payload, error)``."""
     try:
         from coremis_app_integration.govesb_inbound import verify_inbound
     except ImportError:
@@ -60,20 +42,7 @@ def _verify_inbound(payload, raw=None):
 
 @method_decorator(csrf_exempt, name='dispatch')
 class MuseReturnFeedbackView(View):
-    """
-    POST /api/tasaf_payment/muse/return_feedback/
-
-    Receives return / unapplied feedback pushed by MUSE over GovESB. In
-    production the request body is a signed ``{data, signature}`` envelope; the
-    verified business payload (``esbBody``) has the shape:
-    {
-        "paylist_item_uuid":  "<uuid>",
-        "feedback_type":      "UNAPPLIED",
-        "reason_code":        "...",
-        "reason_description": "...",
-        "muse_reference":     "..."
-    }
-    """
+    """POST muse/return_feedback/: one returned (unapplied) payment from MUSE."""
 
     def post(self, request, *args, **kwargs):
         payload, error = _parse_json_body(request)
@@ -106,25 +75,7 @@ class MuseReturnFeedbackView(View):
 
 @method_decorator(csrf_exempt, name='dispatch')
 class MuseSettlementView(View):
-    """
-    POST /api/tasaf_payment/muse/settlement/
-
-    Receives **successful** payment confirmations pushed by the gateway over GovESB —
-    the counterpart to :class:`MuseReturnFeedbackView`, which only carries failures.
-    Without this endpoint nothing sets ``PaylistItem.status = PROCESSED``, so a paid
-    item is indistinguishable from one that was merely sent.
-
-    Single item::
-
-        {"paylist_item_uuid": "<uuid>", "muse_reference": "...", "settled_at": "ISO8601"}
-
-    Batch — the shape a settlement file takes::
-
-        {"items": [{"paylist_item_uuid": "...", ...}, ...]}
-
-    A batch reports partial success rather than failing wholesale: unknown or
-    already-returned items are listed in ``rejected`` and the rest still settle.
-    """
+    """POST muse/settlement/: successful payments, one item or a batch; the only path that marks items PROCESSED."""
 
     def post(self, request, *args, **kwargs):
         payload, error = _parse_json_body(request)
@@ -159,13 +110,7 @@ class MuseSettlementView(View):
 
 @method_decorator(csrf_exempt, name='dispatch')
 class MuseMessageView(View):
-    """
-    POST /api/tasaf_payment/muse/message/
-
-    Any message MUSE sends, in MUSE's own format: ``{"message": {messageHeader, messageSummary |
-    messageDetails}, "digitalSignature"}`` inside the signed GovESB envelope.
-    Always HTTP 200 with a signed reply: success + TASAF's ACK, or success=false + message.
-    """
+    """POST muse/message/: any MUSE message in MUSE's own format; always answers 200 with a signed reply."""
 
     def post(self, request, *args, **kwargs):
         from coremis_app_integration.govesb_inbound import signed_reply

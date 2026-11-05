@@ -7,9 +7,7 @@ from django.utils.translation import gettext as _
 from core.models import HistoryModel, HistoryBusinessModel, UUIDModel, ObjectMutation, MutationLog
 
 
-# ---------------------------------------------------------------------------
-# Choices
-# ---------------------------------------------------------------------------
+# ─── Choices ───
 
 class VerificationStatus(models.IntegerChoices):
     PENDING  = 0, _("PENDING")
@@ -135,24 +133,10 @@ class ReturnFeedbackType(models.TextChoices):
     REJECTED_IN_BATCH = 'REJECTED_IN_BATCH', _("REJECTED_IN_BATCH")
 
 
-# ---------------------------------------------------------------------------
-# PaymentAccount
-# ---------------------------------------------------------------------------
+# ─── PaymentAccount ───
 
 class PaymentAccount(HistoryBusinessModel):
-    """
-    Bank or mobile money account for a GroupBeneficiary.
-
-    FK to social_protection.GroupBeneficiary links the account to a household
-    enrolled in a benefit plan. One household may have multiple accounts across
-    FSPs, but only one should be marked is_primary=True at a time.
-
-    verification_status reflects the GePG-returned result (not internal scoring).
-    pre_audit_status and active_check_status are TASAF MIS workflow states.
-    muse_verification_reference is the MUSE reference ID for the last verification.
-
-    Cross-module FK uses DO_NOTHING so removing a beneficiary does not cascade.
-    """
+    """Bank or mobile account of a household beneficiary; one primary per household."""
     group_beneficiary = models.ForeignKey(
         'social_protection.GroupBeneficiary',
         on_delete=models.DO_NOTHING,
@@ -219,18 +203,10 @@ class PaymentAccount(HistoryBusinessModel):
         return queryset
 
 
-# ---------------------------------------------------------------------------
-# MuseVerificationRecord  (replaces VerificationRecord)
-# ---------------------------------------------------------------------------
+# ─── MuseVerificationRecord ───
 
 class MuseVerificationRecord(HistoryModel):
-    """
-    Immutable result record of one verification event, from whichever gateway answered.
-
-    One record per verification event per PaymentAccount. Multiple records may
-    exist for the same account across different verification rounds or types.
-
-    """
+    """Immutable result record of one verification event, from whichever gateway answered."""
     payment_account = models.ForeignKey(
         PaymentAccount,
         on_delete=models.DO_NOTHING,
@@ -289,18 +265,10 @@ class VerificationRecord(HistoryModel):
         return f"VerificationRecord (legacy) {self.run_reference} score={self.match_score}"
 
 
-# ---------------------------------------------------------------------------
-# Paylist
-# ---------------------------------------------------------------------------
+# ─── Paylist ───
 
 class Paylist(HistoryBusinessModel):
-    """
-    TASAF-specific payment dispatch batch.
-
-    One payroll may produce multiple paylists (e.g., one Bank + one MNO).
-    A paylist is what gets submitted to MUSE for payment — not the raw payroll.
-    The underlying payroll handles accounting; the paylist handles dispatch.
-    """
+    """Dispatch batch sent to MUSE; one payroll may give several (BANK and MNO, split by size)."""
     payroll = models.ForeignKey(
         'payroll.Payroll',
         on_delete=models.DO_NOTHING,
@@ -361,12 +329,7 @@ class Paylist(HistoryBusinessModel):
 
 
 class PaylistItem(HistoryModel):
-    """
-    One benefit line item within a Paylist.
-
-    Links the paylist to a specific BenefitConsumption and PaymentAccount.
-    Tracks per-item MUSE dispatch results and return feedback.
-    """
+    """One benefit line item within a Paylist."""
     paylist = models.ForeignKey(
         Paylist,
         on_delete=models.DO_NOTHING,
@@ -412,16 +375,10 @@ class PaylistItem(HistoryModel):
         return f"PaylistItem {self.status} amount={self.amount}"
 
 
-# ---------------------------------------------------------------------------
-# ReturnFeedback
-# ---------------------------------------------------------------------------
+# ─── ReturnFeedback ───
 
 class ReturnFeedback(HistoryModel):
-    """
-    Return or unapplied notification received from MUSE via GovESB.
-
-    One record per feedback event per PaylistItem.
-    """
+    """Return or unapplied notification received from MUSE via GovESB."""
     paylist_item = models.ForeignKey(
         PaylistItem,
         on_delete=models.DO_NOTHING,
@@ -443,9 +400,7 @@ class ReturnFeedback(HistoryModel):
         return f"ReturnFeedback [{self.feedback_type}] {self.reason_code}"
 
 
-# ---------------------------------------------------------------------------
-# PaymentAccountMutation  (journaling — unchanged)
-# ---------------------------------------------------------------------------
+# ─── PaymentAccountMutation ───
 
 class PaymentAccountMutation(UUIDModel, ObjectMutation):
     """Links a PaymentAccount to a MutationLog for journaling."""
@@ -465,17 +420,10 @@ class PaymentAccountMutation(UUIDModel, ObjectMutation):
         db_table = 'tasaf_PaymentAccountMutation'
 
 
-# ---------------------------------------------------------------------------
-# Withdrawal charges
-# ---------------------------------------------------------------------------
+# ─── Withdrawal charges ───
 
 class WithdrawalCharge(HistoryModel):
-    """One FSP tariff band. The beneficiary must receive the entitlement in full, so the
-    transfer is grossed up by the charge the FSP deducts on withdrawal.
-
-    Bands are looked up on the NET amount and are effective-dated: a historical paylist must
-    stay reproducible at the rates that applied when it was generated.
-    """
+    """One FSP tariff band."""
     fsp_code = models.CharField(max_length=50, db_index=True)
     lower_amount = models.DecimalField(max_digits=18, decimal_places=2)
     upper_amount = models.DecimalField(max_digits=18, decimal_places=2)
@@ -496,13 +444,7 @@ class WithdrawalCharge(HistoryModel):
 
 
 class FspMapping(HistoryModel):
-    """Maps a PaymentAccount.fsp_name (a display name, e.g. "Vodacom M-Pesa") to the
-    tariff-table fsp_code (e.g. "MPESA").
-
-    A table rather than static config so a new FSP can be onboarded entirely from the UI:
-    add the mapping, add its bands, done. Seeded from TasafPaymentConfig.fsp_code_aliases
-    on first use so existing configuration keeps working.
-    """
+    """Maps an account's FSP name (e.g. "Vodacom M-Pesa") to its FSP code (e.g. "MPESA"); edited on screen."""
     fsp_name = models.CharField(max_length=100)
     # Normalised (upper, alphanumeric only) so lookup is punctuation/case insensitive.
     fsp_name_key = models.CharField(max_length=100, db_index=True)
@@ -522,9 +464,7 @@ class FspMapping(HistoryModel):
 
 
 class FspProfile(HistoryModel):
-    """What MUSE needs to route a payment to one FSP: the bank name it expects, the channel
-    and the BIC. One row per fsp_code; the display-name variants on accounts stay in
-    FspMapping, so the charges page shows one list with both."""
+    """What MUSE needs to route a payment to one FSP: the bank name it expects, the channel and the BIC."""
     fsp_code = models.CharField(max_length=50, db_index=True)
     bank_name = models.CharField(max_length=100, blank=True, default='')
     fsp_type = models.CharField(max_length=20, blank=True, default='')
