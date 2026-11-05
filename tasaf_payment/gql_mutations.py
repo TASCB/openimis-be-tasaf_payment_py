@@ -433,6 +433,32 @@ class SubmitPaylistMutation(BaseMutation):
         pass
 
 
+class MoveRejectedToCaseManagementMutation(BaseMutation):
+    """Send the latest MUSE rejection's "need review" payees to Case Management."""
+    _mutation_class = "MoveRejectedToCaseManagementMutation"
+    _mutation_module = TasafPaymentConfig.name
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require_perms(user, TasafPaymentConfig.gql_submit_paylist_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        from tasaf_payment.models import Paylist
+        from tasaf_payment.muse.rejection import move_review_rows
+        paylist = Paylist.objects.filter(uuid=data['paylist_uuid'], is_deleted=False).first()
+        if not paylist:
+            raise Exception(_("Paylist not found"))
+        try:
+            move_review_rows(paylist, user, data.get('accounts') or None)
+        except ValueError as exc:
+            raise Exception(str(exc))
+
+    class Input(OpenIMISMutation.Input):
+        paylist_uuid = graphene.UUID(required=True)
+        accounts = graphene.List(graphene.String, required=False)
+
+
 # ─── Withdrawal charges ───────────────────────────────────────────────────────
 
 class WithdrawalChargeInputType(OpenIMISMutation.Input):

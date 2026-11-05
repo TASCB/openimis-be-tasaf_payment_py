@@ -274,9 +274,18 @@ def release(items, reason):
 
 def complete(job_id):
     from tasaf_payment.events import emit_account_check_done
+    from django.db.models import Max
     with transaction.atomic():
-        job = AccountCheckJob.objects.select_for_update().filter(id=job_id, status=AccountCheckStatus.SENT).first()
-        if not job or job.rows.filter(result=AccountCheckResult.WAITING).exists():
+        job = AccountCheckJob.objects.select_for_update().filter(id=job_id).first()
+        if job and job.status == AccountCheckStatus.DONE:
+            # A late answer after "No answer": finished at that answer.
+            last = job.rows.aggregate(last=Max('answered_at'))['last']
+            if last and (job.finished_at is None or last > job.finished_at):
+                job.finished_at = last
+                job.save(update_fields=['finished_at'])
+            return False
+        if not job or job.status != AccountCheckStatus.SENT or \
+                job.rows.filter(result=AccountCheckResult.WAITING).exists():
             return False
         job.status = AccountCheckStatus.DONE
         job.finished_at = datetime.now(tz=timezone.utc)

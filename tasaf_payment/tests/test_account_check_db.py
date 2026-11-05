@@ -112,6 +112,26 @@ class AccountCheckDbTest(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.status, AccountCheckStatus.DONE)
 
+    def test_late_answer_moves_finished_at(self):
+        from datetime import timedelta
+        from tasaf_payment.gepg import inbound
+        from tasaf_payment.gepg.sweeper import release_request
+        from tasaf_payment.models import AccountCheckJob
+        job = self.job()
+        request = self.send(job)
+        with self.captureOnCommitCallbacks(execute=False):
+            release_request(request, 'No GePG answer', self.user)
+        job.refresh_from_db()
+        released_at = job.finished_at - timedelta(hours=2)
+        AccountCheckJob.objects.filter(id=job.id).update(finished_at=released_at)
+        with self.captureOnCommitCallbacks(execute=True):
+            inbound.handle(answer(request, [('ASHA JUMA MRISHO', '7101', 'Successful'), ('', '7230', 'Invalid')]))
+        job.refresh_from_db()
+        self.assertEqual(job.status, AccountCheckStatus.DONE)
+        self.assertEqual(job.rows.get(row_number=2).result, AccountCheckResult.VERIFIED)
+        self.assertGreater(job.finished_at, released_at)
+        self.assertEqual(job.finished_at, job.rows.exclude(answered_at=None).latest('answered_at').answered_at)
+
     def test_send_error_releases_the_request(self):
         job = self.job()
         with mock.patch('tasaf_payment.gepg.sender.blocked', return_value=None), \

@@ -39,6 +39,7 @@ from tasaf_payment.gql_mutations import (
     GeneratePaylistMutation,
     ApprovePaylistMutation,
     SubmitPaylistMutation,
+    MoveRejectedToCaseManagementMutation,
 )
 from tasaf_payment.gql_queries import (
     AccountCheckJobGQLType,
@@ -968,3 +969,4 @@ class Mutation(graphene.ObjectType):
     generate_paylist = GeneratePaylistMutation.Field()
     approve_paylist  = ApprovePaylistMutation.Field()
     submit_paylist   = SubmitPaylistMutation.Field()
+    move_rejected_to_case_management = MoveRejectedToCaseManagementMutation.Field()

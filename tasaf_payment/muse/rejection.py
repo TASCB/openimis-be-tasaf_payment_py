@@ -16,6 +16,9 @@ WITHDRAWN, KEPT, NEEDS_REVIEW = 'WITHDRAWN', 'KEPT', 'NEEDS_REVIEW'
 ENTRY_RE = re.compile(
     r'\s*(?P<reason>.+?)\.?\s+for\s+(?P<account>(?=[0-9A-Za-z]*\d)[0-9A-Za-z]{6,35})\s*(?:,|$)')
 
+# "Mobile number 2556… is not valid for mobile operator VODACOM"
+INLINE_MSISDN_RE = re.compile(r'(?<![0-9A-Za-z])(?:255|0)[67]\d{8}(?![0-9A-Za-z])')
+
 Failure = namedtuple('Failure', 'reason account')
 
 
@@ -28,7 +31,14 @@ def parse(status_desc):
             break
         failures.append(Failure(match['reason'].strip(), match['account']))
         pos = match.end()
-    return failures, text[pos:].strip()
+    unread = []
+    for chunk in (c.strip() for c in text[pos:].split(', ')):
+        numbers = INLINE_MSISDN_RE.findall(chunk)
+        if len(numbers) == 1:
+            failures.append(Failure(chunk.rstrip('.').strip(), numbers[0]))
+        elif chunk:
+            unread.append(chunk)
+    return failures, ', '.join(unread)
 
 
 def _reason_key(reason):
@@ -122,6 +132,62 @@ def handle_batch_rejection(paylist, status_desc):
     logger.info("MUSE rejection of paylist %s: %d withdrawn, %d kept, %d need review",
                 paylist.uuid, record['withdrawn'], record['kept'], record['needs_review'])
     return record
+
+
+MOVED = 'MOVED'
+
+
+def move_review_rows(paylist, user, accounts=None):
+    """Latest rejection's "need review" payees to Case Management; REJECTED paylists only."""
+    from tasaf_payment.models import PaylistItemStatus, PaylistStatus
+
+    if paylist.status != PaylistStatus.REJECTED:
+        raise ValueError(f'Paylist is {paylist.status}; payees can be moved only while it is REJECTED')
+    ext = dict(paylist.json_ext or {})
+    records = list(ext.get('muse_rejections') or [])
+    if not records:
+        return {'moved': 0, 'not_found': 0}
+    record = dict(records[-1])
+    wanted = {_account_key(a) for a in accounts} if accounts else None
+    items = {}
+    for item in paylist.items.filter(is_deleted=False).select_related('payment_account__group_beneficiary__group'):
+        items.setdefault(_account_key(item.payment_account.account_number), []).append(item)
+
+    moved = not_found = 0
+    rows = []
+    for row in record.get('payees') or []:
+        key = _account_key(row.get('account'))
+        if row.get('action') != NEEDS_REVIEW or (wanted is not None and key not in wanted):
+            rows.append(row)
+            continue
+        matches = items.get(key, [])
+        if not matches:
+            not_found += 1
+            rows.append({**row, 'note': 'not a payee on this paylist; nothing to move'})
+            continue
+        row = {**row, 'action': MOVED, 'note': 'moved to Case Management by hand'}
+        with transaction.atomic():
+            for item in matches:
+                if item.status == PaylistItemStatus.PENDING:
+                    row['follow_up'] = withdraw_item(item, row.get('reason') or 'Rejected by MUSE',
+                                                     DATA, paylist, user)
+                elif not (item.json_ext or {}).get('follow_up_id'):
+                    row['follow_up'] = _open_follow_up(item, row.get('reason') or 'Rejected by MUSE', paylist, user)
+        row['item'] = str(matches[0].uuid)
+        row['account_uuid'] = str(matches[0].payment_account_id)
+        rows.append(row)
+        moved += 1
+
+    record['payees'] = rows
+    record['moved'] = int(record.get('moved') or 0) + moved
+    record['needs_review'] = max(0, int(record.get('needs_review') or 0) - moved)
+    records[-1] = record
+    ext['muse_rejections'] = records
+    paylist.json_ext = ext
+    paylist.save(user=user)
+    logger.info("Paylist %s: %d need-review payee(s) moved to Case Management, %d not found",
+                paylist.uuid, moved, not_found)
+    return {'moved': moved, 'not_found': not_found}
 
 
 def _set_strikes(item, strikes, user):

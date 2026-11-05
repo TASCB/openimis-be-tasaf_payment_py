@@ -10,6 +10,7 @@ MUSE_REJECTION_REASON_CLASSES = {
     "Beneficiary name mismatch": "DATA",
     "Dormant account": "DATA",
     "Account closed": "DATA",
+    "The {0} receiver is in the {1} state which does not support the current service": "DATA",
     "System internal error": "TRANSIENT",
     "System not available": "TRANSIENT",
     "Timeout": "TRANSIENT",

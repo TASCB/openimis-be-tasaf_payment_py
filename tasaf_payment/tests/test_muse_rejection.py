@@ -44,6 +44,17 @@ class ParseTest(SimpleTestCase):
     def test_empty(self):
         self.assertEqual(mr.parse(None), ([], ''))
 
+    def test_number_inside_the_sentence(self):
+        text = 'Mobile number 255600000818 is not valid for mobile operator VODACOM'
+        self.assertEqual(mr.parse(text), ([(text, '255600000818')], ''))
+        failures, leftover = mr.parse('MSISDN invalid. for 255646379525, Mobile number 0754123456 is not '
+                                      'valid for mobile operator VODACOM., Batch total mismatch')
+        self.assertEqual([f.account for f in failures], ['255646379525', '0754123456'])
+        self.assertEqual(leftover, 'Batch total mismatch')
+
+    def test_two_numbers_in_one_sentence_are_not_guessed(self):
+        self.assertEqual(mr.parse('Numbers 255754000001 and 255754000002 clash')[0], [])
+
 
 class ClassifyTest(SimpleTestCase):
     def test_known_reasons_ignore_case_spacing_and_period(self):
@@ -154,3 +165,60 @@ class HandleRejectionTest(SimpleTestCase):
         record = mr.handle_batch_rejection(paylist(item('255646379525')), 'Rejected: invalid payer account')
         self.assertEqual((record['withdrawn'], record['needs_review']), (0, 1))
         self.assertEqual(record['unparsed'], 'Rejected: invalid payer account')
+
+
+class MoveReviewRowsTest(SimpleTestCase):
+    def setUp(self):
+        self.withdrawn, self.followed = [], []
+        for target, kwargs in (
+            ('tasaf_payment.muse.rejection.withdraw_item',
+             {'side_effect': lambda i, reason, cls, p, u: self.withdrawn.append((i.id, cls)) or 'fu-w'}),
+            ('tasaf_payment.muse.rejection._open_follow_up',
+             {'side_effect': lambda i, reason, p, u: self.followed.append(i.id) or 'fu-f'}),
+            ('tasaf_payment.muse.rejection.transaction.atomic', {'return_value': mock.MagicMock()}),
+        ):
+            patcher = mock.patch(target, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def rejected(self, *items, rows):
+        p = paylist(*items)
+        p.status = 'REJECTED'
+        p.json_ext = {'muse_rejections': [{'attempt': 2, 'withdrawn': 1, 'kept': 0, 'needs_review': len(rows) - 1,
+                                           'payees': rows}]}
+        return p
+
+    def test_need_review_payees_go_to_case_management(self):
+        rows = [{'account': '255700000001', 'reason': 'Odd', 'action': mr.NEEDS_REVIEW},
+                {'account': '255700000002', 'reason': 'Odd', 'action': mr.NEEDS_REVIEW},
+                {'account': '255700000003', 'reason': 'MSISDN invalid', 'action': mr.WITHDRAWN},
+                {'account': '255700000009', 'reason': 'Odd', 'action': mr.NEEDS_REVIEW}]
+        p = self.rejected(item('255700000001'), item('255700000002', status='WITHDRAWN'),
+                          item('255700000003', status='WITHDRAWN'), rows=rows)
+        self.assertEqual(mr.move_review_rows(p, object()), {'moved': 2, 'not_found': 1})
+        self.assertEqual(self.withdrawn, [('255700000001', mr.DATA)])
+        self.assertEqual(self.followed, ['255700000002'])
+        record = p.json_ext['muse_rejections'][-1]
+        self.assertEqual([r['action'] for r in record['payees']], [mr.MOVED, mr.MOVED, mr.WITHDRAWN, mr.NEEDS_REVIEW])
+        self.assertEqual((record['moved'], record['needs_review']), (2, 1))
+
+    def test_only_the_chosen_accounts(self):
+        rows = [{'account': '255700000001', 'action': mr.NEEDS_REVIEW},
+                {'account': '255700000002', 'action': mr.NEEDS_REVIEW}]
+        p = self.rejected(item('255700000001'), item('255700000002'), rows=rows)
+        self.assertEqual(mr.move_review_rows(p, object(), ['0700000002'])['moved'], 1)
+        self.assertEqual(self.withdrawn, [('255700000002', mr.DATA)])
+
+    def test_refused_unless_rejected(self):
+        p = self.rejected(item('255700000001'), rows=[{'account': '255700000001', 'action': mr.NEEDS_REVIEW}])
+        p.status = 'SUBMITTED'
+        with self.assertRaises(ValueError):
+            mr.move_review_rows(p, object())
+        self.assertEqual(self.withdrawn, [])
+
+    def test_receiver_state_reason_is_data(self):
+        from tasaf_payment.apps import MUSE_REJECTION_REASON_CLASSES
+        failures, _ = mr.parse('The {0} receiver is in the {1} state which does not support the current service. '
+                               'for 255740051393, System internal error. for 255744212675')
+        self.assertEqual([mr.classify(f.reason, MUSE_REJECTION_REASON_CLASSES) for f in failures],
+                         [mr.DATA, mr.TRANSIENT])
