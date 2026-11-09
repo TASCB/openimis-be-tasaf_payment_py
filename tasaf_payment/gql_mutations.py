@@ -945,7 +945,14 @@ class SendUnappliedWithdrawalsMutation(OpenIMISMutation):
         from tasaf_payment.muse.withdrawal import send
         try:
             _require_perms(user, TasafPaymentConfig.gql_unapplied_decide_perms)
-            send(user)
+            result = send(user)
+            if result['failed'] or result['skipped']:
+                parts = [f"{result['sent']} sent"]
+                if result['failed']:
+                    parts.append(f"{result['failed']} not sent: {'; '.join(result['errors'][:3])}")
+                if result['skipped']:
+                    parts.append(f"{result['skipped']} without a payment reference")
+                return [{'message': ', '.join(parts)}]
             return None
         except Exception as exc:
             return _error(exc)

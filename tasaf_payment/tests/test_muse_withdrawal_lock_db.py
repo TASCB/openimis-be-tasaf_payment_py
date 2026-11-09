@@ -45,15 +45,14 @@ class MuseWithdrawalLockDbTest(TestCase):
             return {'ok': True, 'status_code': 200, 'esb_body': {}}
 
         self.producer.publish.side_effect = publish
-        _, count = withdrawal.send(self.user)
-        self.assertEqual(count, 2)
-        self.assertEqual(self.producer.publish.call_count, 1)
+        result = withdrawal.send(self.user)
+        self.assertEqual(result['sent'], 2)
+        self.assertEqual(self.producer.publish.call_count, 2)
         self.assertEqual(self.states(), [withdrawal.SENT, withdrawal.SENT])
 
     def test_a_failed_send_puts_the_payees_back(self):
         self.producer.publish.return_value = {'ok': False, 'status_code': 500, 'error': 'down'}
-        with self.assertRaisesRegex(withdrawal.WithdrawalError, 'refused'):
-            withdrawal.send(self.user)
+        self.assertEqual(withdrawal.send(self.user)['failed'], 2)
         self.assertEqual(self.states(), [None, None])
         self.assertEqual(withdrawal.pending().count(), 2)
 

@@ -125,18 +125,18 @@ class UnappliedResendDbTest(TestCase):
         PaylistItem.objects.filter(id=resend.id).update(amount=(resend.amount or 0) + 1)
         self.assertEqual([i.id for i in resend_mismatches(resend.paylist)], [resend.id])
 
-    def test_withdrawal_list_is_built_sent_and_acknowledged(self):
+    def test_withdraw_is_built_sent_and_acknowledged(self):
         item = self.decide(self.unapply(self.item), 'WITHDRAW')
         self.assertIn(item.id, list(withdrawal.pending().values_list('id', flat=True)))
-        body = withdrawal.build([item], 'TWTEST')
-        row = body['message']['withdrawalList'][0]
-        self.assertEqual(row['orgEndToEndId'], self.original_id)
-        self.assertEqual(body['message']['withdrawalSummary']['noofTransaction'], 1)
+        details = withdrawal.build(item, 'TWTEST')['message']['messageDetails']
+        self.assertEqual(details['paymentReference'], self.original_id)
         with mock.patch('tasaf_payment.muse.sender.muse_config', side_effect=lambda n, d: 'RECORD_ONLY' if n == 'muse_submit_mode' else d):
-            message_id, count = withdrawal.send(self.user)
-        self.assertGreaterEqual(count, 1)
+            result = withdrawal.send(self.user)
+        self.assertGreaterEqual(result['sent'], 1)
         self.assertNotIn(item.id, list(withdrawal.pending().values_list('id', flat=True)))
-        self.assertEqual(withdrawal.acknowledge(message_id, 'REJECTED', 'not known'), count)
+        item.refresh_from_db()
+        message_id = item.json_ext['muse_withdrawal']['msg_id']
+        self.assertEqual(withdrawal.acknowledge(message_id, 'REJECTED', 'not known'), 1)
         item.refresh_from_db()
         self.assertEqual(item.json_ext['muse_withdrawal']['status'], 'REJECTED')
         self.assertIn(item.id, list(withdrawal.pending().values_list('id', flat=True)))

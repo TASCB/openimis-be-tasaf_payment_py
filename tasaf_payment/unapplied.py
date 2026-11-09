@@ -102,7 +102,8 @@ def apply_provider_change(account, user):
             continue
         ext = dict(item.json_ext or {})
         ext[UNAPPLIED_ACTION_KEY] = {**ext[UNAPPLIED_ACTION_KEY], 'action': UnappliedAction.WITHDRAW,
-                                     'auto': PROVIDER_CHANGED, 'changed_at': datetime.now(tz=timezone.utc).isoformat(),
+                                     'auto': PROVIDER_CHANGED, 'changed_by': getattr(user, 'username', None),
+                                     'changed_at': datetime.now(tz=timezone.utc).isoformat(),
                                      'new_provider': provider_code(account)}
         item.json_ext = ext
         item.save(user=user)

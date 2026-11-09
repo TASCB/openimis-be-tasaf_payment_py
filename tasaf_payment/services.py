@@ -807,6 +807,7 @@ class PaylistService:
             ext = dict(origin.json_ext or {})
             ext[UNAPPLIED_ACTION_KEY] = {**ext[UNAPPLIED_ACTION_KEY], 'action': UnappliedAction.WITHDRAW,
                                          'auto': PROVIDER_CHANGED, 'new_provider': provider_code(account),
+                                         'changed_by': getattr(self.user, 'username', None),
                                          'changed_at': datetime.now(tz=timezone.utc).isoformat()}
             origin.json_ext = ext
             origin.save(user=self.user)
