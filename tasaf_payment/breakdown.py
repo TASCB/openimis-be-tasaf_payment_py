@@ -32,6 +32,11 @@ def _split(rule, ext, amount):
     return {'lines': [line], 'components_total': amount, 'benefit_total': amount}, code == NO_BREAKDOWN[0]
 
 
+def _breakdown_required():
+    from tasaf_payment.apps import TasafPaymentConfig
+    return bool(TasafPaymentConfig.breakdown_required)
+
+
 def batch_breakdown(paylist):
     rules = _rules()
     plan = getattr(getattr(paylist, 'payroll', None), 'payment_plan', None)
@@ -69,7 +74,7 @@ def batch_breakdown(paylist):
     totals['benefits'] = totals['components'] - totals['cap']
     difference = totals['batch'] - (totals['benefits'] + totals['charges'])
     problems = []
-    if missing:
+    if missing and _breakdown_required():
         problems.append(f'{missing} payment(s) have no benefit breakdown from their calculation rule')
     if unexplained:
         problems.append(f'{unexplained} payment(s) do not match their calculated benefit '

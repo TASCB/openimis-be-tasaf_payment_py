@@ -64,6 +64,13 @@ class BatchBreakdownTest(SimpleTestCase):
         self.assertEqual(report['lines'][0]['code'], 'NO_BREAKDOWN')
         self.assertEqual(report['unexplained']['amount'], 0)
 
+    def test_a_missing_breakdown_passes_when_not_required(self):
+        with mock.patch('tasaf_payment.apps.TasafPaymentConfig.breakdown_required', False):
+            report = self.report([(Decimal('14000'), None, None, Decimal('14000'),
+                                   {'calculation_rule_uuid': PCT_UUID})])
+        self.assertFalse(report['blocked'])
+        self.assertEqual(report['lines'][0]['code'], 'NO_BREAKDOWN')
+
     def test_a_rule_without_categories_is_one_benefit_line(self):
         report = self.report([(Decimal('30000'), None, None, Decimal('30000'), {'calculation_rule_uuid': 'cash'})],
                              rules={'cash': SimpleNamespace()})
