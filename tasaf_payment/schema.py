@@ -364,6 +364,9 @@ class Query(graphene.ObjectType):
                                              acc_verif_id=graphene.String(required=True), offset=graphene.Int(),
                                              limit=graphene.Int(), search=graphene.String(),
                                              decision=graphene.String())
+    gepg_verification_items_export = graphene.String(
+        acc_verif_id=graphene.String(required=True), search=graphene.String(), decision=graphene.String(),
+        description="A GePG request's accounts as CSV under the dialog's filters; returns the export name.")
     # Current bands for one FSP, for the config editor.
     fsp_band_set = graphene.List(WithdrawalChargeGQLType, fsp_code=graphene.String(required=True))
 
@@ -876,6 +879,12 @@ class Query(graphene.ObjectType):
             TasafPaymentConfig.gql_muse_settings_search_perms, TasafPaymentConfig.gql_payment_account_search_perms])
         from tasaf_payment.gepg.history import item_rows
         return item_rows(acc_verif_id, offset=offset, limit=limit, search=search, decision=decision)
+
+    def resolve_gepg_verification_items_export(self, info, acc_verif_id, search='', decision='', **kwargs):
+        Query._check_any_permission(info.context.user, [
+            TasafPaymentConfig.gql_muse_settings_search_perms, TasafPaymentConfig.gql_payment_account_search_perms])
+        from tasaf_payment.gepg.history import export_items
+        return export_items(info.context.user, acc_verif_id, search=search, decision=decision)
 
     def resolve_fsp_band_set(self, info, fsp_code, **kwargs):
         Query._check_permissions(info.context.user,

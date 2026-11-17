@@ -31,7 +31,7 @@ ITEM_FIELDS = ('item_id', 'acc_num', 'expected_name', 'acc_name', 'status', 'acc
                'decision', 'answered_at')
 
 
-def item_rows(acc_verif_id, offset=0, limit=100, search='', decision=''):
+def _items(acc_verif_id, search='', decision=''):
     from django.db.models import F
     from tasaf_payment.models import GepgVerificationItem
     qs = GepgVerificationItem.objects.filter(request__acc_verif_id=acc_verif_id)
@@ -44,10 +44,49 @@ def item_rows(acc_verif_id, offset=0, limit=100, search='', decision=''):
         qs = qs.filter(decision='')
     elif decision:
         qs = qs.filter(decision=decision)
+    return qs.order_by('id').annotate(hhid=F('payment_account__group_beneficiary__group__code'))
+
+
+def item_rows(acc_verif_id, offset=0, limit=100, search='', decision=''):
+    qs = _items(acc_verif_id, search, decision)
     offset, limit = max(0, int(offset or 0)), max(1, min(int(limit or 100), 500))
-    rows = list(qs.order_by('id')
-                .annotate(hhid=F('payment_account__group_beneficiary__group__code'))
-                .values(*ITEM_FIELDS, 'hhid')[offset:offset + limit])
+    rows = list(qs.values(*ITEM_FIELDS, 'hhid')[offset:offset + limit])
     for row in rows:
         row['answered_at'] = _iso(row['answered_at'])
     return {'total': qs.count(), 'offset': offset, 'rows': rows}
+
+
+EXPORT_COLUMNS = ('No.', 'HHID', 'Account', 'Expected name', 'Name at provider', 'GePG code', 'GePG description',
+                  'Result', 'Answered (UTC)')
+DECISION_LABELS = {'VERIFIED': 'Verified', 'MANUAL': 'Needs review', 'FAILED': 'Failed',
+                   'UNCHECKED': 'Not checked (send again)'}
+STATUS_LABELS = {'PENDING': 'Waiting', 'ANSWERED': 'Answered', 'RELEASED': 'Released', 'EXPIRED': 'No answer'}
+
+
+def export_items(user, acc_verif_id, search='', decision=''):
+    """The request's accounts as CSV under the dialog's search and result filter; returns the export name."""
+    import csv
+    import io
+    import uuid
+
+    from django.core.files.base import ContentFile
+    from core.models import ExportableQueryModel
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(EXPORT_COLUMNS)
+    for row in _items(acc_verif_id, search, decision).values(*ITEM_FIELDS, 'hhid').iterator(chunk_size=2000):
+        answered = row['answered_at']
+        writer.writerow([
+            row['item_id'], row['hhid'] or '', row['acc_num'], row['expected_name'], row['acc_name'],
+            row['acc_sts_code'], row['acc_sts_desc'],
+            DECISION_LABELS.get(row['decision']) or STATUS_LABELS.get(row['status'], row['status']),
+            answered.strftime('%Y-%m-%d %H:%M') if answered else '',
+        ])
+    filename = f"{uuid.uuid4()}.csv"
+    record = ExportableQueryModel(
+        name=filename, model='GepgVerificationItem', content=ContentFile(out.getvalue().encode('utf-8'), filename),
+        user=user, sql_query=f'tasaf_payment.gepg.history.export_items {acc_verif_id}',
+        file_format=ExportableQueryModel.FileFormat.CSV)
+    record.save()
+    return record.name
