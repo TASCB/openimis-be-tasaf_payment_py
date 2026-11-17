@@ -913,7 +913,7 @@ class PaylistService:
     @check_authentication
     def submit(self, paylist_uuid: str) -> dict:
         """Queue the send on the worker; a big paylist outlasts the web request."""
-        refusal = _claim_submit(paylist_uuid, self.user)
+        refusal = _breakdown_refusal(paylist_uuid) or _claim_submit(paylist_uuid, self.user)
         if refusal:
             return refusal
         try:
@@ -976,6 +976,11 @@ class PaylistService:
                 return {'success': False, 'outcome': 'REFUSED',
                         'error': f'{unpayable} payment(s) on this paylist go to an account that is no longer '
                                  f'verified and pre-audited; it cannot be sent until they are'}
+            from tasaf_payment.breakdown import batch_breakdown, refusal as breakdown_refusal
+            breakdown = batch_breakdown(paylist)
+            problem = breakdown_refusal(breakdown)
+            if problem:
+                return {'success': False, 'outcome': 'REFUSED', 'error': problem}
             if paylist.status == PaylistStatus.REJECTED:
                 _start_new_muse_attempt(paylist, self.user)
 
@@ -991,7 +996,7 @@ class PaylistService:
             else:
                 self._publish_paylist(paylist)
 
-            paylist = _mark_submitted(paylist, self.user)
+            paylist = _mark_submitted(paylist, self.user, breakdown)
 
             from tasaf_payment.muse.sender import apply_reply
             ack = apply_reply(result)
@@ -1285,6 +1290,15 @@ SUBMIT_ERROR_TEXT = {
 
 
 QUEUED = 'QUEUED'
+BREAKDOWN_KEY = 'benefit_breakdown_at_submit'
+
+
+def _breakdown_refusal(paylist_uuid):
+    from tasaf_payment.breakdown import batch_breakdown, refusal
+    paylist = Paylist.objects.filter(uuid=paylist_uuid, is_deleted=False).select_related(
+        'payroll__payment_plan').first()
+    problem = refusal(batch_breakdown(paylist)) if paylist else None
+    return {'success': False, 'outcome': 'REFUSED', 'error': problem} if problem else None
 SUBMIT_LOCK_KEY = 'muse_submit_lock'
 SUBMIT_LOCK_MINUTES = 30  # frees a paylist whose worker died mid-send
 
@@ -1421,11 +1435,13 @@ def _replied_during_send(paylist) -> bool:
     return bool(paylist.muse_msg_id) and ext.get(REPLY_DURING_SEND_KEY) == paylist.muse_msg_id
 
 
-def _mark_submitted(paylist, user):
+def _mark_submitted(paylist, user, breakdown=None):
     from tasaf_payment.muse.sender import REPLY_DURING_SEND_KEY, SENDING_KEY
     with transaction.atomic():
         fresh = Paylist.objects.select_for_update().get(pk=paylist.pk)
         ext = dict(fresh.json_ext or {})
+        if breakdown is not None:
+            ext[BREAKDOWN_KEY] = {**breakdown, 'at': datetime.now(tz=timezone.utc).isoformat()}
         replied = bool(fresh.muse_msg_id) and ext.get(REPLY_DURING_SEND_KEY) == fresh.muse_msg_id
         ext.pop(SENDING_KEY, None)
         ext.pop(REPLY_DURING_SEND_KEY, None)

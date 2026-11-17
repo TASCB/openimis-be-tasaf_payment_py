@@ -417,6 +417,11 @@ class Query(graphene.ObjectType):
     paylist_pdf_breakdown = graphene.JSONString(
         paylist_uuid=graphene.UUID(required=True),
         description="Totals for the paylist PDF's summary page: payments, deductions, total.")
+    paylist_benefit_breakdown = graphene.JSONString(
+        paylist_uuid=graphene.UUID(required=True),
+        description="The batch by benefit category, ending on the total sent to MUSE; blocked when it does not add up.")
+    paylist_benefit_breakdown_export = graphene.String(
+        paylist_uuid=graphene.UUID(required=True), description="The benefit breakdown as CSV (core export).")
     paylist_fsp_options = graphene.List(
         FspProviderGQLType, paylist_uuid=graphene.UUID(required=True),
         description="The Charges-list FSPs present in one paylist, for its FSP filter.")
@@ -542,6 +547,20 @@ class Query(graphene.ObjectType):
         from tasaf_payment.reports import paylist_pdf_breakdown
         paylist = Paylist.objects.filter(uuid=paylist_uuid, is_deleted=False).first()
         return paylist_pdf_breakdown(paylist) if paylist else None
+
+    def resolve_paylist_benefit_breakdown(self, info, paylist_uuid):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
+        from tasaf_payment.breakdown import batch_breakdown
+        paylist = Paylist.objects.filter(uuid=paylist_uuid, is_deleted=False).select_related(
+            'payroll__payment_plan').first()
+        return batch_breakdown(paylist) if paylist else None
+
+    def resolve_paylist_benefit_breakdown_export(self, info, paylist_uuid):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)
+        from tasaf_payment.breakdown import export_breakdown
+        paylist = Paylist.objects.filter(uuid=paylist_uuid, is_deleted=False).select_related(
+            'payroll__payment_plan').first()
+        return export_breakdown(info.context.user, paylist) if paylist else None
 
     def resolve_paylist_fsp_options(self, info, paylist_uuid):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_paylist_search_perms)

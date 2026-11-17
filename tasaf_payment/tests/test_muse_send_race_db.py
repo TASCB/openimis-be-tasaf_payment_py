@@ -19,6 +19,18 @@ def verdict(msg_id, status, desc=''):
         'digitalSignature': 'x'}
 
 
+# The dev clone holds hand-edited demo amounts; these tests are about the send.
+_BREAKDOWN = mock.patch('tasaf_payment.breakdown.batch_breakdown', return_value={'blocked': False, 'problems': []})
+
+
+def setUpModule():
+    _BREAKDOWN.start()
+
+
+def tearDownModule():
+    _BREAKDOWN.stop()
+
+
 class MuseSendRaceDbTest(TestCase):
     def setUp(self):
         from core.models import User
