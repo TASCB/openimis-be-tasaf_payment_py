@@ -31,6 +31,7 @@ PCT = {
     'secondary_unit': Decimal('8000'),
     'secondary_cap_count': 3,
     'household_cap_amount': Decimal('50000'),
+    'children_cap_count': 3,
 }
 
 FSPS = [
@@ -90,9 +91,9 @@ def household_breakdown(rng):
     secondary_raw = rng.choices([0, 1, 2, 3], weights=[72, 19, 7, 2])[0]
     has_disability = rng.random() < 0.12
 
-    young = min(young_raw, PCT['young_child_cap_count'])
-    primary = min(primary_raw, PCT['primary_cap_count'])
-    secondary = min(secondary_raw, PCT['secondary_cap_count'])
+    from calcrule_pct_payment.calculation_rule import PctPaymentCalculationRule
+    paid = PctPaymentCalculationRule.paid_child_counts(young_raw, primary_raw, secondary_raw, PCT)
+    young, primary, secondary = paid['young_child'], paid['primary'], paid['secondary']
 
     disability_amount = PCT['disability_top_up'] if has_disability else Decimal('0')
     young_amount = PCT['young_child_unit'] * young

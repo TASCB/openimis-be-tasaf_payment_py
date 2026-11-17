@@ -386,9 +386,10 @@ class PreAuditService:
 
             passed = 0
             failed = 0
+            paid_or_in_flight = accounts_paid_or_in_flight(account_ids)
             with transaction.atomic():
                 for account in accounts:
-                    reasons = self._check_account(account)
+                    reasons = self._check_account(account, paid_or_in_flight)
                     ext = dict(account.json_ext or {})
                     if reasons:
                         status = PreAuditStatus.FAILED
@@ -421,7 +422,7 @@ class PreAuditService:
             )
 
     @staticmethod
-    def _check_account(account: PaymentAccount) -> list:
+    def _check_account(account: PaymentAccount, paid_or_in_flight=None) -> list:
         """Return a list of failure reason CODES for this account."""
         reasons = []
         if account.verification_status != VerificationStatus.VERIFIED:
@@ -436,7 +437,7 @@ class PreAuditService:
             from tasaf_payment.msisdn import is_valid
             if not is_valid(account.account_number):
                 reasons.append('INVALID_MOBILE_NUMBER')
-        if needs_first_payment_check(account):
+        if needs_first_payment_check(account, paid_or_in_flight):
             reasons.append('FIRST_PAYMENT_CHECK_DUE')
         return reasons
 
@@ -1223,17 +1224,30 @@ def first_payment_check_done(account):
     return mark.get('account_number') == account.account_number and mark.get('fsp_name') == account.fsp_name
 
 
-def needs_first_payment_check(account):
+def needs_first_payment_check(account, paid_or_in_flight=None):
     from tasaf_payment.apps import TasafPaymentConfig
     if not TasafPaymentConfig.require_first_payment_check or first_payment_check_done(account):
         return False
+    if paid_or_in_flight is not None:
+        return account.id not in paid_or_in_flight
     return not account_paid_at(account.id) and not account_payment_in_flight(account.id)
 
 
+def _in_flight_items():
+    return (PaylistItem.objects.filter(is_deleted=False, status=PaylistItemStatus.PENDING, paylist__is_deleted=False)
+            .exclude(paylist__status__in=PAYLIST_FINISHED_STATUSES))
+
+
 def account_payment_in_flight(account_id):
-    return (PaylistItem.objects.filter(payment_account_id=account_id, is_deleted=False,
-                                       status=PaylistItemStatus.PENDING, paylist__is_deleted=False)
-            .exclude(paylist__status__in=PAYLIST_FINISHED_STATUSES).exists())
+    return _in_flight_items().filter(payment_account_id=account_id).exists()
+
+
+def accounts_paid_or_in_flight(account_ids):
+    paid = PaylistItem.objects.filter(payment_account_id__in=account_ids, is_deleted=False,
+                                      status=PaylistItemStatus.PROCESSED)
+    in_flight = _in_flight_items().filter(payment_account_id__in=account_ids)
+    return (set(paid.values_list('payment_account_id', flat=True))
+            | set(in_flight.values_list('payment_account_id', flat=True)))
 
 
 def paid_elsewhere(paylist):
@@ -1679,7 +1693,7 @@ class BatchPreAuditService:
                 inline=lambda ids: PreAuditService(self.user).run_pre_audit(ids),
                 count_ids=lambda: build_pre_audit_queryset(filters).values_list('id', flat=True),
                 label='BatchPreAuditService.dispatch',
-                bounded=False,
+                bounded=True,
             )
         except Exception as exc:
             logger.exception("BatchPreAuditService.dispatch failed")

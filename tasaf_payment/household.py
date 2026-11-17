@@ -18,16 +18,17 @@ def _members(group, params, reference_date):
     members = []
     for link in links:
         person = link.individual
-        age = Rule._age_years(person.dob, reference_date=reference_date)
-        child = bool(params) and Rule._is_age_in_range(
+        age = Rule.age_years(person.dob, reference_date=reference_date)
+        child = bool(params) and Rule.is_age_in_range(
             person.dob, params['young_child_age_min'], params['young_child_age_max'], reference_date)
         members.append({
             'name': ' '.join(p for p in (person.first_name, person.last_name) if p),
             'dob': str(person.dob) if person.dob else None, 'age': age,
             'role': link.role or '', 'recipient': link.recipient_type or '', 'active': link.is_active,
-            'child': child, 'disabled': Rule._member_has_disability(person),
-            'primary': Rule._get_member_value(person, params['primary_count_field']) if params else None,
-            'secondary': Rule._get_member_value(person, params['secondary_count_field']) if params else None,
+            'child': child, 'disabled': Rule.member_has_disability(person),
+            'pregnant': Rule.member_is_pregnant(person, params) if params else None,
+            'primary': Rule.member_value(person, params['primary_count_field']) if params else None,
+            'secondary': Rule.member_value(person, params['secondary_count_field']) if params else None,
         })
     return members
 
@@ -35,13 +36,13 @@ def _members(group, params, reference_date):
 def _recheck(group, params, reference_date, recorded):
     from calcrule_pct_payment.calculation_rule import PctPaymentCalculationRule as Rule
 
-    current = Rule._calculate_household_breakdown(SimpleNamespace(group=group), params,
+    current = Rule.household_breakdown(SimpleNamespace(group=group), params,
                                                   reference_date=reference_date)
     now, then = expected(current, params), expected(recorded, params)
     changed = [c for c in COMPONENTS if abs(now['parts'][c] - then['parts'][c]) > TOLERANCE]
     return {'status': CHANGED if changed else STILL_TRUE, 'changed': changed,
             'parts': {c: _num(now['parts'][c]) for c in COMPONENTS},
-            'children': now['children'], 'disabled': now['disabled'],
+            'children': now['children'], 'disabled': now['disabled'], 'pregnant_count': now['pregnant_count'],
             'primary_count': now['primary_count'], 'secondary_count': now['secondary_count'],
             'cap_cut': _num(now['cap_cut']), 'total': _num(now['total'])}
 
@@ -61,7 +62,7 @@ def _payment(benefit, payroll, params, group, reference_date):
         'payroll_status': payroll.status, 'benefit_status': benefit.status,
         'amount': _num(benefit.amount), 'status': result['status'], 'reason': result.get('reason', ''),
         'parts': parts,
-        'counts': {'children': exp['children'], 'disabled': exp['disabled'],
+        'counts': {'children': exp['children'], 'disabled': exp['disabled'], 'pregnant': exp['pregnant_count'],
                    'primary': exp['primary_count'], 'secondary': exp['secondary_count']} if exp else None,
         'cap_cut': _num(exp['cap_cut']) if exp else None, 'penalties': _num(exp['penalties']) if exp else None,
         'expected': _num(exp['total']) if exp else None,

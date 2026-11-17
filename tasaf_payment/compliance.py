@@ -1,13 +1,13 @@
 from collections import defaultdict
 from decimal import Decimal
 
-from django.core.cache import cache
+from tasaf_payment.window import cache_generation, cache_get, cache_set
 
 MATCH, OVERPAID, UNDERPAID, DATA_ERROR = 'MATCH', 'OVERPAID', 'UNDERPAID', 'DATA_ERROR'
 STATUSES = (MATCH, OVERPAID, UNDERPAID, DATA_ERROR)
-COMPONENTS = ('base', 'disability', 'health', 'primary', 'secondary')
+COMPONENTS = ('base', 'disability', 'pregnancy', 'health', 'primary', 'secondary')
 TOLERANCE = Decimal('0.5')
-CACHE_KEY = 'tasaf.preaudit.compliance:{}'
+CACHE_KEY = 'tasaf.preaudit.compliance:{}:{}:{}'
 CACHE_SECONDS = 600
 
 
@@ -31,32 +31,37 @@ def rule_params(payment_plan):
 
     if payment_plan is None or str(payment_plan.calculation) != PctPaymentCalculationRule.uuid:
         return None
-    return PctPaymentCalculationRule._get_rule_params(payment_plan)
+    return PctPaymentCalculationRule.rule_params(payment_plan)
 
 
 def expected(breakdown, params):
-    disabled = bool(breakdown.get('has_disability')) or as_decimal(breakdown.get('disability_amount')) > 0
-    children = _count(breakdown, 'young_child_count')
-    primary = _count(breakdown, 'primary_count')
-    secondary = _count(breakdown, 'secondary_count')
+    from calcrule_pct_payment.calculation_rule import PctPaymentCalculationRule
+
+    disabled = bool(breakdown.get('has_disability'))
+    paid = PctPaymentCalculationRule.paid_child_counts(
+        _count(breakdown, 'young_child_count'), _count(breakdown, 'primary_count'),
+        _count(breakdown, 'secondary_count'), params)
+    children, primary, secondary = paid['young_child'], paid['primary'], paid['secondary']
+    pregnant = min(_count(breakdown, 'pregnant_count'), params['pregnant_woman_cap_count'])
     parts = {
         'base': params['base_amount'],
         'disability': params['disability_top_up'] if disabled else Decimal('0'),
-        'health': params['young_child_unit'] * min(children, params['young_child_cap_count']),
-        'primary': params['primary_unit'] * min(primary, params['primary_cap_count']),
-        'secondary': params['secondary_unit'] * min(secondary, params['secondary_cap_count']),
+        'pregnancy': params['pregnant_woman_unit'] * pregnant,
+        'health': params['young_child_unit'] * children,
+        'primary': params['primary_unit'] * primary,
+        'secondary': params['secondary_unit'] * secondary,
     }
     raw_total = sum(parts.values())
     capped = min(raw_total, params['household_cap_amount'])
     penalties = sum((as_decimal(v) for k, v in breakdown.items() if k.endswith('_penalty') or k == 'overpayment'),
                     Decimal('0'))
     return {'parts': parts, 'raw_total': raw_total, 'cap_cut': raw_total - capped, 'penalties': penalties,
-            'total': capped - penalties, 'children': min(children, params['young_child_cap_count']),
-            'disabled': disabled, 'primary_count': min(primary, params['primary_cap_count']),
-            'secondary_count': min(secondary, params['secondary_cap_count'])}
+            'total': capped - penalties, 'children': children, 'disabled': disabled,
+            'primary_count': primary, 'secondary_count': secondary, 'pregnant_count': pregnant}
 
 
-PAID_KEYS = {'base': 'base_amount', 'disability': 'disability_amount', 'health': 'young_child_amount',
+PAID_KEYS = {'base': 'base_amount', 'disability': 'disability_amount', 'pregnancy': 'pregnant_amount',
+             'health': 'young_child_amount',
              'primary': 'primary_amount', 'secondary': 'secondary_amount'}
 
 
@@ -79,17 +84,12 @@ def assess(breakdown, amount, params):
     return {'status': status, 'reason': ','.join(differs), 'expected': exp, 'paid': paid, 'variance': variance}
 
 
-def _rows(payment_cycle_id):
+def _rows(payment_cycle_id, location_id=None):
     from contribution_plan.models import PaymentPlan
     from individual.models import Group
-    from payroll.models import PayrollBenefitConsumption, PayrollStatus
-    from tasaf_payment.window import household_of_benefit
+    from tasaf_payment.window import window_payments
 
-    pbc = (PayrollBenefitConsumption.objects
-           .filter(is_deleted=False, payroll__is_deleted=False, benefit__is_deleted=False,
-                   payroll__payment_cycle_id=payment_cycle_id)
-           .exclude(payroll__status=PayrollStatus.REJECTED)
-           .annotate(household=household_of_benefit('benefit__'))
+    pbc = (window_payments(payment_cycle_id, location_id)
            .values_list('benefit_id', 'benefit__code', 'benefit__amount', 'benefit__json_ext',
                         'payroll__payment_plan_id', 'payroll__name',
                         'benefit__individual__first_name', 'benefit__individual__last_name', 'household'))
@@ -108,14 +108,15 @@ def _rows(payment_cycle_id):
     return rows, codes
 
 
-def window_compliance(payment_cycle_id, refresh=False):
-    key = CACHE_KEY.format(payment_cycle_id)
+def window_compliance(payment_cycle_id, location_id=None, refresh=False):
+    key = CACHE_KEY.format(payment_cycle_id, cache_generation('compliance', payment_cycle_id, bump=refresh),
+                           location_id or '')
     if not refresh:
-        cached = cache.get(key)
+        cached = cache_get(key)
         if cached is not None:
             return cached
 
-    rows, codes = _rows(payment_cycle_id)
+    rows, codes = _rows(payment_cycle_id, location_id)
     counts = {s: 0 for s in STATUSES}
     variance = {OVERPAID: Decimal('0'), UNDERPAID: Decimal('0')}
     totals = defaultdict(Decimal)
@@ -134,6 +135,7 @@ def window_compliance(payment_cycle_id, refresh=False):
             totals['expected'] += exp['total']
             totals['paid'] += result['paid']
             receiving['disability'] += int(exp['disabled'])
+            receiving['pregnancy'] += int(exp['pregnant_count'] > 0)
             receiving['health'] += int(exp['children'] > 0)
             receiving['children'] += exp['children']
             receiving['primary'] += int(exp['primary_count'] > 0)
@@ -161,12 +163,13 @@ def window_compliance(payment_cycle_id, refresh=False):
         'receiving': dict(receiving),
         'findings': findings,
     }
-    cache.set(key, report, CACHE_SECONDS)
+    cache_set(key, report, CACHE_SECONDS)
     return report
 
 
-def compliance_page(payment_cycle_id, status=None, search=None, offset=0, limit=50, refresh=False):
-    report = window_compliance(payment_cycle_id, refresh=refresh)
+def compliance_page(payment_cycle_id, location_id=None, status=None, search=None, offset=0, limit=50,
+                    refresh=False):
+    report = window_compliance(payment_cycle_id, location_id, refresh=refresh)
     findings = report['findings']
     if status:
         findings = [f for f in findings if f['status'] == status]
@@ -179,18 +182,19 @@ def compliance_page(payment_cycle_id, status=None, search=None, offset=0, limit=
 
 
 EXPORT_COLUMNS = ['HHID', 'Head of household', 'Payroll', 'Payment code', 'Base', 'Disability',
+                  'Pregnant women', 'Pregnancy',
                   'Children 0-5', 'Health', 'Primary students', 'Primary', 'Secondary students', 'Secondary',
                   'Cap cut', 'Penalties', 'Expected', 'Paid', 'Variance', 'Status', 'Differs in']
 
 
-def export_compliance(user, payment_cycle_id, status=None):
+def export_compliance(user, payment_cycle_id, status=None, location_id=None):
     import uuid as _uuid
 
     from django.core.files.base import ContentFile
     from pandas import DataFrame
     from core.models import ExportableQueryModel
 
-    rows, codes = _rows(payment_cycle_id)
+    rows, codes = _rows(payment_cycle_id, location_id)
     records = []
     for benefit_id, code, amount, breakdown, params, payroll, group_id, head in rows:
         result = assess(breakdown, amount, params)
@@ -201,6 +205,7 @@ def export_compliance(user, payment_cycle_id, status=None):
         records.append([
             codes.get(str(group_id), ''), head, payroll, code,
             float(parts.get('base', 0)), float(parts.get('disability', 0)),
+            exp['pregnant_count'] if exp else None, float(parts.get('pregnancy', 0)),
             exp['children'] if exp else None, float(parts.get('health', 0)),
             exp['primary_count'] if exp else None, float(parts.get('primary', 0)),
             exp['secondary_count'] if exp else None, float(parts.get('secondary', 0)),

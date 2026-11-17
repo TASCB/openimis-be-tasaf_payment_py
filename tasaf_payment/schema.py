@@ -338,15 +338,18 @@ class Query(graphene.ObjectType):
     gepg_verification_requests = graphene.Field(graphene.JSONString, status=graphene.String(),
                                                 limit=graphene.Int())
     verification_outcome = graphene.Field(graphene.JSONString, client_mutation_id=graphene.String(required=True))
-    pre_audit_window_overview = graphene.Field(graphene.JSONString, payment_cycle_id=graphene.UUID(required=True))
+    pre_audit_window_overview = graphene.Field(graphene.JSONString, payment_cycle_id=graphene.UUID(required=True),
+                                               location_id=graphene.Int())
     pre_audit_compliance = graphene.Field(graphene.JSONString, payment_cycle_id=graphene.UUID(required=True),
-                                          status=graphene.String(), search=graphene.String(), offset=graphene.Int(),
-                                          limit=graphene.Int(), refresh=graphene.Boolean())
+                                          location_id=graphene.Int(), status=graphene.String(),
+                                          search=graphene.String(), offset=graphene.Int(), limit=graphene.Int(),
+                                          refresh=graphene.Boolean())
     pre_audit_compliance_export = graphene.String(payment_cycle_id=graphene.UUID(required=True),
-                                                  status=graphene.String())
+                                                  location_id=graphene.Int(), status=graphene.String())
     pre_audit_duplicates = graphene.Field(graphene.JSONString, payment_cycle_id=graphene.UUID(required=True),
-                                          kind=graphene.String(), search=graphene.String(), offset=graphene.Int(),
-                                          limit=graphene.Int(), refresh=graphene.Boolean())
+                                          location_id=graphene.Int(), kind=graphene.String(),
+                                          search=graphene.String(), offset=graphene.Int(), limit=graphene.Int(),
+                                          refresh=graphene.Boolean())
     pre_audit_household = graphene.Field(graphene.JSONString, payment_cycle_id=graphene.UUID(required=True),
                                          group_id=graphene.UUID(), hhid=graphene.String())
     gepg_verification_items = graphene.Field(graphene.JSONString,
@@ -795,34 +798,38 @@ class Query(graphene.ObjectType):
         from tasaf_payment.gepg.setup import readiness
         return GepgReadinessGQLType(**readiness())
 
-    def resolve_pre_audit_compliance(self, info, payment_cycle_id, status=None, search=None, offset=None,
-                                     limit=None, refresh=False, **kwargs):
+    def resolve_pre_audit_compliance(self, info, payment_cycle_id, location_id=None, status=None, search=None,
+                                     offset=None, limit=None, refresh=False, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_pre_audit_search_perms)
         from tasaf_payment.compliance import compliance_page
-        return compliance_page(payment_cycle_id, status=status, search=search, offset=max(offset or 0, 0),
-                               limit=min(max(limit or 50, 1), 500), refresh=bool(refresh))
+        return compliance_page(payment_cycle_id, location_id=location_id, status=status, search=search,
+                               offset=max(offset or 0, 0), limit=min(max(limit or 50, 1), 500),
+                               refresh=bool(refresh))
 
-    def resolve_pre_audit_compliance_export(self, info, payment_cycle_id, status=None, **kwargs):
+    def resolve_pre_audit_compliance_export(self, info, payment_cycle_id, location_id=None, status=None,
+                                            **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_pre_audit_search_perms)
         from tasaf_payment.compliance import export_compliance
-        return export_compliance(info.context.user, payment_cycle_id, status=status or None)
+        return export_compliance(info.context.user, payment_cycle_id, status=status or None,
+                                 location_id=location_id)
 
-    def resolve_pre_audit_duplicates(self, info, payment_cycle_id, kind=None, search=None, offset=None,
-                                     limit=None, refresh=False, **kwargs):
+    def resolve_pre_audit_duplicates(self, info, payment_cycle_id, location_id=None, kind=None, search=None,
+                                     offset=None, limit=None, refresh=False, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_pre_audit_search_perms)
         from tasaf_payment.duplicates import duplicates_page
-        return duplicates_page(payment_cycle_id, kind=kind, search=search, offset=max(offset or 0, 0),
-                               limit=min(max(limit or 50, 1), 500), refresh=bool(refresh))
+        return duplicates_page(payment_cycle_id, location_id=location_id, kind=kind, search=search,
+                               offset=max(offset or 0, 0), limit=min(max(limit or 50, 1), 500),
+                               refresh=bool(refresh))
 
     def resolve_pre_audit_household(self, info, payment_cycle_id, group_id=None, hhid=None, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_pre_audit_search_perms)
         from tasaf_payment.household import household_detail
         return household_detail(payment_cycle_id, group_id=group_id, hhid=hhid)
 
-    def resolve_pre_audit_window_overview(self, info, payment_cycle_id, **kwargs):
+    def resolve_pre_audit_window_overview(self, info, payment_cycle_id, location_id=None, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_pre_audit_search_perms)
         from tasaf_payment.window import window_overview
-        return window_overview(payment_cycle_id)
+        return window_overview(payment_cycle_id, location_id)
 
     def resolve_verification_outcome(self, info, client_mutation_id, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_run_verification_perms)

@@ -5,7 +5,7 @@ from django.test import SimpleTestCase, TestCase
 from tasaf_payment import household as h
 from tasaf_payment.tests.test_compliance import PARAMS, breakdown
 
-RULE = 'calcrule_pct_payment.calculation_rule.PctPaymentCalculationRule._calculate_household_breakdown'
+RULE = 'calcrule_pct_payment.calculation_rule.PctPaymentCalculationRule.household_breakdown'
 
 
 class HouseholdRecheckTest(SimpleTestCase):

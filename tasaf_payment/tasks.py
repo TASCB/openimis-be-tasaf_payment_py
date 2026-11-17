@@ -293,6 +293,8 @@ def pre_audit_chunk(self, account_ids: list, user_id: int, chunk_index: int = 0)
 
         user = User.objects.get(id=user_id)
         result = PreAuditService(user).run_pre_audit(account_ids)
+        if not result.get('success'):
+            raise RuntimeError(result.get('error') or 'pre-audit chunk failed')
         logger.info(
             "pre_audit_chunk: chunk=%d passed=%d failed=%d",
             chunk_index, result.get('passed', 0), result.get('failed', 0),

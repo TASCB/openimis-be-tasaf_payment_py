@@ -102,6 +102,7 @@ class RunBatchPreAuditInputType(OpenIMISMutation.Input):
     location_id     = graphene.Int(required=False)
     rerun           = graphene.Boolean(required=False)
     account_uuids   = graphene.List(graphene.UUID, required=False)
+    all_households  = graphene.Boolean(required=False)
 
 
 class GeneratePaylistInputType(OpenIMISMutation.Input):
@@ -340,6 +341,7 @@ class RunBatchPreAuditMutation(BaseMutation):
             data.get('fsp_type'),
             data.get('location_id'),
             data.get('account_uuids'),
+            data.get('all_households'),
         ])
         if not has_filter:
             raise ValidationError(

@@ -1,3 +1,5 @@
+import pickle
+import zlib
 from decimal import Decimal
 
 from django.db.models import (
@@ -10,6 +12,32 @@ CHANNELS = {'MOBILE': 'MNO', 'BANK': 'BANK'}
 NO_ACCOUNT = 'NO_ACCOUNT'
 NO_HOUSEHOLD = 'NO_HOUSEHOLD'
 BUCKETS = ('MNO', 'BANK', NO_ACCOUNT, NO_HOUSEHOLD)
+
+
+def cache_get(key):
+    from django.core.cache import cache
+    blob = cache.get(key)
+    if not isinstance(blob, bytes):
+        return None
+    try:
+        return pickle.loads(zlib.decompress(blob))
+    except (zlib.error, pickle.UnpicklingError, EOFError, AttributeError, ImportError):
+        return None
+
+
+def cache_set(key, value, seconds):
+    from django.core.cache import cache
+    cache.set(key, zlib.compress(pickle.dumps(value, pickle.HIGHEST_PROTOCOL)), seconds)
+
+
+def cache_generation(report, payment_cycle_id, bump=False):
+    from django.core.cache import cache
+    key = f'tasaf.preaudit.{report}.generation:{payment_cycle_id}'
+    generation = cache.get(key) or 0
+    if bump:
+        generation += 1
+        cache.set(key, generation, None)
+    return generation
 
 
 def household_of_benefit(prefix=''):
@@ -25,14 +53,39 @@ def household_of_benefit(prefix=''):
                     Subquery(payee_household), output_field=UUIDField())
 
 
-def window_benefits(payment_cycle_id):
+def households_in(location_id):
+    from individual.models import Group
+    from tasaf_payment.services import location_descendants_q
+
+    return Group.objects.filter(location_descendants_q(location_id, base='location'), is_deleted=False).values('id')
+
+
+def in_location(queryset, location_id, field='group_id'):
+    if not location_id:
+        return queryset
+    return queryset.filter(**{f'{field}__in': households_in(location_id)})
+
+
+def window_payments(payment_cycle_id, location_id=None):
+    from payroll.models import PayrollBenefitConsumption, PayrollStatus
+
+    links = (PayrollBenefitConsumption.objects
+             .filter(is_deleted=False, payroll__is_deleted=False, benefit__is_deleted=False,
+                     payroll__payment_cycle_id=payment_cycle_id)
+             .exclude(payroll__status=PayrollStatus.REJECTED)
+             .annotate(household=household_of_benefit('benefit__')))
+    return in_location(links, location_id, field='household')
+
+
+def window_benefits(payment_cycle_id, location_id=None):
     from payroll.models import BenefitConsumption, PayrollBenefitConsumption, PayrollStatus
 
     benefit_ids = PayrollBenefitConsumption.objects.filter(
         is_deleted=False, payroll__is_deleted=False, payroll__payment_cycle_id=payment_cycle_id,
     ).exclude(payroll__status=PayrollStatus.REJECTED).values('benefit_id')
-    return BenefitConsumption.objects.filter(id__in=benefit_ids, is_deleted=False).annotate(
+    benefits = BenefitConsumption.objects.filter(id__in=benefit_ids, is_deleted=False).annotate(
         group_id=household_of_benefit())
+    return in_location(benefits, location_id)
 
 
 def _with_channel(benefits):
@@ -44,9 +97,9 @@ def _with_channel(benefits):
     return benefits.annotate(fsp_type=Coalesce(Subquery(fsp_type), Value(''), output_field=CharField()))
 
 
-def window_overview(payment_cycle_id):
+def window_overview(payment_cycle_id, location_id=None):
     totals = {key: {'households': 0, 'benefits': 0, 'amount': Decimal('0')} for key in BUCKETS}
-    rows = (_with_channel(window_benefits(payment_cycle_id))
+    rows = (_with_channel(window_benefits(payment_cycle_id, location_id))
             .annotate(no_household=Case(When(group_id__isnull=True, then=1), default=0,
                                         output_field=IntegerField()))
             .values('fsp_type', 'no_household')

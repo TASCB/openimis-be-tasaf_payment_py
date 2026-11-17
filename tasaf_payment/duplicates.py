@@ -1,15 +1,16 @@
 from collections import defaultdict
 
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.core.cache import cache
 from django.db.models import Count, F
 from django.db.models.functions import Lower, Trim
 
 from tasaf_payment import msisdn
+from tasaf_payment.window import cache_generation, cache_get, cache_set
 
 SAME_HOUSEHOLD, SAME_ACCOUNT, SAME_PERSON = 'SAME_HOUSEHOLD', 'SAME_ACCOUNT', 'SAME_PERSON'
 KINDS = (SAME_HOUSEHOLD, SAME_ACCOUNT, SAME_PERSON)
 CACHE_KEY = 'tasaf.preaudit.duplicates:{}'
+AREA_KEY = 'tasaf.preaudit.duplicates.area:{}:{}:{}'
 CACHE_SECONDS = 600
 
 
@@ -22,14 +23,9 @@ def account_key(fsp_type, number):
 
 
 def _payments(payment_cycle_id):
-    from payroll.models import PayrollBenefitConsumption, PayrollStatus
-    from tasaf_payment.window import household_of_benefit
+    from tasaf_payment.window import window_payments
 
-    rows = (PayrollBenefitConsumption.objects
-            .filter(is_deleted=False, payroll__is_deleted=False, benefit__is_deleted=False,
-                    payroll__payment_cycle_id=payment_cycle_id)
-            .exclude(payroll__status=PayrollStatus.REJECTED)
-            .annotate(household=household_of_benefit('benefit__'))
+    rows = (window_payments(payment_cycle_id)
             .values_list('benefit_id', 'benefit__code', 'benefit__amount', 'household',
                          'payroll__name', 'benefit__individual__first_name', 'benefit__individual__last_name'))
     seen, by_group = set(), defaultdict(list)
@@ -78,8 +74,10 @@ def window_duplicates(payment_cycle_id, refresh=False):
     from individual.models import Group
 
     key = CACHE_KEY.format(payment_cycle_id)
-    if not refresh:
-        cached = cache.get(key)
+    if refresh:
+        cache_generation('duplicates', payment_cycle_id, bump=True)
+    else:
+        cached = cache_get(key)
         if cached is not None:
             return cached
 
@@ -124,12 +122,36 @@ def window_duplicates(payment_cycle_id, refresh=False):
               'extra_amount': sum(g['amount'] - max(r['amount'] or 0 for r in g['rows']) for g in groups
                                   if g['kind'] == SAME_HOUSEHOLD and g['rows']),
               'groups': groups}
-    cache.set(key, report, CACHE_SECONDS)
+    cache_set(key, report, CACHE_SECONDS)
     return report
 
 
-def duplicates_page(payment_cycle_id, kind=None, search=None, offset=0, limit=50, refresh=False):
+def _in_location(report, payment_cycle_id, location_id):
+    from django.db.models import Count
+    from tasaf_payment.window import households_in, window_benefits
+
+    involved = {r['group_id'] for g in report['groups'] for r in g['rows']}
+    inside = {str(i) for i in households_in(location_id).filter(id__in=involved).values_list('id', flat=True)}
+    groups = [g for g in report['groups'] if any(r['group_id'] in inside for r in g['rows'])]
+    scope = window_benefits(payment_cycle_id, location_id).exclude(group_id__isnull=True).aggregate(
+        households=Count('group_id', distinct=True), payments=Count('id'))
+    return {'households': scope['households'], 'payments': scope['payments'],
+            'counts': {kind: sum(1 for g in groups if g['kind'] == kind) for kind in KINDS},
+            'extra_payments': {kind: sum(g['payments'] - 1 for g in groups if g['kind'] == kind) for kind in KINDS},
+            'extra_amount': sum(g['amount'] - max(r['amount'] or 0 for r in g['rows']) for g in groups
+                                if g['kind'] == SAME_HOUSEHOLD and g['rows']),
+            'groups': groups}
+
+
+def duplicates_page(payment_cycle_id, location_id=None, kind=None, search=None, offset=0, limit=50, refresh=False):
     report = window_duplicates(payment_cycle_id, refresh=refresh)
+    if location_id:
+        key = AREA_KEY.format(payment_cycle_id, cache_generation('duplicates', payment_cycle_id), location_id)
+        area = cache_get(key)
+        if area is None:
+            area = _in_location(report, payment_cycle_id, location_id)
+            cache_set(key, area, CACHE_SECONDS)
+        report = area
     groups = report['groups']
     if kind:
         groups = [g for g in groups if g['kind'] == kind]
