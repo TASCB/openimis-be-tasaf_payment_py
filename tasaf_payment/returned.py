@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 REPAID, LAPSED, REPAYING, IN_CORRECTION = 'REPAID', 'LAPSED', 'REPAYING', 'IN_CORRECTION'
 AWAITING_ACTION, UNAPPLIED_WITHDRAWN = 'AWAITING_ACTION', 'UNAPPLIED_WITHDRAWN'
 RESOLUTIONS = (AWAITING_ACTION, IN_CORRECTION, REPAYING, REPAID, UNAPPLIED_WITHDRAWN, LAPSED)
+HELD, HELD_RESOLUTIONS = 'HELD', (AWAITING_ACTION, IN_CORRECTION, REPAYING)
+RECONCILIATION_PARTS = (('returned', 'Returned by MUSE'), (REPAID, 'Re-paid on a new paylist'),
+                        (UNAPPLIED_WITHDRAWN, 'Withdrawn from MUSE'), (LAPSED, 'Lapsed'), (HELD, 'Still held'))
 FINISHED_PAYLISTS = ('CLOSED', 'REJECTED_AT_APPROVAL')
 
 
@@ -49,6 +52,11 @@ def _withdrawn_by_pct():
 
 
 def resolution_q(resolution):
+    if resolution == HELD:
+        held = Q(pk__in=[])
+        for name in HELD_RESOLUTIONS:
+            held |= resolution_q(name)
+        return held
     if resolution == AWAITING_ACTION:
         return awaiting_action()
     base = returned_for_repayment()
@@ -194,23 +202,26 @@ def decide_unapplied(user, item_uuid, action, note=None):
 
 # ── Where the returned money is (reconciliation) ───────────────────────────
 
-def reconciliation(payment_cycle_id=None):
-    """Per payment cycle and provider: returned = re-paid + withdrawn + lapsed + still held."""
-    base = PaylistItem.objects.filter(status=PaylistItemStatus.UNAPPLIED, is_deleted=False, paylist__is_deleted=False)
-    if payment_cycle_id:
-        base = base.filter(paylist__payment_cycle_id=payment_cycle_id)
-    keys = ('paylist__payment_cycle__code', 'payment_account__fsp_name')
+def reconciliation(**filters):
+    """Per provider, under the Reports filters: returned = re-paid + withdrawn + lapsed + still held."""
+    from tasaf_payment.reports import unapplied_items
+
+    base = unapplied_items(**filters)
+    zero = {'count': 0, 'amount': 0.0}
     rows = {}
-
-    def add(qs, name):
-        for r in qs.values(*keys).annotate(n=Count('id'), amount=Sum('amount')):
-            row = rows.setdefault((r[keys[0]], r[keys[1]]), {'cycle': r[keys[0]], 'fsp': r[keys[1]]})
-            row[name] = {'count': r['n'], 'amount': str(r['amount'] or 0)}
-
-    add(base, 'returned')
-    for resolution in RESOLUTIONS:
-        add(base.filter(resolution_q(resolution)), resolution)
-    return sorted(rows.values(), key=lambda r: (r['cycle'] or '', r['fsp'] or ''))
+    for key, _ in RECONCILIATION_PARTS:
+        part = base if key == 'returned' else base.filter(resolution_q(key))
+        for r in part.values('payment_account__fsp_name').annotate(n=Count('id'), amount=Sum('amount')):
+            row = rows.setdefault(r['payment_account__fsp_name'], {'fsp': r['payment_account__fsp_name']})
+            row[key] = {'count': r['n'], 'amount': float(r['amount'] or 0)}
+    providers = [{**{key: zero for key, _ in RECONCILIATION_PARTS}, **row} for row in rows.values()]
+    providers.sort(key=lambda row: (-row['returned']['amount'], row['fsp'] or ''))
+    totals = {key: {'count': sum(row[key]['count'] for row in providers),
+                    'amount': sum(row[key]['amount'] for row in providers)} for key, _ in RECONCILIATION_PARTS}
+    parts = [key for key, _ in RECONCILIATION_PARTS[1:]]
+    unexplained = {'count': totals['returned']['count'] - sum(totals[k]['count'] for k in parts),
+                   'amount': round(totals['returned']['amount'] - sum(totals[k]['amount'] for k in parts), 2)}
+    return {'providers': providers, 'totals': totals, 'unexplained': unexplained}
 
 
 # ── Undecided for too long (ageing) ────────────────────────────────────────

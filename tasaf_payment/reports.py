@@ -12,12 +12,19 @@ from collections import defaultdict
 from decimal import Decimal
 
 import pandas as pd
+from django.db.models import Q
 
 from tasaf_payment.charges import resolve_fsp_code
 from tasaf_payment.compliance import as_decimal
 from tasaf_payment.models import PaylistItem, PaylistItemStatus
 
 logger = logging.getLogger(__name__)
+
+
+def cycle_q(payment_cycle_id):
+    # A paylist's own cycle is optional at Generate; its payroll always has one.
+    return (Q(paylist__payment_cycle_id=payment_cycle_id)
+            | Q(paylist__payment_cycle__isnull=True, paylist__payroll__payment_cycle_id=payment_cycle_id))
 
 def fsp_names_for_code(code):
     """Every stored fsp_name that resolves to this EPAYMENT_CODE.
@@ -73,7 +80,7 @@ def epayment_summary_by_fsp(payment_cycle_id=None, date_from=None, date_to=None,
         .select_related('payment_account', 'benefit_consumption')
     )
     if payment_cycle_id:
-        qs = qs.filter(paylist__payment_cycle_id=payment_cycle_id)
+        qs = qs.filter(cycle_q(payment_cycle_id))
     if destination:
         qs = qs.filter(paylist__destination=destination)
     if date_from:
@@ -205,14 +212,14 @@ PAYLIST_ITEM_EXPORT_COLUMNS = [
 ]
 
 
-def unapplied_summary(payment_cycle_id=None, date_from=None, date_to=None, destination=None):
-    from django.db.models import Count, DateTimeField, Min, Q, Sum
+def unapplied_items(payment_cycle_id=None, date_from=None, date_to=None, destination=None):
+    """Unapplied payments under the Reports filters; the dates are when MUSE returned them."""
+    from django.db.models import DateTimeField, Min
     from django.db.models.functions import Coalesce, TruncDate
-    from tasaf_payment.returned import RESOLUTIONS, resolution_q
 
-    qs = PaylistItem.objects.filter(is_deleted=False, status=PaylistItemStatus.UNAPPLIED)
+    qs = PaylistItem.objects.filter(is_deleted=False, paylist__is_deleted=False, status=PaylistItemStatus.UNAPPLIED)
     if payment_cycle_id:
-        qs = qs.filter(paylist__payment_cycle_id=payment_cycle_id)
+        qs = qs.filter(cycle_q(payment_cycle_id))
     if destination:
         qs = qs.filter(paylist__destination=destination)
     if date_from or date_to:
@@ -224,6 +231,14 @@ def unapplied_summary(payment_cycle_id=None, date_from=None, date_to=None, desti
         if date_to:
             returned = returned.filter(returned_on__lte=date_to)
         qs = PaylistItem.objects.filter(id__in=returned.values('id'))
+    return qs
+
+
+def unapplied_summary(**filters):
+    from django.db.models import Count, Sum
+    from tasaf_payment.returned import RESOLUTIONS, resolution_q
+
+    qs = unapplied_items(**filters)
 
     def totals(subset):
         row = subset.aggregate(count=Count('id'), amount=Sum('amount'))
@@ -242,6 +257,30 @@ RESOLUTION_LABELS = {
     'REPAID': 'Re-paid', 'UNAPPLIED_WITHDRAWN': 'Unapplied withdrawn', 'LAPSED': 'Lapsed',
 }
 ACTION_LABELS = {'REPAY': 'Repay', 'CASE': 'Send to Case', 'WITHDRAW': 'Withdraw'}
+
+
+def export_reconciliation(user, **filters):
+    import uuid as _uuid
+
+    from django.core.files.base import ContentFile
+    from core.models import ExportableQueryModel
+    from tasaf_payment.returned import RECONCILIATION_PARTS, reconciliation
+
+    report = reconciliation(**filters)
+    columns = ['Provider']
+    for key, label in RECONCILIATION_PARTS:
+        columns += [f'{label} (payments)', f'{label} (TZS)']
+    whole = lambda amount: int(amount) if amount == int(amount) else round(amount, 2)  # noqa: E731
+    records = [[row['fsp'] or 'No provider'] + [v for key, _ in RECONCILIATION_PARTS
+                                                for v in (row[key]['count'], whole(row[key]['amount']))]
+               for row in report['providers'] + [{**report['totals'], 'fsp': 'All providers'}]]
+    frame = pd.DataFrame.from_records(records, columns=columns)
+    filename = f"{_uuid.uuid4()}.csv"
+    export = ExportableQueryModel(
+        name=filename, model='PaylistItem', content=ContentFile(frame.to_csv(index=False), filename), user=user,
+        sql_query='tasaf_payment.reports.export_reconciliation', file_format=ExportableQueryModel.FileFormat.CSV)
+    export.save()
+    return export.name
 
 
 def export_unapplied_items(user, items):

@@ -192,6 +192,10 @@ def paylist_item_filters(**kwargs):
     return filters
 
 
+def _report_filters(kwargs):
+    return {k: kwargs.get(k) for k in ('payment_cycle_id', 'date_from', 'date_to', 'destination')}
+
+
 def _account_status_counts():
     rows = (
         PaymentAccount.objects.filter(is_deleted=False)
@@ -223,8 +227,12 @@ class Query(graphene.ObjectType):
     unapplied_resend_preview = graphene.JSONString(
         description="Per payroll and channel: unapplied re-sends ready, and those waiting for their account.")
     unapplied_reconciliation = graphene.JSONString(
-        payment_cycle_id=graphene.UUID(),
-        description="Unapplied payments by cycle and provider: returned = re-paid + withdrawn + lapsed + held.")
+        payment_cycle_id=graphene.UUID(), date_from=graphene.Date(), date_to=graphene.Date(),
+        destination=graphene.String(),
+        description="Unapplied payments by provider: returned = re-paid + withdrawn + lapsed + still held.")
+    unapplied_reconciliation_export = graphene.String(
+        payment_cycle_id=graphene.UUID(), date_from=graphene.Date(), date_to=graphene.Date(),
+        destination=graphene.String(), description="The reconciliation as CSV; returns the export name.")
 
     account_check_job = OrderedDjangoFilterConnectionField(
         AccountCheckJobGQLType, orderBy=graphene.List(of_type=graphene.String))
@@ -387,6 +395,7 @@ class Query(graphene.ObjectType):
     )
     unapplied_items_export = graphene.String(
         hhid=graphene.String(),
+        fsp_name=graphene.String(),
         account_number=graphene.String(),
         resolution=graphene.String(),
         batch_reference=graphene.String(),
@@ -642,7 +651,8 @@ class Query(graphene.ObjectType):
         if not kwargs.get('include_unpaid'):
             filters.append(Q(status=PaylistItemStatus.PROCESSED))
         if kwargs.get('payment_cycle_id'):
-            filters.append(Q(paylist__payment_cycle_id=kwargs['payment_cycle_id']))
+            from tasaf_payment.reports import cycle_q
+            filters.append(cycle_q(kwargs['payment_cycle_id']))
         if kwargs.get('destination'):
             filters.append(Q(paylist__destination=kwargs['destination']))
         if kwargs.get('date_from'):
@@ -668,8 +678,7 @@ class Query(graphene.ObjectType):
     def resolve_unapplied_summary(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_reports_perms)
         from tasaf_payment.reports import unapplied_summary
-        return unapplied_summary(**{k: kwargs.get(k) for k in
-                                    ('payment_cycle_id', 'date_from', 'date_to', 'destination')})
+        return unapplied_summary(**_report_filters(kwargs))
 
     def resolve_epayment_summary_by_fsp(self, info, **kwargs):
         """Summary of e-Payment by FSP."""
@@ -902,10 +911,15 @@ class Query(graphene.ObjectType):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
         return resend_preview(info.context.user)
 
-    def resolve_unapplied_reconciliation(self, info, payment_cycle_id=None, **kwargs):
+    def resolve_unapplied_reconciliation(self, info, **kwargs):
         from tasaf_payment.returned import reconciliation
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_reports_perms)
-        return reconciliation(payment_cycle_id)
+        return reconciliation(**_report_filters(kwargs))
+
+    def resolve_unapplied_reconciliation_export(self, info, **kwargs):
+        from tasaf_payment.reports import export_reconciliation
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_reports_perms)
+        return export_reconciliation(info.context.user, **_report_filters(kwargs))
 
     def resolve_paylist_generation_preview(self, info, payroll_id, batch_type, destination=None, fsp_code=None,
                                            **kwargs):

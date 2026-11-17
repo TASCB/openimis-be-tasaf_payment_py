@@ -404,16 +404,29 @@ class UnappliedRepaymentDbTest(TestCase):
         self.assertEqual((row()['waitingAccount'], row()['ready']), (0, 1))
 
     def test_reconciliation_adds_up(self):
-        from tasaf_payment.returned import RESOLUTIONS, reconciliation
+        from tasaf_payment.reports import unapplied_summary
+        from tasaf_payment.returned import RECONCILIATION_PARTS, reconciliation
         self.clear(self.flaky)
         self.decide(self.unapply(self.bad), 'CASE')
         self.decide(self.unapply(self.flaky), 'REPAY')
         self.decide(self.unapply(self.ok), 'WITHDRAW')
-        rows = reconciliation(self.paylist.payment_cycle_id)
-        self.assertTrue(rows)
-        for row in rows:
-            parts = sum(row.get(r, {}).get('count', 0) for r in RESOLUTIONS)
+        report = reconciliation(payment_cycle_id=self.paylist.payment_cycle_id)
+        self.assertEqual(report['unexplained'], {'count': 0, 'amount': 0})
+        self.assertEqual(report['totals']['returned']['count'], 3)
+        for row in report['providers']:
+            parts = sum(row[key]['count'] for key, _ in RECONCILIATION_PARTS[1:])
             self.assertEqual(row['returned']['count'], parts)
+        summary = unapplied_summary(payment_cycle_id=self.paylist.payment_cycle_id)['total']
+        self.assertEqual(summary['count'], report['totals']['returned']['count'])
+
+    def test_reconciliation_finds_a_paylist_by_its_payroll_cycle(self):
+        from tasaf_payment.returned import reconciliation
+        cycle = self.paylist.payroll.payment_cycle_id
+        if not cycle:
+            self.skipTest('fixture payroll has no payment cycle')
+        self.unapply(self.bad)
+        type(self.paylist).objects.filter(id=self.paylist.id).update(payment_cycle=None)
+        self.assertEqual(reconciliation(payment_cycle_id=cycle)['totals']['returned']['count'], 1)
 
     def test_undecided_payment_is_reminded_once(self):
         from tasaf_payment.returned import remind_overdue
