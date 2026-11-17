@@ -1,3 +1,4 @@
+import contextvars
 import json
 import logging
 import uuid
@@ -17,10 +18,13 @@ TOPIC = 'tasaf.payment.unapplied.withdrawal'
 KEY = 'muse_withdrawal'
 MSG_PREFIX = 'TW'
 SENT, RECEIVED, REJECTED, RECORDED, SENDING = 'SENT', 'RECEIVED', 'REJECTED', 'RECORDED', 'SENDING'
+REMINDED = 'reminded_at'
 SEND_LOCK_MINUTES = 10  # frees payees whose request died mid-send
+HEARTBEAT_SECONDS = 60  # keeps a long send's lock
 REASON_MAX, NAME_MAX = 255, 100
 PROVIDER_CHANGED_REASON = 'Provider changed'
 STOP_AFTER_FAILURES = 3  # GovESB down: stop instead of timing out on each
+_IN_SEND = contextvars.ContextVar('withdrawal_in_send', default=False)  # inline ACKs: send() announces them
 
 
 def pending():
@@ -121,8 +125,15 @@ def _claim(user):
             raise WithdrawalError('There is no withdrawn unapplied payment to report to MUSE')
         previous = {item.pk: (item.json_ext or {}).get(KEY) for item in items}
         _stamp(items, user, status=SENDING, sending_at=datetime.now(tz=timezone.utc).isoformat(),
-               by=getattr(user, 'username', None))
+               by=getattr(user, 'username', None), run=uuid.uuid4().hex)
     return items, previous
+
+
+def _heartbeat(item_ids):
+    from django.db.models import F, Func, JSONField, Value
+    PaylistItem.objects.filter(id__in=item_ids, **{f'json_ext__{KEY}__status': SENDING}).update(json_ext=Func(
+        F('json_ext'), Value(f'{{{KEY},sending_at}}'), Value(json.dumps(datetime.now(tz=timezone.utc).isoformat())),
+        function='jsonb_set', output_field=JSONField()))
 
 
 def _release(items, user, previous):
@@ -161,7 +172,8 @@ def _send_one(item, user, producer, previous):
     _log(item, body, 'SUCCESS', http_status_code=response.get('status_code'),
          esb_request_id=str(response.get('request_id') or ''),
          response_body=json.dumps(response.get('esb_body'), default=str)[:4000])
-    _stamp([item], user, msg_id=message_id, sent_at=now, status=SENT)
+    _stamp([item], user, msg_id=message_id, sent_at=now, status=SENT, status_desc=None, answered_at=None,
+           **{REMINDED: None})
     reply = muse_reply(response.get('esb_body'))
     if reply:
         from tasaf_payment.muse.inbound import handle
@@ -169,15 +181,67 @@ def _send_one(item, user, producer, previous):
     return None
 
 
-def send(user):
+def _send_mode():
     from tasaf_payment.muse.sender import RECORD_ONLY, SEND, muse_config
-
     record_only = str(muse_config('muse_submit_mode', SEND)).upper() == RECORD_ONLY
-    producer = None if record_only else _producer()
+    return None if record_only else _producer()
+
+
+def send(user):
+    producer = _send_mode()
     items, previous = _claim(user)
-    result = {'sent': 0, 'failed': 0, 'skipped': 0, 'errors': []}
+    return run(items, previous, user, producer)
+
+
+def queue_send(user):
+    """Claim now, send on the worker (~6 s per payee)."""
+    from tasaf_payment.tasks import send_unapplied_withdrawals_task
+
+    producer = _send_mode()
+    items, previous = _claim(user)
+    run_id = ((items[0].json_ext or {}).get(KEY) or {}).get('run')
+    try:
+        send_unapplied_withdrawals_task.delay(
+            [i.id for i in items], [[pk, state] for pk, state in previous.items()], user.id, run_id)
+        return {'queued': True, 'count': len(items)}
+    except Exception:  # noqa: BLE001 — no broker: send inline
+        logger.warning("Unapplied withdraw: enqueue failed, sending inline", exc_info=True)
+    return run(items, previous, user, producer)
+
+
+def run_claimed(item_ids, previous, user, run_id):
+    """Sends only the payees this run still holds."""
+    items = list(PaylistItem.objects.filter(
+        id__in=item_ids, **{f'json_ext__{KEY}__status': SENDING, f'json_ext__{KEY}__run': run_id})
+        .select_related('paylist', 'payment_account__group_beneficiary__group', 'benefit_consumption')
+        .order_by('id'))
+    if not items:
+        logger.warning("Unapplied withdraw run %s: no payee is still claimed", run_id)
+        return {'sent': 0, 'failed': 0, 'skipped': 0, 'errors': []}
+    return run(items, {int(pk): state for pk, state in previous}, user, _send_mode())
+
+
+def run(items, previous, user, producer):
+    token = _IN_SEND.set(True)
+    try:
+        result = _send_all(items, user, producer, previous)
+    finally:
+        _IN_SEND.reset(token)
+    sent_ids = result.pop('sent_ids')
+    logger.info("MUSE unapplied withdraw: %s", result)
+    if producer is not None:
+        _announce_run(sent_ids, user, result)
+    return result
+
+
+def _send_all(items, user, producer, previous):
+    result = {'sent': 0, 'failed': 0, 'skipped': 0, 'errors': [], 'sent_ids': []}
     in_a_row = 0
+    beat = datetime.now(tz=timezone.utc)
     for index, item in enumerate(items):
+        if (datetime.now(tz=timezone.utc) - beat).total_seconds() >= HEARTBEAT_SECONDS:
+            _heartbeat([i.id for i in items[index:]])
+            beat = datetime.now(tz=timezone.utc)
         if in_a_row >= STOP_AFTER_FAILURES:
             rest = items[index:]
             _release(rest, user, previous)
@@ -199,9 +263,23 @@ def send(user):
                 result['errors'].append(error)
         else:
             result['sent'] += 1
+            result['sent_ids'].append(item.id)
             in_a_row = 0
-    logger.info("MUSE unapplied withdraw: %s", result)
     return result
+
+
+def _announce_run(sent_ids, user, result):
+    from tasaf_payment.events import emit_withdrawal_event
+
+    states = [((ext or {}).get(KEY) or {}) for ext in
+              PaylistItem.objects.filter(id__in=sent_ids).values_list('json_ext', flat=True)]
+    rejected = [s for s in states if s.get('status') == REJECTED]
+    emit_withdrawal_event(
+        'sent', user=user, run=(states[0].get('run') if states else '') or uuid.uuid4().hex,
+        received=sum(1 for s in states if s.get('status') == RECEIVED), rejected=len(rejected),
+        reason=next((s['status_desc'] for s in rejected if s.get('status_desc')), ''),
+        waiting=sum(1 for s in states if s.get('status') == SENT),
+        failed=result['failed'], error=(result['errors'] or [''])[0], skipped=result['skipped'])
 
 
 def acknowledge(org_msg_id, status, status_desc=None):
@@ -210,7 +288,37 @@ def acknowledge(org_msg_id, status, status_desc=None):
         return None
     from tasaf_payment.services import inbound_audit_user
     state = REJECTED if str(status or '').upper() == 'REJECTED' else RECEIVED
-    with transaction.atomic():
-        _stamp(items, inbound_audit_user(items[0]), status=state, status_desc=status_desc,
-               answered_at=datetime.now(tz=timezone.utc).isoformat())
+    # RECEIVED is final
+    changed = [i for i in items if ((i.json_ext or {}).get(KEY) or {}).get('status') not in (RECEIVED, state)]
+    if len(changed) < len(items):
+        logger.info("Withdrawal %s: answer %s ignored for %d payee(s) already answered",
+                    org_msg_id, state, len(items) - len(changed))
+    if changed:
+        with transaction.atomic():
+            _stamp(changed, inbound_audit_user(changed[0]), status=state, status_desc=status_desc,
+                   answered_at=datetime.now(tz=timezone.utc).isoformat())
+            if not _IN_SEND.get():
+                from tasaf_payment.events import emit_withdrawal_event
+                emit_withdrawal_event('answered', msg_id=org_msg_id, status=state, reason=status_desc or '',
+                                      references=[payment_reference(i) for i in changed])
     return len(items)
+
+
+def remind(minutes, apply=False):
+    """Payees unanswered after `minutes`, announced once."""
+    from tasaf_payment.events import emit_withdrawal_event
+
+    cutoff = (datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    items = [i for i in PaylistItem.objects.filter(
+        is_deleted=False, **{f'json_ext__{KEY}__status': SENT, f'json_ext__{KEY}__sent_at__lt': cutoff})
+        .order_by('id') if not ((i.json_ext or {}).get(KEY) or {}).get(REMINDED)]
+    rows = [{'reference': payment_reference(i), 'msg_id': ((i.json_ext or {}).get(KEY) or {}).get('msg_id'),
+             'sent_at': ((i.json_ext or {}).get(KEY) or {}).get('sent_at')} for i in items]
+    if apply and items:
+        from tasaf_payment.services import inbound_audit_user
+        stamp = datetime.now(tz=timezone.utc).isoformat()
+        with transaction.atomic():
+            _stamp(items, inbound_audit_user(items[0]), **{REMINDED: stamp})
+            emit_withdrawal_event('unanswered', run=stamp, count=len(items), minutes=minutes,
+                                  msg_ids=[r['msg_id'] for r in rows])
+    return rows

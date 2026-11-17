@@ -220,6 +220,18 @@ def submit_paylist_task(self, paylist_uuid, user_id):
     return {'success': bool(result.get('success')), 'outcome': result.get('outcome')}
 
 
+# ─── Unapplied withdrawals to MUSE ────────────────────────────────────────────
+
+@shared_task(bind=True, max_retries=0, name='tasaf_payment.send_unapplied_withdrawals_task')
+def send_unapplied_withdrawals_task(self, item_ids, previous, user_id, run_id):
+    from core.models import User
+    from tasaf_payment.muse.withdrawal import run_claimed
+
+    result = run_claimed(item_ids, previous, User.objects.get(id=user_id), run_id)
+    logger.info("send_unapplied_withdrawals_task: run=%s %s", run_id, result)
+    return result
+
+
 # ─── GePG resend ──────────────────────────────────────────────────────────────
 
 @shared_task(bind=True, max_retries=0, name='tasaf_payment.resend_gepg_request_task')

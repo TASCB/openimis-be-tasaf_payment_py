@@ -944,10 +944,12 @@ class SendUnappliedWithdrawalsMutation(OpenIMISMutation):
 
     @classmethod
     def async_mutate(cls, user, **data):
-        from tasaf_payment.muse.withdrawal import send
+        from tasaf_payment.muse.withdrawal import queue_send
         try:
             _require_perms(user, TasafPaymentConfig.gql_unapplied_decide_perms)
-            result = send(user)
+            result = queue_send(user)
+            if result.get('queued'):
+                return None
             if result['failed'] or result['skipped']:
                 parts = [f"{result['sent']} sent"]
                 if result['failed']:

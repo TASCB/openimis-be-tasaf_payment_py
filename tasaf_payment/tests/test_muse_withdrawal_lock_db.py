@@ -64,3 +64,64 @@ class MuseWithdrawalLockDbTest(TestCase):
             PaylistItem.objects.filter(pk=pk).update(json_ext={
                 **item.json_ext, withdrawal.KEY: {'status': withdrawal.SENDING, 'sending_at': at}})
         self.assertEqual(list(withdrawal.pending().values_list('pk', flat=True)), [self.ids[0]])
+
+
+class MuseWithdrawalQueueAndRemindDbTest(MuseWithdrawalLockDbTest):
+    def ext(self, pk):
+        return (PaylistItem.objects.get(pk=pk).json_ext or {}).get(withdrawal.KEY) or {}
+
+    def test_the_request_claims_and_the_worker_sends(self):
+        self.producer.publish.return_value = {'ok': True, 'status_code': 200, 'esb_body': {}}
+        with mock.patch('tasaf_payment.tasks.send_unapplied_withdrawals_task.delay') as delay:
+            self.assertEqual(withdrawal.queue_send(self.user), {'queued': True, 'count': 2})
+        self.assertEqual(self.states(), [withdrawal.SENDING, withdrawal.SENDING])
+        self.assertEqual(withdrawal.pending().count(), 0)
+        item_ids, previous, user_id, run_id = delay.call_args.args
+        self.assertEqual((sorted(item_ids), user_id), (sorted(self.ids), self.user.id))
+        self.assertEqual(withdrawal.run_claimed(item_ids, previous, self.user, run_id)['sent'], 2)
+        self.assertEqual(self.states(), [withdrawal.SENT, withdrawal.SENT])
+
+    def test_the_worker_skips_payees_another_send_took_over(self):
+        with mock.patch('tasaf_payment.tasks.send_unapplied_withdrawals_task.delay') as delay:
+            withdrawal.queue_send(self.user)
+        item_ids, previous, _, _ = delay.call_args.args
+        self.assertEqual(withdrawal.run_claimed(item_ids, previous, self.user, 'other-run')['sent'], 0)
+        self.producer.publish.assert_not_called()
+
+    def test_no_broker_sends_inline(self):
+        self.producer.publish.return_value = {'ok': True, 'status_code': 200, 'esb_body': {}}
+        with mock.patch('tasaf_payment.tasks.send_unapplied_withdrawals_task.delay', side_effect=OSError('no broker')):
+            self.assertEqual(withdrawal.queue_send(self.user)['sent'], 2)
+
+    def test_heartbeat_keeps_the_lock(self):
+        withdrawal._claim(self.user)
+        old = (datetime.now(tz=timezone.utc) - timedelta(minutes=withdrawal.SEND_LOCK_MINUTES + 1)).isoformat()
+        for pk in self.ids:
+            ext = PaylistItem.objects.get(pk=pk).json_ext
+            ext[withdrawal.KEY]['sending_at'] = old
+            PaylistItem.objects.filter(pk=pk).update(json_ext=ext)
+        self.assertEqual(withdrawal.pending().count(), 2)
+        withdrawal._heartbeat(self.ids)
+        self.assertEqual(withdrawal.pending().count(), 0)
+        self.assertEqual(self.ext(self.ids[0])['status'], withdrawal.SENDING)
+
+    def test_unanswered_payees_are_announced_once_and_a_resend_clears_it(self):
+        self.producer.publish.return_value = {'ok': True, 'status_code': 200, 'esb_body': {}}
+        withdrawal.send(self.user)
+        late = (datetime.now(tz=timezone.utc) - timedelta(minutes=31)).isoformat()
+        for pk in self.ids:
+            ext = PaylistItem.objects.get(pk=pk).json_ext
+            ext[withdrawal.KEY]['sent_at'] = late
+            PaylistItem.objects.filter(pk=pk).update(json_ext=ext)
+        with mock.patch('tasaf_payment.events.emit_withdrawal_event') as emitted:
+            self.assertEqual(len(withdrawal.remind(30, apply=True)), 2)
+            self.assertEqual(withdrawal.remind(30, apply=True), [])
+        emitted.assert_called_once()
+        self.assertEqual(emitted.call_args.kwargs['count'], 2)
+        self.assertTrue(self.ext(self.ids[0]).get(withdrawal.REMINDED))
+        for pk in self.ids:
+            ext = PaylistItem.objects.get(pk=pk).json_ext
+            ext[withdrawal.KEY]['status'] = withdrawal.REJECTED
+            PaylistItem.objects.filter(pk=pk).update(json_ext=ext)
+        withdrawal.send(self.user)
+        self.assertIsNone(self.ext(self.ids[0]).get(withdrawal.REMINDED))

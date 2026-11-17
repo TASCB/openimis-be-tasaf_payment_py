@@ -7,9 +7,9 @@ from tasaf_payment.models import UNAPPLIED_ACTION_KEY
 from tasaf_payment.muse import withdrawal
 
 
-def item(decision, end_to_end_id='1FJ8SKD9R1', amount='20000'):
+def item(decision, end_to_end_id='1FJ8SKD9R1', amount='20000', id=None):
     return SimpleNamespace(json_ext={UNAPPLIED_ACTION_KEY: decision}, end_to_end_id=end_to_end_id,
-                           benefit_consumption=None, amount=amount)
+                           benefit_consumption=None, amount=amount, id=id)
 
 
 class WithdrawMessageTest(SimpleTestCase):
@@ -47,7 +47,9 @@ class WithdrawSendTest(SimpleTestCase):
         producer = mock.Mock()
         producer.publish.side_effect = outcomes
         released = []
+        self.announced = mock.Mock()
         with mock.patch.object(withdrawal, '_claim', return_value=(rows, {})), \
+                mock.patch.object(withdrawal, '_announce_run', self.announced), \
                 mock.patch.object(withdrawal, '_producer', return_value=producer), \
                 mock.patch.object(withdrawal, '_release', side_effect=lambda items, u, p: released.extend(items)), \
                 mock.patch.object(withdrawal, '_stamp'), mock.patch.object(withdrawal, '_log'), \
@@ -77,3 +79,48 @@ class WithdrawSendTest(SimpleTestCase):
         rows = [item({'action': 'WITHDRAW', 'by': 'pct1'}, end_to_end_id=None)]
         result, producer, released = self.run_send(rows, [])
         self.assertEqual((result['skipped'], producer.publish.call_count, released), (1, 0, rows))
+
+    def test_one_notice_per_send_names_only_the_payments_that_went(self):
+        rows = [item({'action': 'WITHDRAW', 'by': 'pct1'}, end_to_end_id=f'CODE{i}', id=i + 1) for i in range(3)]
+        ok = {'ok': True, 'status_code': 200}
+        result, _, _ = self.run_send(rows, [ok, {'ok': False, 'error': 'busy'}, ok])
+        self.announced.assert_called_once()
+        sent_ids, _, summary = self.announced.call_args.args
+        self.assertEqual((sent_ids, summary['failed'], summary['errors']), ([1, 3], 1, ['busy']))
+        self.assertNotIn('sent_ids', result)
+
+
+class WithdrawAnswerTest(SimpleTestCase):
+    def acknowledge(self, in_send, answered=None, status='REJECTED'):
+        row = item({'action': 'WITHDRAW', 'by': 'pct1'})
+        if answered:
+            row.json_ext[withdrawal.KEY] = {'status': answered}
+        emitted, self.stamped = mock.Mock(), mock.Mock()
+        token = withdrawal._IN_SEND.set(in_send)
+        try:
+            with mock.patch.object(withdrawal.PaylistItem.objects, 'filter', return_value=[row]), \
+                    mock.patch.object(withdrawal, '_stamp', self.stamped), \
+                    mock.patch('tasaf_payment.services.inbound_audit_user', return_value=None), \
+                    mock.patch('django.db.transaction.atomic'), \
+                    mock.patch('tasaf_payment.events.emit_withdrawal_event', emitted):
+                withdrawal.acknowledge('TW1', status, 'not configured')
+        finally:
+            withdrawal._IN_SEND.reset(token)
+        return emitted
+
+    def test_a_late_answer_is_announced(self):
+        emitted = self.acknowledge(in_send=False)
+        emitted.assert_called_once()
+        self.assertEqual(emitted.call_args.kwargs['status'], withdrawal.REJECTED)
+        self.assertEqual(emitted.call_args.kwargs['references'], ['1FJ8SKD9R1'])
+
+    def test_an_answer_inside_the_send_waits_for_the_send_notice(self):
+        self.acknowledge(in_send=True).assert_not_called()
+
+    def test_a_repeated_answer_is_not_announced_again(self):
+        self.acknowledge(in_send=False, answered=withdrawal.RECEIVED, status='RECEIVED').assert_not_called()
+        self.stamped.assert_not_called()
+
+    def test_a_refusal_after_received_is_ignored(self):
+        self.acknowledge(in_send=False, answered=withdrawal.RECEIVED, status='REJECTED').assert_not_called()
+        self.stamped.assert_not_called()

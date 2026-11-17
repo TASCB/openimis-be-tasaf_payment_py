@@ -79,6 +79,9 @@ def emit_gepg_unanswered(request, minutes):
 
 account_check_done = Signal()
 
+# kwargs: event ('sent' | 'answered' | 'unanswered'), user, counts
+withdrawal_event = Signal()
+
 
 def emit_account_check_done(job):
     if not account_check_done.has_listeners():
@@ -88,4 +91,15 @@ def emit_account_check_done(job):
         for receiver, result in account_check_done.send_robust(sender=None, job=job):
             if isinstance(result, Exception):
                 logger.warning("account_check_done receiver %s failed: %s", receiver, result)
+    transaction.on_commit(send)
+
+
+def emit_withdrawal_event(event, user=None, **details):
+    if not withdrawal_event.has_listeners():
+        return
+
+    def send():
+        for receiver, result in withdrawal_event.send_robust(sender=None, event=event, user=user, **details):
+            if isinstance(result, Exception):
+                logger.warning("withdrawal_event receiver %s failed: %s", receiver, result)
     transaction.on_commit(send)

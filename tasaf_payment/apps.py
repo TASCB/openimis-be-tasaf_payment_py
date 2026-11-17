@@ -111,6 +111,7 @@ DEFAULT_CONFIG = {
     "gepg_send_backoff_seconds": 2,
     # GePG usually answers in minutes: remind after this, release unanswered accounts after the timeout.
     "gepg_answer_warning_minutes": 30,
+    "withdrawal_answer_warning_minutes": 30,
     "gepg_answer_timeout_hours": 6,
     # GePG codes meaning "could not check" (provider unreachable or silent): the account goes back to
     # where it was instead of failing: 7353 provider not enabled, 7355 no answer, 7356 our account not set up.
@@ -189,6 +190,7 @@ class TasafPaymentConfig(AppConfig):
     gepg_send_max_attempts = 3
     gepg_send_backoff_seconds = 2
     gepg_answer_warning_minutes = 30
+    withdrawal_answer_warning_minutes = 30
     gepg_answer_timeout_hours = 6
     gepg_retry_codes = ["7353", "7355", "7356"]
     require_first_payment_check = True
