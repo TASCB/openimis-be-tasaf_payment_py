@@ -340,7 +340,7 @@ class Query(graphene.ObjectType):
     muse_settings = graphene.Field(MuseSettingsGQLType)
     muse_readiness = graphene.Field(MuseReadinessGQLType)
     muse_change_requests = graphene.Field(graphene.JSONString, status=graphene.String(),
-                                          kinds=graphene.List(graphene.String))
+                                          kinds=graphene.List(graphene.String), limit=graphene.Int())
     gepg_settings = graphene.Field(GepgSettingsGQLType)
     gepg_readiness = graphene.Field(GepgReadinessGQLType)
     gepg_verification_requests = graphene.Field(graphene.JSONString, status=graphene.String(),
@@ -795,11 +795,11 @@ class Query(graphene.ObjectType):
                                    unapplied_sub_budget_class=unapplied_sub_budget_class(s.sub_budget_class),
                                    **{f: getattr(s, f) for f in SETTINGS_FIELDS})
 
-    def resolve_muse_change_requests(self, info, status=None, kinds=None, **kwargs):
+    def resolve_muse_change_requests(self, info, status=None, kinds=None, limit=None, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
         from tasaf_payment.muse.setup import change_rows
         user = info.context.user
-        rows = change_rows(status=status, kinds=kinds)
+        rows = change_rows(status=status, kinds=kinds, limit=min(limit or 50, 500))
         me = getattr(user, 'username', None)
         can_approve = user.has_perms(TasafPaymentConfig.gql_muse_settings_approve_perms)
         can_propose = user.has_perms(TasafPaymentConfig.gql_muse_settings_propose_perms)

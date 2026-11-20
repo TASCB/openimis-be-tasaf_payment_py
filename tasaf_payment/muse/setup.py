@@ -548,11 +548,15 @@ def change_rows(status=None, limit=50, kinds=None):
         qs = qs.filter(status=status)
     if kinds:
         qs = qs.filter(kind__in=kinds)
+    changes = list(qs.order_by('-date_created')[:limit])
+    latest = {}
+    for decision in (ApprovalDecision.objects
+                     .filter(step__approval_request__object_id__in=[str(c.id) for c in changes], is_deleted=False)
+                     .select_related('approver', 'step__approval_request').order_by('-date_created')):
+        latest.setdefault(decision.step.approval_request.object_id, decision)
     rows = []
-    for c in qs.order_by('-date_created')[:limit]:
-        decision = (ApprovalDecision.objects
-                    .filter(step__approval_request__object_id=str(c.id), is_deleted=False)
-                    .select_related('approver').order_by('-date_created').first())
+    for c in changes:
+        decision = latest.get(str(c.id))
         rows.append({
             'id': str(c.id), 'kind': c.kind, 'fsp_code': c.fsp_code, 'status': c.status,
             'proposed': c.proposed, 'current': c.current,
