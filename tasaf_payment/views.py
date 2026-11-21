@@ -183,6 +183,30 @@ class GepgMessageView(View):
         return reply(*handle(gepg_message.load(body) or {}))
 
 
+@method_decorator(csrf_exempt, name='dispatch')
+class TipsMessageView(View):
+    """POST /api/tasaf_payment/tips/message/ — TIPS lookup results over GovESB (JSON)."""
+
+    def post(self, request, *args, **kwargs):
+        from coremis_app_integration.govesb_inbound import signed_reply
+        from tasaf_payment.tips.inbound import handle
+        from tasaf_payment.tips.log import record
+
+        def reply(success, body):
+            text = signed_reply(True, esb_body=body) if success else signed_reply(False, message=body)
+            record(request.body, success, text)
+            return HttpResponse(text, content_type='application/json', status=200)
+
+        payload, error = _parse_json_body(request)
+        if error:
+            return reply(False, f'Invalid JSON: {error}')
+        payload, verr = _verify_inbound(payload, request.body)
+        if verr:
+            logger.warning("[GovESB] inbound TIPS message rejected: %s", verr)
+            return reply(False, verr)
+        return reply(*handle(payload))
+
+
 # ── Bulk account check upload ────────────────────────────────────────────────
 
 from rest_framework import status as _status

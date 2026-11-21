@@ -118,6 +118,9 @@ DEFAULT_CONFIG = {
     # GePG codes meaning "could not check" (provider unreachable or silent): the account goes back to
     # where it was instead of failing: 7353 provider not enabled, 7355 no answer, 7356 our account not set up.
     "gepg_retry_codes": ["7353", "7355", "7356"],
+    "tips_bulk_max_rows": 1000,
+    "tips_send_max_attempts": 3,
+    "tips_answer_timeout_hours": 6,
     "require_first_payment_check": True,
     "check_mobile_prefix": True,
     "name_match": {
@@ -196,6 +199,9 @@ class TasafPaymentConfig(AppConfig):
     withdrawal_answer_warning_minutes = 30
     gepg_answer_timeout_hours = 6
     gepg_retry_codes = ["7353", "7355", "7356"]
+    tips_bulk_max_rows = 1000
+    tips_send_max_attempts = 3
+    tips_answer_timeout_hours = 6
     require_first_payment_check = True
     check_mobile_prefix = True
     name_match = {}

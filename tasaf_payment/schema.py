@@ -25,6 +25,9 @@ from tasaf_payment.gql_mutations import (
     SaveGepgSettingsMutation,
     ResendGepgVerificationMutation,
     ReleaseGepgVerificationMutation,
+    SaveTipsSettingsMutation,
+    ResendTipsLookupMutation,
+    ReleaseTipsLookupMutation,
     DeleteFspMappingMutation,
     SeedFspMappingsMutation,
     SaveFspChargesMutation,
@@ -346,6 +349,11 @@ class Query(graphene.ObjectType):
     gepg_verification_requests = graphene.Field(graphene.JSONString, status=graphene.String(),
                                                 limit=graphene.Int())
     verification_outcome = graphene.Field(graphene.JSONString, client_mutation_id=graphene.String(required=True))
+    tips_settings = graphene.Field(graphene.JSONString)
+    tips_readiness = graphene.Field(graphene.JSONString)
+    tips_lookup_requests = graphene.Field(graphene.JSONString, status=graphene.String(), limit=graphene.Int())
+    tips_lookup_items = graphene.Field(graphene.JSONString, msg_id=graphene.String(required=True),
+                                       offset=graphene.Int(), limit=graphene.Int(), search=graphene.String())
     pre_audit_window_overview = graphene.Field(graphene.JSONString, payment_cycle_id=graphene.UUID(required=True),
                                                location_id=graphene.Int())
     pre_audit_compliance = graphene.Field(graphene.JSONString, payment_cycle_id=graphene.UUID(required=True),
@@ -824,6 +832,36 @@ class Query(graphene.ObjectType):
         return GepgSettingsGQLType(date_updated=s.date_updated, environment=s.environment,
                                    **{f: getattr(s, f) for f in ALL_FIELDS})
 
+    def resolve_tips_settings(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        from tasaf_payment.tips.setup import ALL_FIELDS, get_settings
+        s = get_settings()
+        if s is None:
+            return None
+        return {'date_updated': s.date_updated.isoformat() if s.date_updated else None,
+                'environment': s.environment, **{f: getattr(s, f) for f in ALL_FIELDS}}
+
+    def resolve_tips_readiness(self, info, **kwargs):
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
+        from tasaf_payment.muse.setup import provider_list
+        from tasaf_payment.tips.setup import readiness
+        listed = provider_list()
+        providers = [{'fsp_code': p['fsp_code'], 'accounts': p['accounts'], 'bank_name': p.get('bank_name') or '',
+                      'fsp_type': p.get('fsp_type') or ''} for p in listed]
+        return {**readiness(listed), 'providers': providers}
+
+    def resolve_tips_lookup_requests(self, info, status=None, limit=None, **kwargs):
+        Query._check_any_permission(info.context.user, [
+            TasafPaymentConfig.gql_muse_settings_search_perms, TasafPaymentConfig.gql_payment_account_search_perms])
+        from tasaf_payment.tips.history import request_rows
+        return request_rows(status=status, limit=limit or 50)
+
+    def resolve_tips_lookup_items(self, info, msg_id, offset=0, limit=100, search='', **kwargs):
+        Query._check_any_permission(info.context.user, [
+            TasafPaymentConfig.gql_muse_settings_search_perms, TasafPaymentConfig.gql_payment_account_search_perms])
+        from tasaf_payment.tips.history import item_rows
+        return item_rows(msg_id, offset=offset, limit=limit, search=search)
+
     def resolve_gepg_readiness(self, info, **kwargs):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_muse_settings_search_perms)
         from tasaf_payment.gepg.setup import readiness
@@ -999,6 +1037,9 @@ class Mutation(graphene.ObjectType):
     save_gepg_settings = SaveGepgSettingsMutation.Field()
     resend_gepg_verification = ResendGepgVerificationMutation.Field()
     release_gepg_verification = ReleaseGepgVerificationMutation.Field()
+    save_tips_settings = SaveTipsSettingsMutation.Field()
+    resend_tips_lookup = ResendTipsLookupMutation.Field()
+    release_tips_lookup = ReleaseTipsLookupMutation.Field()
     delete_fsp_mapping = DeleteFspMappingMutation.Field()
     seed_fsp_mappings = SeedFspMappingsMutation.Field()
     save_fsp_charges = SaveFspChargesMutation.Field()

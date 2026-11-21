@@ -268,8 +268,10 @@ def _money(value):
 
 
 def _readable(value):
-    if value is None or value == '' or value == []:
+    if value is None or value == '' or value == [] or value == {}:
         return None
+    if isinstance(value, dict):
+        return ', '.join(f'{k}: {v}' for k, v in sorted(value.items()))
     if isinstance(value, bool):
         return 'Yes' if value else 'No'
     if isinstance(value, list) and value and isinstance(value[0], dict) and 'withdrawal' in value[0]:
@@ -291,6 +293,9 @@ def describe_change(kind, fsp_code, current, proposed, reason=''):
     if kind == 'GEPG_SETTINGS':
         from tasaf_payment.gepg import setup as gepg_setup
         title, labels, effect = 'GePG settings', gepg_setup.FIELD_LABELS, gepg_setup.CHANGE_EFFECT
+    elif kind == 'TIPS_SETTINGS':
+        from tasaf_payment.tips import setup as tips_setup
+        title, labels, effect = 'TIPS settings', tips_setup.FIELD_LABELS, tips_setup.CHANGE_EFFECT
     elif kind == 'SETTINGS':
         title = 'MUSE settings'
     elif kind == 'FSP_CHARGES':
@@ -310,7 +315,7 @@ def describe_change(kind, fsp_code, current, proposed, reason=''):
                         'before': before, 'after': after, 'changed': before != after})
     changes.sort(key=lambda c: not c['changed'])
     return {'title': title, 'changes': changes, 'reason': (reason or '').strip() or None,
-            'effect': effect, 'integration': 'gepg' if kind == 'GEPG_SETTINGS' else 'muse'}
+            'effect': effect, 'integration': {'GEPG_SETTINGS': 'gepg', 'TIPS_SETTINGS': 'tips'}.get(kind, 'muse')}
 
 
 def pending_fsp_codes(kind=None):
@@ -329,6 +334,9 @@ def propose(user, kind, proposed, fsp_code='', reason=''):
     if kind == MuseChangeKind.GEPG_SETTINGS:
         from tasaf_payment.gepg.setup import settings_values as gepg_settings_values
         current = gepg_settings_values()
+    elif kind == MuseChangeKind.TIPS_SETTINGS:
+        from tasaf_payment.tips.setup import settings_values as tips_settings_values
+        current = tips_settings_values()
     elif kind == MuseChangeKind.FSP_CHARGES:
         from tasaf_payment.charges import band_set, canonical_bands
         current = {'bands': canonical_bands(band_set(fsp_code))}
@@ -441,6 +449,10 @@ def _apply(change, user):
     if change.kind == MuseChangeKind.GEPG_SETTINGS:
         from tasaf_payment.gepg.setup import apply
         apply(change, user)
+        return
+    if change.kind == MuseChangeKind.TIPS_SETTINGS:
+        from tasaf_payment.tips.setup import apply as apply_tips
+        apply_tips(change, user)
         return
     if change.kind == MuseChangeKind.FSP_CHARGES:
         from tasaf_payment.charges import apply_band_set

@@ -509,6 +509,7 @@ class MuseChangeKind(models.TextChoices):
     GEPG_SETTINGS = 'GEPG_SETTINGS', _("GEPG_SETTINGS")
     FSP_CHARGES = 'FSP_CHARGES', _("FSP_CHARGES")
     FSP_NAMES = 'FSP_NAMES', _("FSP_NAMES")
+    TIPS_SETTINGS = 'TIPS_SETTINGS', _("TIPS_SETTINGS")
 
 
 class MuseChangeStatus(models.TextChoices):
@@ -688,3 +689,90 @@ class GepgMessageLog(models.Model):
 
     class Meta:
         db_table = 'tasaf_GepgMessageLog'
+
+
+class TipsSettings(HistoryModel):
+    sender = models.CharField(max_length=20, blank=True, default='')
+    receiver = models.CharField(max_length=20, blank=True, default='')
+    service_code_single = models.CharField(max_length=50, blank=True, default='')
+    service_code_bulk = models.CharField(max_length=50, blank=True, default='')
+    summary_identifier_type = models.CharField(max_length=20, blank=True, default='')
+    summary_identifier = models.CharField(max_length=50, blank=True, default='')
+    summary_fsp_code = models.CharField(max_length=3, blank=True, default='')
+    fsp_codes = models.JSONField(default=dict, blank=True)
+    verification_route = models.CharField(max_length=10, blank=True, default='GEPG')
+    environment = models.CharField(max_length=20, blank=True, default='')
+
+    class Meta:
+        db_table = 'tasaf_TipsSettings'
+
+
+class TipsRequestStatus(models.TextChoices):
+    SENDING  = 'SENDING',  _("SENDING")
+    SENT     = 'SENT',     _("SENT")
+    ACCEPTED = 'ACCEPTED', _("ACCEPTED")
+    REFUSED  = 'REFUSED',  _("REFUSED")
+    FAILED   = 'FAILED',   _("FAILED")
+    ANSWERED = 'ANSWERED', _("ANSWERED")
+    EXPIRED  = 'EXPIRED',  _("EXPIRED")
+
+
+class TipsLookupRequest(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    msg_id = models.CharField(max_length=50, unique=True)
+    kind = models.CharField(max_length=10, default='BULK')
+    fsp_code = models.CharField(max_length=50, blank=True, default='')
+    tips_code = models.CharField(max_length=3, blank=True, default='')
+    status = models.CharField(max_length=20, choices=TipsRequestStatus.choices,
+                              default=TipsRequestStatus.SENDING, db_index=True)
+    status_desc = models.TextField(blank=True, default='')
+    item_count = models.IntegerField(default=0)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    esb_request_id = models.CharField(max_length=100, blank=True, default='')
+    requested_by = models.CharField(max_length=150, blank=True, default='')
+    after_change = models.BooleanField(default=False)
+    request_body = models.JSONField(null=True, blank=True)
+    ack_body = models.JSONField(null=True, blank=True)
+    response_body = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'tasaf_TipsLookupRequest'
+
+
+class TipsLookupItem(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    request = models.ForeignKey(TipsLookupRequest, on_delete=models.CASCADE, related_name='items')
+    payment_account = models.ForeignKey(PaymentAccount, on_delete=models.DO_NOTHING, null=True, blank=True,
+                                        related_name='tips_lookup_items')
+    identifier_type = models.CharField(max_length=20)
+    identifier = models.CharField(max_length=50, db_index=True)
+    fsp_code = models.CharField(max_length=3, blank=True, default='')
+    previous_status = models.IntegerField(choices=VerificationStatus.choices,
+                                          default=VerificationStatus.PENDING)
+    expected_name = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=20, choices=GepgItemStatus.choices, default=GepgItemStatus.PENDING)
+    full_name = models.CharField(max_length=150, blank=True, default='')
+    lookup_id = models.CharField(max_length=100, blank=True, default='')
+    error_code = models.CharField(max_length=10, blank=True, default='')
+    error_description = models.CharField(max_length=255, blank=True, default='')
+    decision = models.CharField(max_length=10, blank=True, default='')
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'tasaf_TipsLookupItem'
+
+
+class TipsMessageLog(models.Model):
+    """Every message received on the TIPS End Point, exactly as received, with the reply we gave."""
+    id = models.BigAutoField(primary_key=True)
+    received_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    msg_id = models.CharField(max_length=50, blank=True, default='', db_index=True)
+    body = models.TextField(blank=True, default='')
+    accepted = models.BooleanField(default=False)
+    reply = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'tasaf_TipsMessageLog'

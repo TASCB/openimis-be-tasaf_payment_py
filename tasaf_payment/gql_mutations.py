@@ -831,6 +831,86 @@ class ReleaseGepgVerificationMutation(OpenIMISMutation):
             return _error(exc)
 
 
+class SaveTipsSettingsMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "SaveTipsSettingsMutation"
+
+    class Input(OpenIMISMutation.Input):
+        sender = graphene.String(required=False)
+        receiver = graphene.String(required=False)
+        service_code_single = graphene.String(required=False)
+        service_code_bulk = graphene.String(required=False)
+        summary_identifier_type = graphene.String(required=False)
+        summary_identifier = graphene.String(required=False)
+        summary_fsp_code = graphene.String(required=False)
+        fsp_codes = graphene.JSONString(required=False)
+        verification_route = graphene.String(required=False)
+        reason = graphene.String(required=False)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.tips.setup import propose_settings
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_muse_settings_propose_perms)
+            propose_settings(user, data, reason=data.get('reason') or '')
+            return None
+        except Exception as exc:
+            return _error(exc)
+
+
+class ResendTipsLookupMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "ResendTipsLookupMutation"
+
+    class Input(OpenIMISMutation.Input):
+        msg_id = graphene.String(required=True)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.models import TipsLookupRequest, TipsRequestStatus
+        from tasaf_payment.services import queue_or_inline
+        from tasaf_payment.tasks import resend_tips_lookup_task
+        from tasaf_payment.tips.sender import TipsLookupSender
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_run_verification_perms)
+            request = TipsLookupRequest.objects.filter(msg_id=data['msg_id']).first()
+            if not request:
+                return [{'message': f"No TIPS lookup {data['msg_id']}"}]
+            if request.status not in (TipsRequestStatus.FAILED, TipsRequestStatus.REFUSED,
+                                      TipsRequestStatus.EXPIRED):
+                return [{'message': f'Lookup {request.msg_id} is {request.status}; only failed, refused or '
+                                    f'expired lookups can be sent again'}]
+            sender = TipsLookupSender(user)
+            ids = list(request.items.values_list('payment_account_id', flat=True))
+            result = queue_or_inline(
+                task=resend_tips_lookup_task, task_args=(request.msg_id, user.id),
+                inline=lambda account_ids: sender.dispatch(account_ids, after_change=request.after_change),
+                count_ids=lambda: ids, label='ResendTipsLookupMutation', bounded=True)
+            if not result.get('success'):
+                return [{'message': result.get('error') or 'Nothing was sent'}]
+            return None
+        except Exception as exc:
+            return _error(exc)
+
+
+class ReleaseTipsLookupMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "ReleaseTipsLookupMutation"
+
+    class Input(OpenIMISMutation.Input):
+        msg_id = graphene.String(required=True)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from tasaf_payment.tips.sweeper import release
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_run_verification_perms)
+            release(data['msg_id'], user)
+            return None
+        except Exception as exc:
+            return _error(exc)
+
+
 class MuseChangeInputType(OpenIMISMutation.Input):
     change_id = graphene.UUID(required=True)
     comment = graphene.String(required=False)

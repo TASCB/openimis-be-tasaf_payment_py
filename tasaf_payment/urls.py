@@ -4,6 +4,7 @@ from tasaf_payment.views import (
     MuseSettlementView,
     MuseMessageView,
     GepgMessageView,
+    TipsMessageView,
     account_check_upload,
 )
 
@@ -31,4 +32,5 @@ urlpatterns = [
         GepgMessageView.as_view(),
         name='gepg-message',
     ),
+    path('tips/message/', TipsMessageView.as_view(), name='tips-message'),
 ]

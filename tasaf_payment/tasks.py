@@ -245,6 +245,17 @@ def resend_gepg_request_task(self, acc_verif_id, user_id):
     return result
 
 
+@shared_task(bind=True, max_retries=0, name='tasaf_payment.resend_tips_lookup_task')
+def resend_tips_lookup_task(self, msg_id, user_id):
+    from core.models import User
+    from tasaf_payment.tips.sender import TipsLookupSender
+
+    result = TipsLookupSender(User.objects.get(id=user_id)).resend(msg_id)
+    logger.info("resend_tips_lookup_task: lookup=%s success=%s sent=%s refused=%s", msg_id,
+                result.get('success'), result.get('count'), result.get('refused'))
+    return result
+
+
 # ─── Bulk account check ───────────────────────────────────────────────────────
 
 @shared_task(bind=True, max_retries=0, name='tasaf_payment.send_account_check_task')

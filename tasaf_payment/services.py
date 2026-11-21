@@ -1661,6 +1661,10 @@ class ReturnFeedbackService:
 
 
 def verification_dispatcher(user):
+    from tasaf_payment.tips.setup import route
+    if route() == 'TIPS':
+        from tasaf_payment.tips.sender import TipsLookupSender
+        return TipsLookupSender(user)
     from tasaf_payment.gepg.sender import GepgVerificationSender
     return GepgVerificationSender(user)
 
