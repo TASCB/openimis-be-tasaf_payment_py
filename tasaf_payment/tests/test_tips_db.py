@@ -183,16 +183,29 @@ class TipsLookupDbTest(TestCase):
 
 class TipsSettingsTest(TestCase):
     def test_settings_are_checked_and_normalised(self):
+        from tasaf_payment.muse.setup import SetupError
+        with self.assertRaises(SetupError):
+            tips_setup.normalise_settings({'sender': 'MOFPTZT0', 'receiver': 'TANZTZT0', 'verification_route': 'TIPS'})
         values = tips_setup.normalise_settings({'sender': 'mofptzt0', 'receiver': 'TANZTZT0',
-                                                'verification_route': 'tips',
+                                                'summary_identifier_type': 'bank', 'summary_identifier': '0011055818',
+                                                'summary_fsp_code': '013', 'verification_route': 'tips',
                                                 'fsp_codes': {'nmb': '016', 'crdb': ''}})
         self.assertEqual((values['sender'], values['verification_route']), ('MOFPTZT0', 'TIPS'))
         self.assertEqual(list(values['fsp_codes'].values()), ['016'])
-        from tasaf_payment.muse.setup import SetupError
         with self.assertRaises(SetupError):
             tips_setup.normalise_settings({'fsp_codes': {'NMB': '16'}, 'verification_route': 'MUSE'})
         with self.assertRaises(SetupError):
             tips_setup.normalise_settings({'summary_identifier_type': 'CARD', 'summary_identifier': 'a b'})
+
+    def test_bulk_summary_account_is_required_before_sending(self):
+        from tasaf_payment.tips import sender
+        partial = {'sender': 'MOFPTZT0', 'receiver': 'TANZTZT0'}
+        with mock.patch('tasaf_payment.tips.setup.govesb_on', return_value=True), \
+                mock.patch('tasaf_payment.tips.setup.api_code', return_value='X'), \
+                mock.patch('tasaf_payment.tips.setup.settings_values', return_value=partial):
+            self.assertIn('bulk summary account', sender.blocked())
+            self.assertEqual(tips_setup.readiness(providers=[])['settings_missing'],
+                             ['summary_identifier_type', 'summary_identifier', 'summary_fsp_code'])
 
     def test_change_summary_names_the_tips_fields(self):
         from tasaf_payment.muse.setup import describe_change
@@ -200,3 +213,22 @@ class TipsSettingsTest(TestCase):
         self.assertEqual((summary['title'], summary['integration']), ('TIPS settings', 'tips'))
         self.assertIn({'label': 'TIPS FSP codes', 'before': None, 'after': 'NMB: 016', 'changed': True},
                       summary['changes'])
+
+
+class ProposeTipsSettingsCommandTest(TestCase):
+    def test_proposes_codes_and_summary_without_applying(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from tasaf_payment.models import MuseChangeKind, MuseChangeRequest, MuseChangeStatus
+        from tasaf_payment.muse.setup import provider_list
+        if not any(p['fsp_code'] == 'TIGOPESA' for p in provider_list()):
+            self.skipTest('needs the TIGOPESA provider')
+        MuseChangeRequest.objects.filter(kind=MuseChangeKind.TIPS_SETTINGS).delete()
+        before = tips_setup.settings_values()
+        call_command('propose_tips_settings', maker='Admin', summary='BANK:0011055818:013', stdout=StringIO())
+        change = MuseChangeRequest.objects.get(kind=MuseChangeKind.TIPS_SETTINGS, status=MuseChangeStatus.PENDING)
+        self.assertEqual(change.proposed['fsp_codes']['TIGOPESA'], '501')
+        self.assertEqual((change.proposed['summary_identifier'], change.proposed['summary_fsp_code']),
+                         ('0011055818', '013'))
+        self.assertEqual(change.proposed['verification_route'], before.get('verification_route') or 'GEPG')
+        self.assertEqual(tips_setup.settings_values(), before)

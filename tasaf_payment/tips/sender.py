@@ -33,7 +33,7 @@ def blocked():
         return f'No GovESB API code for {tips_message.TOPICS[tips_message.BULK]}; nothing was sent'
     values = tips_setup.settings_values()
     if not all(values.get(f) for f in tips_setup.SETTINGS_FIELDS):
-        return 'TIPS sender and receiver codes are not set; nothing was sent'
+        return 'TIPS sender, receiver or bulk summary account is not set; nothing was sent'
     return None
 
 

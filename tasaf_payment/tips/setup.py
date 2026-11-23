@@ -4,9 +4,8 @@ from tasaf_payment.muse.setup import SetupError, propose, provider_list, server_
 from tasaf_payment.tips.message import BULK, BULK_TYPES, IDENTIFIER_RE, SINGLE, TOPICS
 
 ROUTES = ('GEPG', 'TIPS')
-SETTINGS_FIELDS = ('sender', 'receiver')
-OPTIONAL_FIELDS = ('summary_identifier_type', 'summary_identifier', 'summary_fsp_code', 'fsp_codes',
-                   'verification_route')
+SETTINGS_FIELDS = ('sender', 'receiver', 'summary_identifier_type', 'summary_identifier', 'summary_fsp_code')
+OPTIONAL_FIELDS = ('fsp_codes', 'verification_route')
 ALL_FIELDS = SETTINGS_FIELDS + OPTIONAL_FIELDS
 FIELD_LABELS = {'sender': 'Sender code', 'receiver': 'Receiver code',
                 'summary_identifier_type': 'Bulk summary identifier type',
@@ -34,8 +33,7 @@ def route():
 
 def normalise_settings(data):
     from tasaf_payment.charges import normalise_fsp
-    text = SETTINGS_FIELDS + ('summary_identifier_type', 'summary_identifier', 'summary_fsp_code')
-    values = {f: (data.get(f) or '').strip() for f in text}
+    values = {f: (data.get(f) or '').strip() for f in SETTINGS_FIELDS}
     for f in ('sender', 'receiver', 'summary_identifier_type'):
         values[f] = values[f].upper()
     values['verification_route'] = (data.get('verification_route') or 'GEPG').strip().upper()
@@ -56,6 +54,9 @@ def normalise_settings(data):
         errors.append(f"TIPS FSP codes must be three digits: {', '.join(bad)}")
     if values['verification_route'] not in ROUTES:
         errors.append('Account verification must go to GEPG or TIPS')
+    missing = [FIELD_LABELS[f] for f in SETTINGS_FIELDS if not values[f]]
+    if values['verification_route'] == 'TIPS' and missing:
+        errors.append(f"Verification cannot go to TIPS until these are set: {', '.join(missing)}")
     if errors:
         raise SetupError('; '.join(errors))
     return values
