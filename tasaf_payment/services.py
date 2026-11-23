@@ -865,16 +865,6 @@ class PaylistService:
         except Exception:  # noqa: BLE001 — generation stands; approve() refuses without a request
             logger.exception("tasaf_payment: paylist %s approval start error", paylist.uuid)
 
-    def _engine_request_for(self, paylist):
-        """The open (PENDING) engine ApprovalRequest for this paylist, if any."""
-        try:
-            from approval.models import ApprovalRequest, RequestStatus as AStatus
-            return ApprovalRequest.objects.filter(
-                object_id=str(paylist.id), status=AStatus.PENDING, is_deleted=False,
-            ).order_by('-date_created').first()
-        except Exception:
-            return None
-
     def approve(self, paylist_uuid: str) -> dict:
         """Sign the current step of the two-person approval; a paylist without one is refused."""
         try:
@@ -887,7 +877,7 @@ class PaylistService:
             if refusal:
                 return refusal
 
-            appr = self._engine_request_for(paylist)
+            appr = open_approval_request(paylist)
             if not appr:
                 logger.error("PaylistService.approve: paylist %s has no open approval request", paylist_uuid)
                 return {'success': False, 'error': _("tasaf_payment.error.no_approval_request")}
@@ -900,6 +890,9 @@ class PaylistService:
                         'error': (res.get('message') or res.get('detail')
                                   or _("tasaf_payment.error.approval_failed"))}
             paylist.refresh_from_db()  # adapter sets APPROVED once the final step is signed
+            if paylist.status == PaylistStatus.PENDING_APPROVAL:
+                # A part signature counts as activity on the recent-first list.
+                Paylist.objects.filter(id=paylist.id).update(date_updated=datetime.now(tz=timezone.utc))
             logger.info("PaylistService.approve: paylist=%s step advanced (status=%s, user=%s)",
                         paylist_uuid, paylist.status, self.user.username)
             return {'success': True, 'error': None, 'status': paylist.status}
@@ -1164,6 +1157,41 @@ CHANNEL_LABELS = {'BANK': 'Bank', 'MNO': 'Mobile money'}
 
 def _tzs(amount):
     return f'TZS {amount or 0:,.2f}'.replace('.00', '')
+
+
+def _person(user):
+    i_user = getattr(user, 'i_user', None)
+    name = ' '.join(p for p in (getattr(i_user, 'other_names', None), getattr(i_user, 'last_name', None)) if p)
+    return name or getattr(user, 'username', None) or '?'
+
+
+def open_approval_request(paylist):
+    """The paylist's open (PENDING) approval request, if any."""
+    from approval.models import ApprovalRequest, RequestStatus
+    return (ApprovalRequest.objects.filter(object_id=str(paylist.id), status=RequestStatus.PENDING, is_deleted=False)
+            .select_related('flow').order_by('-date_created').first())
+
+
+def approval_progress(paylist, user):
+    """Signatures so far and whether ``user`` may sign next; None unless awaiting approval."""
+    if paylist.status != PaylistStatus.PENDING_APPROVAL:
+        return None
+    from approval.models import ApprovalDecision
+    from approval.services import REQUESTER_REFUSAL, ApprovalService
+    req = open_approval_request(paylist)
+    if not req:
+        return {'total': 0, 'signed': [], 'canSign': False,
+                'reason': _("tasaf_payment.error.no_approval_request")}
+    steps = list(req.steps.filter(is_deleted=False).order_by('order'))
+    current = next((s for s in steps if s.order == req.current_step_order), None)
+    signed = [{'step': d.step.order, 'label': d.step.label, 'by': _person(d.approver), 'at': d.decided_at.isoformat()}
+              for d in ApprovalDecision.objects.filter(step__approval_request=req, decision='APPROVED', is_deleted=False)
+              .select_related('step', 'approver__i_user').order_by('step__order')]
+    reason = ApprovalService(user).sign_refusal(req, current)
+    if reason == _(REQUESTER_REFUSAL):
+        reason = 'approval.requester_cannot_approve'
+    return {'total': len(steps), 'current': req.current_step_order, 'currentLabel': getattr(current, 'label', None),
+            'signed': signed, 'canSign': not reason, 'reason': reason}
 
 
 def describe_paylist(paylist):

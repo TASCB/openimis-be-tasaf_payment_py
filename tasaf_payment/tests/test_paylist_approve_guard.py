@@ -13,7 +13,7 @@ class PaylistApproveGuardTest(SimpleTestCase):
         service = PaylistService(SimpleNamespace(username='approver'))
         with mock.patch('tasaf_payment.services.Paylist.objects.get', return_value=paylist), \
                 mock.patch('tasaf_payment.services._wrong_type_refusal', return_value=None), \
-                mock.patch.object(PaylistService, '_engine_request_for', return_value=request):
+                mock.patch('tasaf_payment.services.open_approval_request', return_value=request):
             return service.approve('00000000-0000-0000-0000-000000000001'), paylist
 
     def test_paylist_without_an_approval_request_is_refused(self):

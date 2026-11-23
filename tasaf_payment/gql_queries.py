@@ -210,6 +210,7 @@ class PaylistGQLType(DjangoObjectType):
     outcome = graphene.String()
     summary = graphene.JSONString()
     last_submit = graphene.JSONString()
+    approval = graphene.JSONString()
 
     class Meta:
         model = Paylist
@@ -249,6 +250,10 @@ class PaylistGQLType(DjangoObjectType):
             'charge_amount': sum(money(r['charge']) for r in sent),
             'by_status': by_status,
         }
+
+    def resolve_approval(root, info):
+        from tasaf_payment.services import approval_progress
+        return approval_progress(root, info.context.user)
 
     def resolve_last_submit(root, info):
         from tasaf_payment.services import submit_lock
