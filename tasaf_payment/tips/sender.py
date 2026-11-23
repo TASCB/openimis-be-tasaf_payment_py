@@ -33,7 +33,7 @@ def blocked():
         return f'No GovESB API code for {tips_message.TOPICS[tips_message.BULK]}; nothing was sent'
     values = tips_setup.settings_values()
     if not all(values.get(f) for f in tips_setup.SETTINGS_FIELDS):
-        return 'TIPS sender, receiver and service codes are not set; nothing was sent'
+        return 'TIPS sender and receiver codes are not set; nothing was sent'
     return None
 
 
@@ -175,7 +175,6 @@ class TipsLookupSender:
         from coremis_app_integration.govesb import GovESBProducer
 
         kind = request.kind
-        headers = tips_message.headers(tips_setup.settings_values(), kind)
         max_attempts = max(1, int(_config('tips_send_max_attempts', 3)))
         error = 'not sent'
         for attempt in range(1, max_attempts + 1):
@@ -183,7 +182,7 @@ class TipsLookupSender:
             try:
                 response = GovESBProducer().publish(
                     tips_message.TOPICS[kind], body, request_type=ESBRequestType.NORMAL,
-                    data_format=DataFormat.JSON, **({'extra_headers': headers} if headers else {}))
+                    data_format=DataFormat.JSON)
             except ESBConfigurationError as exc:
                 return self._finish(request, items, TipsRequestStatus.FAILED, f'GovESB is misconfigured: {exc}')
             except ESBSignatureError as exc:
@@ -270,7 +269,6 @@ class TipsLookupSender:
         from django.conf import settings as dj
         on = tips_setup.govesb_on()
         return {'channel': 'TIPS', 'format': 'JSON', 'topic': tips_message.TOPICS[tips_message.BULK],
-                'service_code_set': bool(values.get('service_code_bulk')),
                 'api_code': tips_setup.api_code(tips_message.BULK) or None, 'govesb_enabled': on,
                 'esb_url': (getattr(dj, 'ESB', None) or {}).get('ENGINE_URL') if on else None,
                 'request_type': 'NORMAL', 'accounts': len(accounts), 'max_rows_per_message': size,

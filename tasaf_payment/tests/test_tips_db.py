@@ -10,8 +10,7 @@ from tasaf_payment.models import (
 from tasaf_payment.tips import message as tm, setup as tips_setup, sweeper
 from tasaf_payment.tips.sender import TipsLookupSender
 
-SETTINGS = {'sender': 'MOFPTZT0', 'receiver': 'TANZTZT0', 'service_code_single': 'SRVC619734',
-            'service_code_bulk': 'SRVC728102', 'summary_identifier': '20610004189', 'summary_fsp_code': '016',
+SETTINGS = {'sender': 'MOFPTZT0', 'receiver': 'TANZTZT0', 'summary_identifier': '20610004189', 'summary_fsp_code': '016',
             'fsp_codes': {'TIPSTEST': '501'}, 'verification_route': 'TIPS'}
 OK = {'published': True, 'ok': True, 'status_code': 200, 'request_id': 'R1', 'esb_body': {}}
 
@@ -62,7 +61,7 @@ class TipsLookupDbTest(TestCase):
             response = TipsMessageView.as_view()(http)
         return json.loads(response.content)
 
-    def test_bulk_lookup_is_sent_with_the_bulk_code_and_header(self):
+    def test_bulk_lookup_is_sent_on_the_bulk_topic_without_headers(self):
         result, producer = self.dispatch(OK)
         self.assertEqual((result['success'], result['count']), (True, 2))
         request = TipsLookupRequest.objects.get()
@@ -70,7 +69,7 @@ class TipsLookupDbTest(TestCase):
                          (tm.BULK, TipsRequestStatus.ACCEPTED, '501'))
         topic, body = producer.publish.call_args[0]
         self.assertEqual(topic, tm.TOPICS[tm.BULK])
-        self.assertEqual(producer.publish.call_args[1]['extra_headers'], {'service-code': 'SRVC728102'})
+        self.assertNotIn('extra_headers', producer.publish.call_args[1])
         details = body['message']['messageDetails']
         self.assertEqual([d['identifier'] for d in details], ['255767482670', '255767482671'])
         self.assertEqual({d['identifierType'] for d in details}, {'MSISDN'})
@@ -84,7 +83,7 @@ class TipsLookupDbTest(TestCase):
         request = TipsLookupRequest.objects.get()
         self.assertEqual(request.kind, tm.SINGLE)
         self.assertEqual(producer.publish.call_args[0][0], tm.TOPICS[tm.SINGLE])
-        self.assertEqual(producer.publish.call_args[1]['extra_headers'], {'service-code': 'SRVC619734'})
+        self.assertNotIn('extra_headers', producer.publish.call_args[1])
         item = request.items.get()
         TipsLookupRequest.objects.all().delete()
         reply = {**OK, 'esb_body': {'message': {'messageHeader': {'msgId': 'TPPS_9'}, 'messageSummary': {
@@ -185,7 +184,7 @@ class TipsLookupDbTest(TestCase):
 class TipsSettingsTest(TestCase):
     def test_settings_are_checked_and_normalised(self):
         values = tips_setup.normalise_settings({'sender': 'mofptzt0', 'receiver': 'TANZTZT0',
-                                                'service_code_single': 'SRVC619734', 'verification_route': 'tips',
+                                                'verification_route': 'tips',
                                                 'fsp_codes': {'nmb': '016', 'crdb': ''}})
         self.assertEqual((values['sender'], values['verification_route']), ('MOFPTZT0', 'TIPS'))
         self.assertEqual(list(values['fsp_codes'].values()), ['016'])

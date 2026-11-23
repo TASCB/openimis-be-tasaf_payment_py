@@ -4,18 +4,16 @@ from tasaf_payment.muse.setup import SetupError, propose, provider_list, server_
 from tasaf_payment.tips.message import BULK, BULK_TYPES, IDENTIFIER_RE, SINGLE, TOPICS
 
 ROUTES = ('GEPG', 'TIPS')
-SETTINGS_FIELDS = ('sender', 'receiver', 'service_code_single', 'service_code_bulk')
+SETTINGS_FIELDS = ('sender', 'receiver')
 OPTIONAL_FIELDS = ('summary_identifier_type', 'summary_identifier', 'summary_fsp_code', 'fsp_codes',
                    'verification_route')
 ALL_FIELDS = SETTINGS_FIELDS + OPTIONAL_FIELDS
 FIELD_LABELS = {'sender': 'Sender code', 'receiver': 'Receiver code',
-                'service_code_single': 'Service code, single lookup', 'service_code_bulk': 'Service code, bulk lookup',
                 'summary_identifier_type': 'Bulk summary identifier type',
                 'summary_identifier': 'Bulk summary identifier', 'summary_fsp_code': 'Bulk summary FSP code',
                 'fsp_codes': 'TIPS FSP codes', 'verification_route': 'Account verification goes to'}
 CHANGE_EFFECT = ('Applies to every TIPS lookup sent from this server once approved, and to where account '
                  'verification goes. Lookups already sent are not affected.')
-CODE_RE = re.compile(r'^[A-Za-z0-9_-]{1,50}$')
 PARTY_RE = re.compile(r'^[A-Za-z0-9]{1,20}$')
 FSP_RE = re.compile(r'^\d{3}$')
 
@@ -47,9 +45,6 @@ def normalise_settings(data):
     for f in ('sender', 'receiver'):
         if values[f] and not PARTY_RE.match(values[f]):
             errors.append(f'{FIELD_LABELS[f]} must be up to 20 letters or digits')
-    for f in ('service_code_single', 'service_code_bulk'):
-        if values[f] and not CODE_RE.match(values[f]):
-            errors.append(f'{FIELD_LABELS[f]} must be up to 50 letters, digits, - or _')
     if values['summary_identifier_type'] and values['summary_identifier_type'] not in BULK_TYPES:
         errors.append(f"Bulk summary identifier type must be one of {', '.join(BULK_TYPES)}")
     if values['summary_identifier'] and not IDENTIFIER_RE.match(values['summary_identifier']):

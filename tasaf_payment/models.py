@@ -694,8 +694,6 @@ class GepgMessageLog(models.Model):
 class TipsSettings(HistoryModel):
     sender = models.CharField(max_length=20, blank=True, default='')
     receiver = models.CharField(max_length=20, blank=True, default='')
-    service_code_single = models.CharField(max_length=50, blank=True, default='')
-    service_code_bulk = models.CharField(max_length=50, blank=True, default='')
     summary_identifier_type = models.CharField(max_length=20, blank=True, default='')
     summary_identifier = models.CharField(max_length=50, blank=True, default='')
     summary_fsp_code = models.CharField(max_length=3, blank=True, default='')

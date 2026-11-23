@@ -838,8 +838,6 @@ class SaveTipsSettingsMutation(OpenIMISMutation):
     class Input(OpenIMISMutation.Input):
         sender = graphene.String(required=False)
         receiver = graphene.String(required=False)
-        service_code_single = graphene.String(required=False)
-        service_code_bulk = graphene.String(required=False)
         summary_identifier_type = graphene.String(required=False)
         summary_identifier = graphene.String(required=False)
         summary_fsp_code = graphene.String(required=False)

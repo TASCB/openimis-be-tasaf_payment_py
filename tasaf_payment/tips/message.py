@@ -47,11 +47,6 @@ def build_bulk(settings, msg_id, items):
                         'messageDetails': details, 'digitalSignature': ''}}
 
 
-def headers(settings, kind):
-    code = (settings.get('service_code_bulk') if kind == BULK else settings.get('service_code_single')) or ''
-    return {'service-code': code} if code else {}
-
-
 def _problem(field, message, value=None, index=None):
     return {'field': field, 'message': message, 'value': value, 'index': index}
 

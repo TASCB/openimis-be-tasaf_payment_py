@@ -4,8 +4,7 @@ from django.test import SimpleTestCase
 
 from tasaf_payment.tips import message as tm
 
-SETTINGS = {'sender': 'MOFPTZT0', 'receiver': 'TANZTZT0', 'service_code_single': 'SRVC619734',
-            'service_code_bulk': 'SRVC728102', 'summary_identifier': '20610004189', 'summary_fsp_code': '016'}
+SETTINGS = {'sender': 'MOFPTZT0', 'receiver': 'TANZTZT0', 'summary_identifier': '20610004189', 'summary_fsp_code': '016'}
 
 CALLBACK = {'message': {
     'messageHeader': {'sender': 'TANZTZT0', 'receiver': 'MOFPTZT0', 'messageType': 'TIPSBULKLOOKUP',
@@ -36,7 +35,6 @@ class TipsMessageTest(SimpleTestCase):
         self.assertEqual(body['message']['messageSummary']['fsp-destination'], '016')
         self.assertIn('digitalSignature', body)
         self.assertEqual(tm.check(body, tm.SINGLE), [])
-        self.assertEqual(tm.headers(SETTINGS, tm.SINGLE), {'service-code': 'SRVC619734'})
 
     def test_bulk_lists_each_account_and_signs_inside_message(self):
         items = [('BANK', '00101044688401', '067'), ('MSISDN', '255742140795', '501')]
@@ -44,7 +42,6 @@ class TipsMessageTest(SimpleTestCase):
         self.assertEqual(len(body['message']['messageDetails']), 2)
         self.assertIn('digitalSignature', body['message'])
         self.assertEqual(tm.check(body, tm.BULK), [])
-        self.assertEqual(tm.headers(SETTINGS, tm.BULK), {'service-code': 'SRVC728102'})
 
     def test_check_finds_bad_numbers_types_and_duplicates(self):
         body = tm.build_bulk({}, 'X1', [('MSISDN', '07142140795', '501'), ('CONTROLNO', '991', '01'),
