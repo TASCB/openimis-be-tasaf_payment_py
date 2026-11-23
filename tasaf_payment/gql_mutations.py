@@ -112,6 +112,7 @@ class GeneratePaylistInputType(OpenIMISMutation.Input):
     payment_cycle_id = graphene.UUID(required=False)
     destination      = graphene.String(required=False)   # MUSE / GEPG — defaults to MUSE
     fsp_code         = graphene.String(required=False)
+    per_fsp          = graphene.Boolean(required=False)   # one paylist per FSP; default true
 
 
 class ApprovePaylistInputType(OpenIMISMutation.Input):
@@ -401,6 +402,7 @@ class GeneratePaylistMutation(BaseMutation):
             payment_cycle_id=data.get('payment_cycle_id'),
             destination=data.get('destination'),
             fsp_code=data.get('fsp_code') or None,
+            per_fsp=data.get('per_fsp') is not False,
         )
         if not result.get('success'):
             raise Exception(result.get('error', 'Paylist generation failed'))

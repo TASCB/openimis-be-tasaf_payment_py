@@ -182,7 +182,7 @@ GENERATE_ERRORS = {
 
 
 def create_resend_batches(user):
-    """One UNAPPLIED paylist per payroll and channel: a paylist belongs to one payroll."""
+    """One UNAPPLIED paylist per payroll, channel and FSP: a paylist belongs to one payroll."""
     from tasaf_payment.models import PaymentDestination
     from tasaf_payment.services import PaylistService
 

@@ -491,6 +491,7 @@ class PaylistService:
         payment_cycle_id=None,  # UUID — PaymentCycle PK
         destination: str = None,  # MUSE / GEPG — defaults to MUSE
         fsp_code: str = None,
+        per_fsp: bool = True,
     ) -> dict:
         """Generate one or more Paylists from verified + pre-audited accounts."""
         try:
@@ -537,6 +538,7 @@ class PaylistService:
                         str(payment_cycle_id) if payment_cycle_id else None,
                         destination,
                         fsp_code,
+                        per_fsp,
                     )
                     logger.info(
                         "PaylistService.generate: queued async (benefits=%d > threshold=%d, payroll=%s)",
@@ -553,7 +555,8 @@ class PaylistService:
                         exc_info=True,
                     )
 
-            return self.generate_sync(payroll_id, batch_type, payment_cycle_id, destination, fsp_code)
+            return self.generate_sync(payroll_id, batch_type, payment_cycle_id, destination, fsp_code,
+                                      per_fsp=per_fsp)
 
         except Exception as exc:
             logger.exception("PaylistService.generate failed")
@@ -567,9 +570,10 @@ class PaylistService:
         destination: str = None,
         fsp_code: str = None,
         resends_only: bool = False,
+        per_fsp: bool = True,
     ) -> dict:
-        """Build the paylists and items: BANK or MNO only, split at paylist_max_batch_size; items use bulk_create
-        (no per-item history by design)."""
+        """Build the paylists and items: BANK or MNO only, one paylist per FSP unless per_fsp is False,
+        split at paylist_max_batch_size; items use bulk_create (no per-item history by design)."""
         try:
             from payroll.models import (
                 BenefitConsumption,
@@ -605,7 +609,7 @@ class PaylistService:
                 is_deleted=False,
             ).values_list('benefit_id', flat=True)
 
-            created = []
+            created, codes = [], {}
 
             with transaction.atomic():
                 # One generation per payroll at a time, so two runs cannot both pass the check below.
@@ -636,49 +640,56 @@ class PaylistService:
                     for payment_type, group_pairs in groups:
                         if not group_pairs:
                             continue
-                        if max_size and len(group_pairs) > max_size:
-                            chunks = [group_pairs[i:i + max_size] for i in range(0, len(group_pairs), max_size)]
-                        else:
-                            chunks = [group_pairs]
+                        # Per FSP (default), so each MUSE message carries a single provider.
+                        by_fsp = {}
+                        for pair in group_pairs:
+                            key = fsp_code_of(pair[1].fsp_name, codes) if per_fsp else ''
+                            by_fsp.setdefault(key, []).append(pair)
+                        for code, fsp_pairs in sorted(by_fsp.items()):
+                            if max_size and len(fsp_pairs) > max_size:
+                                chunks = [fsp_pairs[i:i + max_size] for i in range(0, len(fsp_pairs), max_size)]
+                            else:
+                                chunks = [fsp_pairs]
 
-                        group_id = uuid.uuid4()
-                        total = len(chunks)
-                        now = datetime.now(tz=timezone.utc)
-                        # Approved on the original paylist.
-                        resend = payment_type == MusePaymentType.UNAPPLIED
-                        for seq, chunk in enumerate(chunks, start=1):
-                            paylist = Paylist(
-                                payroll_id=payroll_id,
-                                payment_cycle_id=payment_cycle_id,
-                                batch_type=stored_type,
-                                destination=destination,
-                                payment_type=payment_type,
-                                status=PaylistStatus.APPROVED if resend else PaylistStatus.PENDING_APPROVAL,
-                                approved_at=now if resend else None,
-                                json_ext={'approved_by': 'original paylist + PCT decision'} if resend else {},
-                                generated_at=now,
-                                batch_group=group_id,
-                                batch_sequence=seq,
-                                batch_total=total,
-                            )
-                            paylist.save(user=self.user)
-                            item_objs = [
-                                self._build_paylist_item(paylist, benefit, account, now, user_pk,
-                                                         origins.get(benefit.id))
-                                for benefit, account in chunk
-                            ]
-                            assign_end_to_end_ids(item_objs)
-                            PaylistItem.objects.bulk_create(item_objs, batch_size=2000)
-                            if not resend:
-                                self._start_paylist_approval(paylist)
-                            created.append({
-                                'paylist_uuid':   str(paylist.uuid),
-                                'batch_type':     stored_type,
-                                'payment_type':   payment_type,
-                                'batch_sequence': seq,
-                                'batch_total':    total,
-                                'item_count':     len(chunk),
-                            })
+                            group_id = uuid.uuid4()
+                            total = len(chunks)
+                            now = datetime.now(tz=timezone.utc)
+                            # Approved on the original paylist.
+                            resend = payment_type == MusePaymentType.UNAPPLIED
+                            for seq, chunk in enumerate(chunks, start=1):
+                                paylist = Paylist(
+                                    payroll_id=payroll_id,
+                                    payment_cycle_id=payment_cycle_id,
+                                    batch_type=stored_type,
+                                    destination=destination,
+                                    payment_type=payment_type,
+                                    status=PaylistStatus.APPROVED if resend else PaylistStatus.PENDING_APPROVAL,
+                                    approved_at=now if resend else None,
+                                    json_ext={'approved_by': 'original paylist + PCT decision'} if resend else {},
+                                    generated_at=now,
+                                    batch_group=group_id,
+                                    batch_sequence=seq,
+                                    batch_total=total,
+                                )
+                                paylist.save(user=self.user)
+                                item_objs = [
+                                    self._build_paylist_item(paylist, benefit, account, now, user_pk,
+                                                             origins.get(benefit.id))
+                                    for benefit, account in chunk
+                                ]
+                                assign_end_to_end_ids(item_objs)
+                                PaylistItem.objects.bulk_create(item_objs, batch_size=2000)
+                                if not resend:
+                                    self._start_paylist_approval(paylist)
+                                created.append({
+                                    'paylist_uuid':   str(paylist.uuid),
+                                    'batch_type':     stored_type,
+                                    'fsp_code':       code or None,
+                                    'payment_type':   payment_type,
+                                    'batch_sequence': seq,
+                                    'batch_total':    total,
+                                    'item_count':     len(chunk),
+                                })
 
                 if not created:
                     return {'success': False, 'error': _("tasaf_payment.error.no_eligible_accounts")}

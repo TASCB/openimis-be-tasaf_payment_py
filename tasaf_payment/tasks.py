@@ -186,7 +186,7 @@ def dispatch_verification_chunk(self, account_ids: list, user_id: int, chunk_ind
     name='tasaf_payment.generate_paylists_task',
 )
 def generate_paylists_task(self, user_id, payroll_id, batch_type,
-                           payment_cycle_id=None, destination=None, fsp_code=None):
+                           payment_cycle_id=None, destination=None, fsp_code=None, per_fsp=True):
     """Build a payroll's Paylists (and bulk-create their items) off the request thread."""
     try:
         from core.models import User
@@ -194,7 +194,7 @@ def generate_paylists_task(self, user_id, payroll_id, batch_type,
 
         user = User.objects.get(id=user_id)
         result = PaylistService(user).generate_sync(
-            payroll_id, batch_type, payment_cycle_id, destination, fsp_code,
+            payroll_id, batch_type, payment_cycle_id, destination, fsp_code, per_fsp=per_fsp,
         )
         logger.info(
             "generate_paylists_task: payroll=%s → %s paylist(s), %s item(s)",
