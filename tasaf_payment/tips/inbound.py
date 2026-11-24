@@ -26,6 +26,10 @@ def _apply_item(item, result, ref):
     item.answered_at = datetime.now(tz=timezone.utc)
     item.status = GepgItemStatus.ANSWERED
     account = item.payment_account
+    if account is None:
+        from tasaf_payment.account_check import apply_tips_answer
+        apply_tips_answer(item, result)
+        return
     open_statuses = (VerificationStatus.PENDING_MUSE, VerificationStatus.PENDING)
     if account is None or account.verification_status not in open_statuses:
         item.decision = 'IGNORED'
@@ -83,11 +87,18 @@ def apply_results(msg_ids, results, raw):
             touched.add(item.request_id)
             counts['applied'] += 1
         now = datetime.now(tz=timezone.utc)
+        jobs = set()
         for request in TipsLookupRequest.objects.filter(id__in=touched):
             request.status = TipsRequestStatus.ANSWERED
             request.answered_at = now
             request.response_body = tips_message.without_identity(raw)
             request.save(update_fields=['status', 'answered_at', 'response_body'])
+            if request.check_job_id:
+                jobs.add(request.check_job_id)
+        if jobs:
+            from tasaf_payment.account_check import complete
+            for job_id in jobs:
+                complete(job_id)
     logger.info("TIPS results: %(applied)d applied, %(duplicate)d duplicate, %(unmatched)d unmatched", counts)
     return counts
 

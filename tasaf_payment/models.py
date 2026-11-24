@@ -643,6 +643,7 @@ class AccountCheckJob(models.Model):
     created_by_user_id = models.CharField(max_length=36, blank=True, default='')
     row_count = models.IntegerField(default=0)
     valid_count = models.IntegerField(default=0)
+    channel = models.CharField(max_length=10, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     sent_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
@@ -664,6 +665,8 @@ class AccountCheckRow(models.Model):
     fsp_type = models.CharField(max_length=20, blank=True, default='')
     problem = models.CharField(max_length=255, blank=True, default='')
     gepg_item = models.OneToOneField(GepgVerificationItem, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='check_row')
+    tips_item = models.OneToOneField('TipsLookupItem', on_delete=models.SET_NULL, null=True, blank=True,
                                      related_name='check_row')
     result = models.CharField(max_length=20, choices=AccountCheckResult.choices,
                               default=AccountCheckResult.WAITING, db_index=True)
@@ -729,6 +732,8 @@ class TipsLookupRequest(models.Model):
     esb_request_id = models.CharField(max_length=100, blank=True, default='')
     requested_by = models.CharField(max_length=150, blank=True, default='')
     after_change = models.BooleanField(default=False)
+    check_job = models.ForeignKey(AccountCheckJob, on_delete=models.CASCADE, null=True, blank=True,
+                                  related_name='tips_requests')
     request_body = models.JSONField(null=True, blank=True)
     ack_body = models.JSONField(null=True, blank=True)
     response_body = models.JSONField(null=True, blank=True)

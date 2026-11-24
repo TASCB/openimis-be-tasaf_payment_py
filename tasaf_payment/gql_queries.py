@@ -445,7 +445,7 @@ class AccountCheckJobGQLType(DjangoObjectType):
     class Meta:
         model = AccountCheckJob
         interfaces = (graphene.relay.Node,)
-        fields = ('id', 'uuid', 'file_name', 'status', 'created_by', 'row_count', 'valid_count',
+        fields = ('id', 'uuid', 'file_name', 'status', 'created_by', 'row_count', 'valid_count', 'channel',
                   'created_at', 'sent_at', 'finished_at')
         filter_fields = {
             "id": ["exact"],

@@ -44,6 +44,10 @@ def identifier_of(account):
 
 def release_items(items, reason, user):
     from tasaf_payment.models import GepgItemStatus, PaymentAccount, VerificationStatus
+    checks = [i for i in items if i.payment_account_id is None]
+    if checks:
+        from tasaf_payment.account_check import release_tips
+        release_tips(checks, reason)
     for item in items:
         if item.payment_account_id:
             account = PaymentAccount.objects.select_for_update().get(pk=item.payment_account_id)
@@ -237,6 +241,10 @@ class TipsLookupSender:
         logger.info("TIPS lookup %s -> %s %s", request.msg_id, status, desc[:200])
         return None if keep else desc
 
+    def fail(self, request, desc):
+        from tasaf_payment.models import TipsRequestStatus
+        return self._finish(request, list(request.items.order_by('id')), TipsRequestStatus.FAILED, desc)
+
     def resend(self, msg_id):
         from tasaf_payment.models import TipsLookupRequest, TipsRequestStatus
         request = TipsLookupRequest.objects.filter(msg_id=msg_id).first()
@@ -245,6 +253,8 @@ class TipsLookupSender:
         if request.status not in (TipsRequestStatus.FAILED, TipsRequestStatus.REFUSED, TipsRequestStatus.EXPIRED):
             raise ValueError(f'Lookup {msg_id} is {request.status}; only failed, refused or expired lookups '
                              f'can be sent again')
+        if request.check_job_id:
+            raise ValueError(f'Lookup {msg_id} belongs to a bulk account check; upload the file again')
         ids = list(request.items.values_list('payment_account_id', flat=True))
         return self.dispatch(ids, after_change=request.after_change)
 

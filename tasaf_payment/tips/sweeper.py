@@ -26,6 +26,9 @@ def release_request(request, reason, user):
         request.status = TipsRequestStatus.EXPIRED
         request.status_desc = reason
         request.save(update_fields=['status', 'status_desc'])
+        if request.check_job_id:
+            from tasaf_payment.account_check import complete
+            complete(request.check_job_id)
     return len(pending)
 
 
