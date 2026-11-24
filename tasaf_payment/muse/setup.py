@@ -552,7 +552,7 @@ def on_approval_finalized(**kwargs):
 
 
 def change_rows(status=None, limit=50, kinds=None):
-    from approval.models import ApprovalDecision
+    from approval.models import ApprovalDecision, ApprovalRequest
     from tasaf_payment.models import MuseChangeRequest
 
     qs = MuseChangeRequest.objects.filter(is_deleted=False).select_related('user_created')
@@ -561,11 +561,17 @@ def change_rows(status=None, limit=50, kinds=None):
     if kinds:
         qs = qs.filter(kind__in=kinds)
     changes = list(qs.order_by('-date_created')[:limit])
+    ids = [str(c.id) for c in changes]
     latest = {}
     for decision in (ApprovalDecision.objects
-                     .filter(step__approval_request__object_id__in=[str(c.id) for c in changes], is_deleted=False)
+                     .filter(step__approval_request__object_id__in=ids, is_deleted=False)
                      .select_related('approver', 'step__approval_request').order_by('-date_created')):
         latest.setdefault(decision.step.approval_request.object_id, decision)
+    requests = {}
+    for object_id, request_id in (ApprovalRequest.objects
+                                  .filter(object_id__in=ids, is_deleted=False)
+                                  .order_by('-date_created').values_list('object_id', 'id')):
+        requests.setdefault(object_id, str(request_id))
     rows = []
     for c in changes:
         decision = latest.get(str(c.id))
@@ -579,6 +585,7 @@ def change_rows(status=None, limit=50, kinds=None):
             'decided_at': c.decided_at.isoformat() if c.decided_at else None,
             'comment': getattr(decision, 'comment', None),
             'reason': (c.json_ext or {}).get('reason'),
+            'approval_request_id': requests.get(str(c.id)),
         })
     return rows
 

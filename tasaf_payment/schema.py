@@ -809,13 +809,9 @@ class Query(graphene.ObjectType):
         user = info.context.user
         rows = change_rows(status=status, kinds=kinds, limit=min(limit or 50, 500))
         me = getattr(user, 'username', None)
-        can_approve = user.has_perms(TasafPaymentConfig.gql_muse_settings_approve_perms)
         can_propose = user.has_perms(TasafPaymentConfig.gql_muse_settings_propose_perms)
         for r in rows:
-            mine = r['requested_by'] == me
-            pending = r['status'] == 'PENDING'
-            r['can_decide'] = pending and can_approve and not mine
-            r['can_cancel'] = pending and can_propose and mine
+            r['can_cancel'] = r['status'] == 'PENDING' and can_propose and r['requested_by'] == me
         return rows
 
     def resolve_muse_readiness(self, info, **kwargs):
