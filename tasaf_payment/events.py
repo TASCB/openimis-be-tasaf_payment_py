@@ -19,6 +19,8 @@ gepg_answered = Signal()
 
 # kwargs: request (GepgVerificationRequest), minutes (how long it has waited)
 gepg_unanswered = Signal()
+tips_answered = Signal()
+tips_unanswered = Signal()
 
 
 def emit_muse_event(paylist, event, **details):
@@ -74,6 +76,28 @@ def emit_gepg_unanswered(request, minutes):
         for receiver, result in gepg_unanswered.send_robust(sender=None, request=request, minutes=minutes):
             if isinstance(result, Exception):
                 logger.warning("gepg_unanswered receiver %s failed: %s", receiver, result)
+    transaction.on_commit(send)
+
+
+def emit_tips_answered(request, counts):
+    if not tips_answered.has_listeners():
+        return
+
+    def send():
+        for receiver, result in tips_answered.send_robust(sender=None, request=request, counts=counts):
+            if isinstance(result, Exception):
+                logger.warning("tips_answered receiver %s failed: %s", receiver, result)
+    transaction.on_commit(send)
+
+
+def emit_tips_unanswered(request, hours):
+    if not tips_unanswered.has_listeners():
+        return
+
+    def send():
+        for receiver, result in tips_unanswered.send_robust(sender=None, request=request, hours=hours):
+            if isinstance(result, Exception):
+                logger.warning("tips_unanswered receiver %s failed: %s", receiver, result)
     transaction.on_commit(send)
 
 

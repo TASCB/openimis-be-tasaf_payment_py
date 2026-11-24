@@ -56,4 +56,7 @@ def expire(hours, apply=False):
                      'accounts': request.items.filter(status=GepgItemStatus.PENDING).count()})
         if apply:
             release_request(request, f'No TIPS answer within {hours} hours', inbound_audit_user())
+            if not request.check_job_id:
+                from tasaf_payment.events import emit_tips_unanswered
+                emit_tips_unanswered(request, hours)
     return rows

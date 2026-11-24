@@ -5,7 +5,7 @@ def _iso(value):
     return value.isoformat() if value else None
 
 
-def request_rows(status=None, limit=50):
+def request_rows(status=None, limit=50, fsp=None):
     from tasaf_payment.models import GepgItemStatus, TipsLookupRequest
     qs = TipsLookupRequest.objects.annotate(
         answered=Count('items', filter=Q(items__status=GepgItemStatus.ANSWERED)),
@@ -16,6 +16,8 @@ def request_rows(status=None, limit=50):
     )
     if status:
         qs = qs.filter(status=status)
+    if fsp:
+        qs = qs.filter(fsp_code=fsp)
     qs = qs.defer('request_body', 'ack_body', 'response_body')
     return [{
         'msg_id': r.msg_id, 'kind': r.kind, 'fsp_code': r.fsp_code, 'tips_code': r.tips_code, 'status': r.status,

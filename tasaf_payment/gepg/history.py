@@ -5,7 +5,7 @@ def _iso(value):
     return value.isoformat() if value else None
 
 
-def request_rows(status=None, limit=50):
+def request_rows(status=None, limit=50, fsp=None):
     from tasaf_payment.models import GepgItemStatus, GepgVerificationRequest
     qs = GepgVerificationRequest.objects.annotate(
         answered=Count('items', filter=Q(items__status=GepgItemStatus.ANSWERED)),
@@ -16,6 +16,8 @@ def request_rows(status=None, limit=50):
     )
     if status:
         qs = qs.filter(status=status)
+    if fsp:
+        qs = qs.filter(fsp_code=fsp)
     return [{
         'acc_verif_id': r.acc_verif_id, 'fsp_code': r.fsp_code, 'bic': r.bic, 'status': r.status,
         'status_code': r.status_code, 'status_desc': r.status_desc, 'item_count': r.item_count,

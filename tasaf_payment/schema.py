@@ -370,11 +370,12 @@ class Query(graphene.ObjectType):
     gepg_settings = graphene.Field(GepgSettingsGQLType)
     gepg_readiness = graphene.Field(GepgReadinessGQLType)
     gepg_verification_requests = graphene.Field(graphene.JSONString, status=graphene.String(),
-                                                limit=graphene.Int())
+                                                limit=graphene.Int(), fsp=graphene.String())
     verification_outcome = graphene.Field(graphene.JSONString, client_mutation_id=graphene.String(required=True))
     tips_settings = graphene.Field(graphene.JSONString)
     tips_readiness = graphene.Field(graphene.JSONString)
-    tips_lookup_requests = graphene.Field(graphene.JSONString, status=graphene.String(), limit=graphene.Int())
+    tips_lookup_requests = graphene.Field(graphene.JSONString, status=graphene.String(), limit=graphene.Int(),
+                                          fsp=graphene.String())
     tips_lookup_items = graphene.Field(graphene.JSONString, msg_id=graphene.String(required=True),
                                        offset=graphene.Int(), limit=graphene.Int(), search=graphene.String())
     pre_audit_window_overview = graphene.Field(graphene.JSONString, payment_cycle_id=graphene.UUID(required=True),
@@ -876,11 +877,11 @@ class Query(graphene.ObjectType):
                       'fsp_type': p.get('fsp_type') or ''} for p in listed]
         return {**readiness(listed), 'providers': providers}
 
-    def resolve_tips_lookup_requests(self, info, status=None, limit=None, **kwargs):
+    def resolve_tips_lookup_requests(self, info, status=None, limit=None, fsp=None, **kwargs):
         Query._check_any_permission(info.context.user, [
             TasafPaymentConfig.gql_muse_settings_search_perms, TasafPaymentConfig.gql_payment_account_search_perms])
         from tasaf_payment.tips.history import request_rows
-        return request_rows(status=status, limit=limit or 50)
+        return request_rows(status=status, limit=limit or 50, fsp=fsp)
 
     def resolve_tips_lookup_items(self, info, msg_id, offset=0, limit=100, search='', **kwargs):
         Query._check_any_permission(info.context.user, [
@@ -931,11 +932,11 @@ class Query(graphene.ObjectType):
         from tasaf_payment.gepg import outcome
         return outcome.recall(client_mutation_id)
 
-    def resolve_gepg_verification_requests(self, info, status=None, limit=None, **kwargs):
+    def resolve_gepg_verification_requests(self, info, status=None, limit=None, fsp=None, **kwargs):
         Query._check_any_permission(info.context.user, [
             TasafPaymentConfig.gql_muse_settings_search_perms, TasafPaymentConfig.gql_payment_account_search_perms])
         from tasaf_payment.gepg.history import request_rows
-        return request_rows(status=status, limit=limit or 50)
+        return request_rows(status=status, limit=limit or 50, fsp=fsp)
 
     def resolve_gepg_verification_items(self, info, acc_verif_id, offset=0, limit=100, search='', decision='',
                                         **kwargs):

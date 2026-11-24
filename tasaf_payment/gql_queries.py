@@ -7,6 +7,8 @@ from graphene_django.filter import TypedFilter
 from core import ExtendedConnection
 from tasaf_payment.models import (
     AccountCheckJob,
+    GepgVerificationItem,
+    TipsLookupItem,
     PaylistItemStatus,
     WithdrawalCharge,
     FspMapping,
@@ -97,6 +99,10 @@ class PaymentAccountGQLType(DjangoObjectType):
     payment_in_flight = graphene.Boolean()
     recipient_name = graphene.String()
     first_payment_check = graphene.String(description="DONE, DUE, PAID or IN_PAYMENT")
+    last_request = graphene.JSONString()
+
+    def resolve_last_request(root, info):
+        return last_request(root)
 
     def resolve_recipient_name(root, info):
         if hasattr(root, '_recipient_name'):
@@ -149,6 +155,33 @@ class PaymentAccountGQLType(DjangoObjectType):
         return with_list_columns(PaymentAccount.get_queryset(queryset, info.context.user))
 
 
+ITEM_STATES = {'PENDING': 'WAITING', 'ANSWERED': 'ANSWERED', 'RELEASED': 'NOT_SENT', 'EXPIRED': 'NO_ANSWER'}
+
+
+def _request_items(account, attr, related):
+    items = getattr(account, attr, None)
+    if items is None:
+        items = list(getattr(account, related).select_related('request').order_by('-request__created_at')[:1])
+    return items[:1]
+
+
+def last_request(account):
+    found = []
+    for item in _request_items(account, '_gepg_items', 'gepg_verification_items'):
+        found.append(('GEPG', item.request.acc_verif_id, item, item.acc_sts_code, item.acc_sts_desc))
+    for item in _request_items(account, '_tips_items', 'tips_lookup_items'):
+        found.append(('TIPS', item.request.msg_id, item, item.error_code, item.error_description))
+    if not found:
+        return None
+    channel, request_id, item, code, desc = max(found, key=lambda f: f[2].request.created_at)
+    request = item.request
+    state = ITEM_STATES.get(item.status, item.status)
+    reason = desc or (request.status_desc if state in ('NOT_SENT', 'NO_ANSWER') else '')
+    when = request.sent_at or request.created_at
+    return {'channel': channel, 'request': request_id, 'state': state, 'decision': item.decision or '',
+            'code': code or '', 'reason': (reason or '')[:255], 'at': when.isoformat() if when else None}
+
+
 def with_list_columns(queryset):
     from django.db.models import Exists, OuterRef, Prefetch, Subquery, Value
     from django.db.models.functions import Coalesce, Concat
@@ -166,6 +199,8 @@ def with_list_columns(queryset):
                .exclude(failure_reason__isnull=True).exclude(failure_reason='')
                .order_by('-date_created').values('failure_reason')[:1])
     attempts = MuseVerificationRecord.objects.filter(is_deleted=False).order_by('-received_at')
+    gepg_items = GepgVerificationItem.objects.select_related('request').order_by('-request__created_at')
+    tips_items = TipsLookupItem.objects.select_related('request').order_by('-request__created_at')
     return (queryset
             .select_related('group_beneficiary__group')
             .annotate(
@@ -175,7 +210,9 @@ def with_list_columns(queryset):
                                   .exclude(paylist__status__in=PAYLIST_FINISHED_STATUSES)),
                 _last_failure_reason=Subquery(failure),
             )
-            .prefetch_related(Prefetch('muse_verification_records', queryset=attempts, to_attr='_attempts')))
+            .prefetch_related(Prefetch('muse_verification_records', queryset=attempts, to_attr='_attempts'),
+                              Prefetch('gepg_verification_items', queryset=gepg_items, to_attr='_gepg_items'),
+                              Prefetch('tips_lookup_items', queryset=tips_items, to_attr='_tips_items')))
 
 
 class MuseVerificationRecordGQLType(DjangoObjectType):

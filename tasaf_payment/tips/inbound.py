@@ -95,6 +95,11 @@ def apply_results(msg_ids, results, raw):
             request.save(update_fields=['status', 'answered_at', 'response_body'])
             if request.check_job_id:
                 jobs.add(request.check_job_id)
+            else:
+                from collections import Counter
+                from tasaf_payment.events import emit_tips_answered
+                emit_tips_answered(request, dict(Counter(
+                    d or 'PENDING' for d in request.items.values_list('decision', flat=True))))
         if jobs:
             from tasaf_payment.account_check import complete
             for job_id in jobs:
