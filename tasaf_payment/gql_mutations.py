@@ -992,6 +992,41 @@ class DecideUnappliedPaymentMutation(OpenIMISMutation):
             return _error(exc)
 
 
+class DecideUnappliedPaymentsMutation(OpenIMISMutation):
+    _mutation_module = TasafPaymentConfig.name
+    _mutation_class = "DecideUnappliedPaymentsMutation"
+
+    class Input(OpenIMISMutation.Input):
+        action = graphene.String(required=True)
+        note = graphene.String(required=False)
+        item_uuids = graphene.List(graphene.UUID, required=False)
+        hhid = graphene.String(required=False)
+        fsp_name = graphene.String(required=False)
+        account_number = graphene.String(required=False)
+        batch_reference = graphene.String(required=False)
+        location_id = graphene.Int(required=False)
+        reason = graphene.String(required=False)
+        suggested = graphene.String(required=False)
+        payment_cycle_id = graphene.UUID(required=False)
+
+    @classmethod
+    def async_mutate(cls, user, **data):
+        from django.core.cache import cache
+        from tasaf_payment.returned import BULK_OUTCOME_KEY, bulk_items, queue_bulk_decide
+        try:
+            _require_perms(user, TasafPaymentConfig.gql_unapplied_decide_perms)
+            client_mutation_id = data.pop('client_mutation_id', None)
+            data.pop('client_mutation_label', None)
+            action, note = data.pop('action'), data.pop('note', None)
+            items = bulk_items([str(u) for u in data.pop('item_uuids', None) or []], **data)
+            result = queue_bulk_decide(user, action, note, items)
+            if client_mutation_id:
+                cache.set(BULK_OUTCOME_KEY.format(client_mutation_id), result, 24 * 3600)
+            return None
+        except Exception as exc:
+            return _error(exc)
+
+
 class CreateUnappliedResendsMutation(OpenIMISMutation):
     _mutation_module = TasafPaymentConfig.name
     _mutation_class = "CreateUnappliedResendsMutation"

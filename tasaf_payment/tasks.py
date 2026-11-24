@@ -232,6 +232,20 @@ def send_unapplied_withdrawals_task(self, item_ids, previous, user_id, run_id):
     return result
 
 
+@shared_task(bind=True, max_retries=0, name='tasaf_payment.decide_unapplied_bulk_task')
+def decide_unapplied_bulk_task(self, user_id, action, note, item_ids, batch):
+    from django.core.cache import cache
+    from core.models import User
+    from tasaf_payment.events import emit_unapplied_bulk_done
+    from tasaf_payment.returned import BULK_OUTCOME_KEY, bulk_decide
+
+    user = User.objects.get(id=user_id)
+    result = bulk_decide(user, action, note, item_ids, batch)
+    cache.set(BULK_OUTCOME_KEY.format(batch), result, 24 * 3600)
+    emit_unapplied_bulk_done(user, result)
+    return result
+
+
 # ─── GePG resend ──────────────────────────────────────────────────────────────
 
 @shared_task(bind=True, max_retries=0, name='tasaf_payment.resend_gepg_request_task')

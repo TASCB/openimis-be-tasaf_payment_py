@@ -82,6 +82,8 @@ account_check_done = Signal()
 # kwargs: event ('sent' | 'answered' | 'unanswered'), user, counts
 withdrawal_event = Signal()
 
+unapplied_bulk_done = Signal()
+
 
 def emit_account_check_done(job):
     if not account_check_done.has_listeners():
@@ -102,4 +104,15 @@ def emit_withdrawal_event(event, user=None, **details):
         for receiver, result in withdrawal_event.send_robust(sender=None, event=event, user=user, **details):
             if isinstance(result, Exception):
                 logger.warning("withdrawal_event receiver %s failed: %s", receiver, result)
+    transaction.on_commit(send)
+
+
+def emit_unapplied_bulk_done(user, result):
+    if not unapplied_bulk_done.has_listeners():
+        return
+
+    def send():
+        for receiver, outcome in unapplied_bulk_done.send_robust(sender=None, user=user, result=result):
+            if isinstance(outcome, Exception):
+                logger.warning("unapplied_bulk_done receiver %s failed: %s", receiver, outcome)
     transaction.on_commit(send)

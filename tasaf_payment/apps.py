@@ -67,6 +67,8 @@ DEFAULT_CONFIG = {
     # Repay refused once a payment came back this many times.
     "unapplied_max_returns": 2,
     "unapplied_reminder_days": 7,
+    "unapplied_bulk_max": 10000,
+    "unapplied_bulk_inline_max": 200,
     # Off only on test servers holding seeded paylists: a benefit without a PCT breakdown no longer blocks Submit.
     "breakdown_required": True,
 
@@ -182,6 +184,8 @@ class TasafPaymentConfig(AppConfig):
     withdrawn_hold_days_without_cycle = 30
     unapplied_max_returns = 2
     unapplied_reminder_days = 7
+    unapplied_bulk_max = 10000
+    unapplied_bulk_inline_max = 200
     breakdown_required = True
     fsp_code_aliases = {}
     mobile_prefixes = {}

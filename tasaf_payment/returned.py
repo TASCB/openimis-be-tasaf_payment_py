@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 
 from django.db import transaction
-from django.db.models import Count, Exists, OuterRef, Q, Sum
+from django.db.models import Count, Exists, OuterRef, Q, Sum, Value
 
 from tasaf_payment.models import (
     UNAPPLIED_ACTION_KEY, PaylistItem, PaylistItemStatus, PreAuditStatus, UnappliedAction, VerificationStatus,
@@ -113,15 +113,23 @@ class UnappliedDecisionError(Exception):
     pass
 
 
+def _latest_feedback(item):
+    prefetched = getattr(item, '_prefetched_objects_cache', {}).get('return_feedbacks')
+    if prefetched is not None:
+        live = [f for f in prefetched if not f.is_deleted]
+        return max(live, key=lambda f: f.received_at) if live else None
+    return item.return_feedbacks.filter(is_deleted=False).order_by('-received_at').first()
+
+
 def latest_reason(item):
-    feedback = item.return_feedbacks.filter(is_deleted=False).order_by('-received_at').first()
+    feedback = _latest_feedback(item)
     parts = [feedback.reason_code, feedback.reason_description] if feedback else [item.return_reason]
     return ' '.join(p for p in parts if p) or 'Payment returned unapplied'
 
 
 def suggested_action(item):
     from tasaf_payment.muse.rejection import DATA, TRANSIENT, classify
-    feedback = item.return_feedbacks.filter(is_deleted=False).order_by('-received_at').first()
+    feedback = _latest_feedback(item)
     reason = (feedback.reason_description if feedback else None) or item.return_reason
     return {TRANSIENT: UnappliedAction.REPAY, DATA: UnappliedAction.CASE}.get(classify(reason))
 
@@ -135,6 +143,8 @@ def account_cleared(account):
 def times_returned(item):
     if not item.benefit_consumption_id:
         return 1
+    if getattr(item, 'returns_count', None):
+        return item.returns_count
     return PaylistItem.objects.filter(benefit_consumption_id=item.benefit_consumption_id, is_deleted=False,
                                       status=PaylistItemStatus.UNAPPLIED).count()
 
@@ -161,7 +171,7 @@ def _check_decision(user, item, action, note):
             "Write a note: it is required to withdraw a payment or to choose another action than the suggested one")
 
 
-def decide_unapplied(user, item_uuid, action, note=None):
+def decide_unapplied(user, item_uuid, action, note=None, batch=None):
     from tasaf_payment.muse.rejection import flag_returned_account
     from tasaf_payment.unapplied import provider_code
 
@@ -183,7 +193,7 @@ def decide_unapplied(user, item_uuid, action, note=None):
         item.json_ext = {**(item.json_ext or {}), UNAPPLIED_ACTION_KEY: {
             'action': action, 'by': user.username, 'at': datetime.now(tz=timezone.utc).isoformat(),
             'note': note or None, 'suggested': suggested_action(item), 'returns': times_returned(item),
-            'provider': provider_code(account),
+            'provider': provider_code(account), **({'batch': batch} if batch else {}),
         }}
         item.save(user=user)
 
@@ -258,7 +268,155 @@ def _returned_at(item):
     if ext.get('returned_at'):
         when = datetime.fromisoformat(ext['returned_at'])
     else:
-        feedback = item.return_feedbacks.filter(is_deleted=False).order_by('-received_at').first()
+        feedback = _latest_feedback(item)
         when = feedback.received_at if feedback else None
     # openIMIS stores naive UTC (USE_TZ off)
     return when.replace(tzinfo=timezone.utc) if when is not None and when.tzinfo is None else when
+
+
+# ── Filters of the awaiting list ───────────────────────────────────────────
+
+SUGGESTION_CLASSES = {UnappliedAction.REPAY: 'TRANSIENT', UnappliedAction.CASE: 'DATA'}
+NO_SUGGESTION = 'NONE'
+
+
+def _with_reason():
+    from django.db.models import Subquery, TextField
+    from django.db.models.functions import Cast, Coalesce, NullIf
+    from tasaf_payment.models import ReturnFeedback
+    latest = ReturnFeedback.objects.filter(paylist_item_id=OuterRef('id'), is_deleted=False).order_by('-received_at')
+    described = NullIf(Subquery(latest.values('reason_description')[:1], output_field=TextField()), Value(''))
+    return (PaylistItem.objects.filter(status=PaylistItemStatus.UNAPPLIED, is_deleted=False)
+            .annotate(reason=Coalesce(described, Cast('return_reason', TextField()), output_field=TextField())))
+
+
+def suggested_q(value):
+    from tasaf_payment.muse.rejection import classify
+    value = str(value or '').strip().upper()
+    items = _with_reason()
+    reasons = {r for r in items.values_list('reason', flat=True).distinct() if r}
+    if value == NO_SUGGESTION:
+        known = [r for r in reasons if classify(r) in SUGGESTION_CLASSES.values()]
+        return Q(id__in=items.filter(Q(reason__isnull=True) | ~Q(reason__in=known)).values('id'))
+    wanted = SUGGESTION_CLASSES.get(value)
+    if not wanted:
+        return Q(pk__in=[])
+    return Q(id__in=items.filter(reason__in=[r for r in reasons if classify(r) == wanted]).values('id'))
+
+
+def reason_q(text):
+    from tasaf_payment.models import ReturnFeedback
+    text = str(text or '').strip()
+    described = ReturnFeedback.objects.filter(paylist_item_id=OuterRef('id'), is_deleted=False,
+                                              reason_description__icontains=text)
+    return Q(return_reason__icontains=text) | Q(Exists(described))
+
+
+def overdue_count(days=None):
+    from datetime import timedelta
+    from tasaf_payment.apps import TasafPaymentConfig
+    from tasaf_payment.models import ReturnFeedback
+    days = int(days if days is not None else getattr(TasafPaymentConfig, 'unapplied_reminder_days', 7) or 7)
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    stamped = Q(json_ext__has_key='returned_at')
+    recent = ReturnFeedback.objects.filter(paylist_item_id=OuterRef('id'), is_deleted=False,
+                                           received_at__gte=cutoff.replace(tzinfo=None))
+    any_feedback = ReturnFeedback.objects.filter(paylist_item_id=OuterRef('id'), is_deleted=False)
+    old = (stamped & Q(json_ext__returned_at__lt=cutoff.isoformat())) | (
+        ~stamped & Exists(any_feedback) & ~Exists(recent))
+    return {'count': PaylistItem.objects.filter(awaiting_action(), old, is_deleted=False,
+                                                paylist__is_deleted=False).count(), 'days': days}
+
+
+# ── Deciding many at once ──────────────────────────────────────────────────
+
+SUGGESTED = 'SUGGESTED'
+BULK_OUTCOME_KEY = 'tasaf.unapplied.bulk:{}'
+BULK_ACTIONS = (*UnappliedAction.values, SUGGESTED)
+NO_SUGGESTION_REASON = "MUSE's reason is not in the reason table, so there is no suggested action"
+
+
+def bulk_items(item_uuids=None, **filters):
+    from tasaf_payment.schema import paylist_item_filters
+    qs = PaylistItem.objects.filter(awaiting_action(), is_deleted=False, paylist__is_deleted=False)
+    if item_uuids:
+        return qs.filter(uuid__in=item_uuids)
+    return qs.filter(*paylist_item_filters(**{k: v for k, v in filters.items() if k != 'resolution'}))
+
+
+def _annotated(qs):
+    from django.db.models import IntegerField, Subquery
+    from django.db.models.functions import Coalesce
+    same = (PaylistItem.objects.filter(benefit_consumption_id=OuterRef('benefit_consumption_id'), is_deleted=False,
+                                       status=PaylistItemStatus.UNAPPLIED)
+            .values('benefit_consumption_id').annotate(n=Count('id')).values('n'))
+    return (qs.select_related('payment_account', 'paylist').prefetch_related('return_feedbacks')
+            .annotate(returns_count=Coalesce(Subquery(same, output_field=IntegerField()), 1)))
+
+
+def _effective(item, action):
+    effective = suggested_action(item) if action == SUGGESTED else action
+    return str(effective) if effective else None
+
+
+def bulk_preview(user, action, note, items):
+    from collections import Counter
+    action = str(action or '').strip().upper()
+    if action not in BULK_ACTIONS:
+        raise UnappliedDecisionError(f"Unknown action {action!r}")
+    note = (note or '').strip()
+    decided, refused = Counter(), Counter()
+    for item in _annotated(items).iterator(chunk_size=500):
+        effective = _effective(item, action)
+        if not effective:
+            refused[NO_SUGGESTION_REASON] += 1
+            continue
+        try:
+            _check_decision(user, item, effective, note)
+            decided[effective] += 1
+        except UnappliedDecisionError as exc:
+            refused[str(exc)] += 1
+    return {'action': action, 'total': sum(decided.values()) + sum(refused.values()),
+            'decided': dict(decided), 'refused': [{'reason': r, 'count': n} for r, n in refused.most_common()]}
+
+
+def bulk_decide(user, action, note, item_ids, batch):
+    from collections import Counter
+    decided, refused = Counter(), Counter()
+    for item in _annotated(PaylistItem.objects.filter(id__in=item_ids)).iterator(chunk_size=500):
+        effective = _effective(item, action)
+        if not effective:
+            refused[NO_SUGGESTION_REASON] += 1
+            continue
+        try:
+            decide_unapplied(user, str(item.uuid), effective, note, batch=batch)
+            decided[effective] += 1
+        except UnappliedDecisionError as exc:
+            refused[str(exc)] += 1
+    result = {'batch': batch, 'action': action, 'total': len(item_ids), 'decided': dict(decided),
+              'refused': [{'reason': r, 'count': n} for r, n in refused.most_common()]}
+    logger.info("Unapplied bulk %s by %s: %s", batch, user.username, result)
+    return result
+
+
+def queue_bulk_decide(user, action, note, items):
+    import uuid
+    from tasaf_payment.apps import TasafPaymentConfig
+    from tasaf_payment.tasks import decide_unapplied_bulk_task
+    action = str(action or '').strip().upper()
+    if action not in BULK_ACTIONS:
+        raise UnappliedDecisionError(f"Unknown action {action!r}")
+    item_ids = list(items.values_list('id', flat=True))
+    if not item_ids:
+        raise UnappliedDecisionError("No payment waiting for a decision matches")
+    limit = int(getattr(TasafPaymentConfig, 'unapplied_bulk_max', 0) or 0)
+    if limit and len(item_ids) > limit:
+        raise UnappliedDecisionError(f"{len(item_ids)} payments match; narrow the filters to {limit} or fewer")
+    batch, note = uuid.uuid4().hex[:12], (note or '').strip()
+    if len(item_ids) > int(getattr(TasafPaymentConfig, 'unapplied_bulk_inline_max', 0) or 0):
+        try:
+            decide_unapplied_bulk_task.delay(user.id, action, note, item_ids, batch)
+            return {'batch': batch, 'action': action, 'total': len(item_ids), 'queued': True}
+        except Exception:  # noqa: BLE001 — no broker: decide inline
+            logger.warning("Unapplied bulk: enqueue failed, deciding inline", exc_info=True)
+    return bulk_decide(user, action, note, item_ids, batch)

@@ -19,6 +19,7 @@ from tasaf_payment.gql_mutations import (
     RejectMuseChangeMutation,
     CancelMuseChangeMutation,
     DecideUnappliedPaymentMutation,
+    DecideUnappliedPaymentsMutation,
     CreateUnappliedResendsMutation,
     SendAccountCheckMutation,
     SendUnappliedWithdrawalsMutation,
@@ -152,6 +153,14 @@ def _payee_name_q(text):
         is_deleted=False, recipient_type='PRIMARY')))
 
 
+def unapplied_bulk_filter_args():
+    return dict(
+        hhid=graphene.String(), fsp_name=graphene.String(), account_number=graphene.String(),
+        batch_reference=graphene.String(), location_id=graphene.Int(), reason=graphene.String(),
+        suggested=graphene.String(), payment_cycle_id=graphene.UUID(),
+    )
+
+
 def paylist_item_filters(**kwargs):
     filters = []
     if kwargs.get("paylist_uuid"):
@@ -188,6 +197,15 @@ def paylist_item_filters(**kwargs):
         filters.append(resolution_q(kwargs["resolution"].strip().upper()))
     if kwargs.get("batch_reference"):
         filters.append(Q(paylist__muse_batch_reference__icontains=kwargs["batch_reference"].strip()))
+    if kwargs.get("suggested"):
+        from tasaf_payment.returned import suggested_q
+        filters.append(suggested_q(kwargs["suggested"]))
+    if kwargs.get("reason"):
+        from tasaf_payment.returned import reason_q
+        filters.append(reason_q(kwargs["reason"]))
+    if kwargs.get("payment_cycle_id"):
+        from tasaf_payment.reports import cycle_q
+        filters.append(cycle_q(kwargs["payment_cycle_id"]))
     if kwargs.get("reason_code"):
         from django.db.models import Exists, OuterRef
         filters.append(Q(Exists(ReturnFeedback.objects.filter(
@@ -227,6 +245,11 @@ class Query(graphene.ObjectType):
 
     unapplied_withdrawals_pending = graphene.Int(
         description="Unapplied-withdrawn payments not yet reported to MUSE (or that MUSE refused).")
+    unapplied_bulk_preview = graphene.JSONString(
+        action=graphene.String(required=True), note=graphene.String(),
+        item_uuids=graphene.List(graphene.UUID), **unapplied_bulk_filter_args())
+    unapplied_bulk_outcome = graphene.JSONString(client_mutation_id=graphene.String(required=True))
+    unapplied_overdue = graphene.JSONString()
     unapplied_resend_preview = graphene.JSONString(
         description="Per payroll and channel: unapplied re-sends ready, and those waiting for their account.")
     unapplied_reconciliation = graphene.JSONString(
@@ -402,6 +425,9 @@ class Query(graphene.ObjectType):
         resolution=graphene.String(),
         batch_reference=graphene.String(),
         reason_code=graphene.String(),
+        reason=graphene.String(),
+        suggested=graphene.String(),
+        payment_cycle_id=graphene.UUID(),
         # status, muse_reference handled by filter_fields
     )
     unapplied_items_export = graphene.String(
@@ -410,6 +436,10 @@ class Query(graphene.ObjectType):
         account_number=graphene.String(),
         resolution=graphene.String(),
         batch_reference=graphene.String(),
+        location_id=graphene.Int(),
+        reason=graphene.String(),
+        suggested=graphene.String(),
+        payment_cycle_id=graphene.UUID(),
         file_format=graphene.String(),
         fields=graphene.List(graphene.String),
         fields_columns=graphene.String(),
@@ -949,6 +979,28 @@ class Query(graphene.ObjectType):
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
         return pending().count()
 
+    def resolve_unapplied_bulk_preview(self, info, action, note=None, item_uuids=None, **filters):
+        from tasaf_payment.returned import UnappliedDecisionError, bulk_items, bulk_preview
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_unapplied_decide_perms)
+        try:
+            return bulk_preview(info.context.user, action, note, bulk_items(item_uuids, **filters))
+        except UnappliedDecisionError as exc:
+            return {'error': str(exc)}
+
+    def resolve_unapplied_bulk_outcome(self, info, client_mutation_id, **kwargs):
+        from django.core.cache import cache
+        from tasaf_payment.returned import BULK_OUTCOME_KEY
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_unapplied_decide_perms)
+        outcome = cache.get(BULK_OUTCOME_KEY.format(client_mutation_id))
+        if outcome and outcome.get('queued'):
+            return cache.get(BULK_OUTCOME_KEY.format(outcome['batch'])) or outcome
+        return outcome
+
+    def resolve_unapplied_overdue(self, info, **kwargs):
+        from tasaf_payment.returned import overdue_count
+        Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
+        return overdue_count()
+
     def resolve_unapplied_resend_preview(self, info, **kwargs):
         from tasaf_payment.unapplied import resend_preview
         Query._check_permissions(info.context.user, TasafPaymentConfig.gql_return_feedback_search_perms)
@@ -1027,6 +1079,7 @@ class Mutation(graphene.ObjectType):
     reject_muse_change = RejectMuseChangeMutation.Field()
     cancel_muse_change = CancelMuseChangeMutation.Field()
     decide_unapplied_payment = DecideUnappliedPaymentMutation.Field()
+    decide_unapplied_payments = DecideUnappliedPaymentsMutation.Field()
     create_unapplied_resends = CreateUnappliedResendsMutation.Field()
     send_account_check = SendAccountCheckMutation.Field()
     send_unapplied_withdrawals = SendUnappliedWithdrawalsMutation.Field()
