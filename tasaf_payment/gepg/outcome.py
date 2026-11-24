@@ -6,8 +6,10 @@ FIELDS = ('count', 'batches', 'refused', 'refused_batches', 'skipped', 'withdraw
 
 
 def remember(client_mutation_id, result):
+    from tasaf_payment.tips.setup import route
     if client_mutation_id and isinstance(result, dict):
-        cache.set(KEY.format(client_mutation_id), {k: result.get(k) for k in FIELDS}, KEEP_SECONDS)
+        cache.set(KEY.format(client_mutation_id), {**{k: result.get(k) for k in FIELDS}, 'route': route()},
+                  KEEP_SECONDS)
 
 
 def recall(client_mutation_id):
