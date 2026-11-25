@@ -27,6 +27,7 @@ class GepgVerificationDbTest(TestCase):
             is_deleted=False, group_beneficiary__isnull=False).order_by('id')[:2])
         if self.user is None or len(self.accounts) < 2:
             self.skipTest('needs the Admin user and two payment accounts with a household')
+        GepgVerificationRequest.objects.all().delete()
         for n, account in enumerate(self.accounts):
             PaymentAccount.objects.filter(id=account.id).update(
                 fsp_name='GEPGTEST', fsp_type='MOBILE', account_number=f'25576748267{n}',
@@ -222,6 +223,8 @@ class GepgVerificationDbTest(TestCase):
         first.refresh_from_db()
         self.assertEqual((first.status, first.decision, first.acc_sts_code), (GepgItemStatus.ANSWERED, 'UNCHECKED', '7355'))
         self.assertEqual(self.statuses(), [VerificationStatus.PENDING, VerificationStatus.FAILED])
+        request.refresh_from_db()
+        self.assertEqual(request.status_desc, 'Answered: 2 not checked')
         from tasaf_payment.gepg.history import request_rows
         self.assertEqual(request_rows()[0]['unchecked'], 2)
 
@@ -236,7 +239,9 @@ class GepgVerificationDbTest(TestCase):
              'AccStsCode': '7201', 'AccStsDesc': 'Account not found'}])
         self.assertTrue(ok)
         self.assertEqual(self.statuses(), [VerificationStatus.FAILED, VerificationStatus.FAILED])
-        record = PaymentAccount.objects.get(id=self.ids[0]).muse_verification_records.order_by('-id').first()
+        request.refresh_from_db()
+        self.assertEqual(request.status_desc, 'Answered: 2 failed')
+        record = PaymentAccount.objects.get(id=self.ids[0]).muse_verification_records.order_by('-date_created').first()
         self.assertIn('dormant', record.failure_reason)
 
     def test_an_answer_arriving_before_the_ack_is_kept(self):
@@ -256,6 +261,7 @@ class GepgVerificationDbTest(TestCase):
         self.assertIsNotNone(request.response_body)
         self.assertIsNotNone(request.ack_body)
         self.assertEqual(request.items.filter(status=GepgItemStatus.ANSWERED).count(), 2)
+        self.assertTrue(request.status_desc.startswith('Answered: '), request.status_desc)
 
     def test_an_answer_signals_once_with_the_decisions(self):
         from tasaf_payment.events import gepg_answered

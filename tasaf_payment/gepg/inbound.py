@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from django.db import transaction
 
 from tasaf_payment.gepg import message as gepg_message
+from tasaf_payment.verification_summary import answered_desc
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +86,10 @@ def handle(payload):
                 applied += 1
             if applied or request.status != GepgRequestStatus.ANSWERED:
                 request.status = GepgRequestStatus.ANSWERED
+                request.status_desc = answered_desc((i.status, i.decision) for i in items.values())
                 request.answered_at = datetime.now(tz=timezone.utc)
                 request.response_body = payload
-                request.save(update_fields=['status', 'answered_at', 'response_body'])
+                request.save(update_fields=['status', 'status_desc', 'answered_at', 'response_body'])
             if applied and request.check_job_id:
                 from tasaf_payment.account_check import complete
                 complete(request.check_job_id)

@@ -23,6 +23,7 @@ class TipsLookupDbTest(TestCase):
             is_deleted=False, group_beneficiary__isnull=False).order_by('id')[:2])
         if self.user is None or len(self.accounts) < 2:
             self.skipTest('needs the Admin user and two payment accounts with a household')
+        TipsLookupRequest.objects.all().delete()
         for n, account in enumerate(self.accounts):
             PaymentAccount.objects.filter(id=account.id).update(
                 fsp_name='TIPSTEST', fsp_type='MOBILE', account_number=f'076748267{n}',
@@ -126,6 +127,7 @@ class TipsLookupDbTest(TestCase):
         self.assertEqual((summary['orgMsgId'], summary['status']), ('TPPS_1', 'RECEIVED'))
         request.refresh_from_db()
         self.assertEqual(request.status, TipsRequestStatus.ANSWERED)
+        self.assertEqual(request.status_desc, 'Answered: 1 verified, 1 failed')
         self.assertEqual(self.statuses(), [VerificationStatus.VERIFIED, VerificationStatus.FAILED])
         second.refresh_from_db()
         self.assertEqual((second.error_code, second.decision), ('3204', 'FAILED'))
@@ -133,6 +135,23 @@ class TipsLookupDbTest(TestCase):
                                 'fullName': 'Late answer'}])
         self.assertEqual(again['data']['esbBody']['message']['messageSummary']['status'], 'RECEIVED')
         self.assertEqual(self.statuses()[1], VerificationStatus.FAILED)
+
+    def test_a_callback_before_the_send_finishes_keeps_its_answer(self):
+        def answered_first(*args, **kwargs):
+            TipsLookupRequest.objects.update(status=TipsRequestStatus.ANSWERED, status_desc='Answered: 2 failed')
+            return OK
+        producer = mock.Mock(**{'publish.side_effect': answered_first})
+        with mock.patch('coremis_app_integration.govesb.GovESBProducer', return_value=producer):
+            TipsLookupSender(self.user, sleep=lambda s: None).dispatch(self.ids)
+        request = TipsLookupRequest.objects.get()
+        self.assertEqual((request.status, request.status_desc), (TipsRequestStatus.ANSWERED, 'Answered: 2 failed'))
+
+    def test_answer_summary_counts_decisions_and_waiting(self):
+        from tasaf_payment.verification_summary import answered_desc
+        rows = [('ANSWERED', 'VERIFIED')] * 2 + [('ANSWERED', 'MANUAL')] + [('PENDING', '')] * 3
+        self.assertEqual(answered_desc(rows), 'Answered: 2 verified, 1 need review; 3 still waiting')
+        self.assertEqual(answered_desc([('ANSWERED', 'UNCHECKED'), ('ANSWERED', '')]),
+                         'Answered: 1 not checked, 1 checked')
 
     def test_unknown_results_are_refused_in_the_ack(self):
         self.dispatch(OK)

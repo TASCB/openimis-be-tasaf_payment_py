@@ -277,9 +277,10 @@ class GepgVerificationSender:
         with transaction.atomic():
             # GePG's answer can arrive before GovESB hands back the ack: keep it, save only the send
             answered = GepgVerificationRequest.objects.select_for_update().filter(
-                pk=request.pk, status=GepgRequestStatus.ANSWERED).exists()
-            if answered:
+                pk=request.pk, status=GepgRequestStatus.ANSWERED).values_list('status_desc', flat=True).first()
+            if answered is not None:
                 request.status = GepgRequestStatus.ANSWERED
+                request.status_desc = answered
                 keep = True
             request.save(update_fields=self.SEND_FIELDS)
             if not keep:

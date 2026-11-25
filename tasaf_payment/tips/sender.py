@@ -231,9 +231,11 @@ class TipsLookupSender:
         request.status = status
         request.status_desc = desc[:2000]
         with transaction.atomic():
-            if TipsLookupRequest.objects.select_for_update().filter(
-                    pk=request.pk, status=TipsRequestStatus.ANSWERED).exists():
+            answered = TipsLookupRequest.objects.select_for_update().filter(
+                pk=request.pk, status=TipsRequestStatus.ANSWERED).values_list('status_desc', flat=True).first()
+            if answered is not None:
                 request.status = TipsRequestStatus.ANSWERED
+                request.status_desc = answered
                 keep = True
             request.save(update_fields=self.SEND_FIELDS)
             if not keep:

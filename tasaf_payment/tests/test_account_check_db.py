@@ -104,11 +104,11 @@ class AccountCheckDbTest(TestCase):
         job = self.job()
         request = self.send(job)
         self.assertEqual(request.status, 'SENDING')
-        self.assertEqual(expire(6), [])
+        self.assertNotIn(request.acc_verif_id, [r['acc_verif_id'] for r in expire(6)])
         GepgVerificationRequest.objects.filter(id=request.id).update(
             created_at=datetime.now(tz=timezone.utc) - timedelta(hours=7))
         with self.captureOnCommitCallbacks(execute=False):
-            self.assertEqual(len(expire(6, apply=True)), 1)
+            self.assertIn(request.acc_verif_id, [r['acc_verif_id'] for r in expire(6, apply=True)])
         job.refresh_from_db()
         self.assertEqual(job.status, AccountCheckStatus.DONE)
 

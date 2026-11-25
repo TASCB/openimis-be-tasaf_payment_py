@@ -1,10 +1,12 @@
 import logging
 import re
+from collections import Counter
 from datetime import datetime, timezone
 
 from django.db import transaction
 
 from tasaf_payment.tips import message as tips_message
+from tasaf_payment.verification_summary import answered_desc
 
 logger = logging.getLogger(__name__)
 
@@ -90,13 +92,13 @@ def apply_results(msg_ids, results, raw):
         jobs = set()
         for request in TipsLookupRequest.objects.filter(id__in=touched):
             request.status = TipsRequestStatus.ANSWERED
+            request.status_desc = answered_desc(request.items.values_list('status', 'decision'))
             request.answered_at = now
             request.response_body = tips_message.without_identity(raw)
-            request.save(update_fields=['status', 'answered_at', 'response_body'])
+            request.save(update_fields=['status', 'status_desc', 'answered_at', 'response_body'])
             if request.check_job_id:
                 jobs.add(request.check_job_id)
             else:
-                from collections import Counter
                 from tasaf_payment.events import emit_tips_answered
                 emit_tips_answered(request, dict(Counter(
                     d or 'PENDING' for d in request.items.values_list('decision', flat=True))))
