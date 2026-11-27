@@ -957,15 +957,18 @@ class PaylistService:
                 return {'success': False, 'outcome': 'REFUSED',
                         'error': f'{duplicates} payment(s) on this paylist are already paid, or being paid, '
                                  f'on another paylist; submitting would pay them twice'}
-            no_hhid = 0
+            no_hhid = bad_account = 0
             if paylist.destination == PaymentDestination.MUSE:
-                from tasaf_payment.muse.rejection import withdraw_without_payee_code
+                from tasaf_payment.muse.rejection import withdraw_invalid_account_numbers, withdraw_without_payee_code
                 no_hhid = withdraw_without_payee_code(paylist, self.user)
+                bad_account = withdraw_invalid_account_numbers(paylist, self.user)
             pending = paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING)
             if not pending.exists():
+                now = '; '.join(filter(None, [f'{no_hhid} for an invalid HHID' if no_hhid else '',
+                                              f'{bad_account} for an invalid account number' if bad_account else '']))
                 return {'success': False, 'outcome': 'REFUSED',
                         'error': 'No payee is left on this paylist to send; every payee was taken out'
-                                 + (f' ({no_hhid} now for an invalid HHID)' if no_hhid else '')}
+                                 + (f' ({now} now)' if now else '')}
             if paylist.payment_type == MusePaymentType.UNAPPLIED:
                 from tasaf_payment.unapplied import resend_mismatches
                 mismatched = len(resend_mismatches(paylist))
@@ -993,10 +996,12 @@ class PaylistService:
                 from tasaf_payment.muse.sender import MuseSender
                 result = MuseSender(self.user).send(paylist, self.GOVESB_TOPIC_PAYMENT_SUBMIT)
                 if not result.submitted and not _replied_during_send(paylist):
-                    logger.info("PaylistService.submit: paylist=%s not submitted (%s): %s",
-                                paylist_uuid, result.outcome, result.message)
-                    return {'success': False, 'error': _withdrawn_note(no_hhid) + result.message,
-                            'outcome': result.outcome, 'withdrawn_no_hhid': no_hhid}
+                    logger.info("PaylistService.submit: paylist=%s not submitted (%s): %s", paylist_uuid,
+                                result.outcome, f'{len(result.problems)} schema problem kind(s)'
+                                if result.problems else result.message)
+                    return {'success': False, 'error': _withdrawn_note(no_hhid, bad_account) + result.message,
+                            'outcome': result.outcome, 'withdrawn_no_hhid': no_hhid,
+                            'withdrawn_invalid_account': bad_account}
             else:
                 self._publish_paylist(paylist)
 
@@ -1006,7 +1011,8 @@ class PaylistService:
             ack = apply_reply(result)
             logger.info("PaylistService.submit: paylist=%s (user=%s) ack=%s", paylist_uuid, self.user.username, ack)
             return {'success': True, 'error': None, 'muse_ack': ack, 'withdrawn_no_hhid': no_hhid,
-                    'message': _withdrawn_note(no_hhid).rstrip('; ')}
+                    'withdrawn_invalid_account': bad_account,
+                    'message': _withdrawn_note(no_hhid, bad_account).rstrip('; ')}
 
         except Paylist.DoesNotExist:
             return {'success': False, 'error': _("tasaf_payment.error.paylist_not_found")}
@@ -1387,8 +1393,13 @@ def _release_submit(paylist_uuid):
         logger.warning("Could not release the submit lock on paylist %s: %s", paylist_uuid, exc)
 
 
-def _withdrawn_note(count):
-    return f'{count} payee(s) without a P3 HHID were withdrawn (see Case Management); ' if count else ''
+def _withdrawn_note(no_hhid, bad_account=0):
+    note = ''
+    if no_hhid:
+        note += f'{no_hhid} payee(s) without a P3 HHID were withdrawn (see Case Management); '
+    if bad_account:
+        note += f'{bad_account} payee(s) with an invalid account number were withdrawn (see Case Management); '
+    return note
 
 
 def _record_submit(paylist_uuid, user, result):

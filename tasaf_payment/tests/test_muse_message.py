@@ -114,3 +114,24 @@ class MuseMessageCheckTest(SimpleTestCase):
         summary = mm.summarise(mm.check(mm.assemble(IDS, SETTINGS, rows, NOW)))
         self.assertEqual(summary, [{'section': 'payList', 'field': 'payeeCode', 'rule': 'pattern',
                                     'message': 'letters and digits only, at most 15', 'count': 5}])
+
+
+class MuseMessageDescribeTest(SimpleTestCase):
+    def describe(self, rows):
+        return mm.describe(mm.check(mm.assemble(IDS, SETTINGS, rows, NOW)))
+
+    def test_names_the_payee_and_the_refused_account_number(self):
+        rows = [payee(), payee(payeeCode='PB16E50292', endtoEndId='PB16E50292', payeeAccountNumber='0754 12')]
+        text = self.describe(rows)
+        self.assertEqual(text, "payList.payeeAccountNumber: 6 to 35 letters and digits (1: PB16E50292 '0754 12')")
+
+    def test_names_three_and_marks_the_rest(self):
+        rows = [payee(payeeCode='PC%08d' % i, endtoEndId='E%d' % i, payeeAccountNumber='12-3')
+                for i in range(5)]
+        text = self.describe(rows)
+        self.assertIn("(5: PC00000000 '12-3', PC00000001 '12-3', PC00000002 '12-3', …)", text)
+        self.assertNotIn('PC00000003', text)
+
+    def test_a_problem_without_a_payee_keeps_only_the_count(self):
+        text = self.describe([])
+        self.assertIn('payList.payList: The paylist has no payments (1)', text)

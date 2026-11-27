@@ -98,6 +98,15 @@ class MuseSenderTest(SimpleTestCase):
         self.assertIn('payList.payeeCode', result.message)
         producer.publish.assert_not_called()
 
+    def test_refusal_names_the_payee(self):
+        problem = {'section': 'payList', 'field': 'payeeAccountNumber', 'rule': 'pattern',
+                   'message': '6 to 35 letters and digits', 'value': '0754 12', 'index': 0,
+                   'hhid': 'P3-190303206-41918726'}
+        with mock.patch.object(ms.muse_message, 'check', return_value=[problem]):
+            result, producer = self.send(OK)
+        self.assertIn("(1: P3-190303206-41918726 '0754 12')", result.message)
+        producer.publish.assert_not_called()
+
     def test_refuses_when_govesb_off(self):
         with mock.patch('coremis_app_integration.govesb.govesb_enabled', return_value=False):
             result, producer = self.send(OK)

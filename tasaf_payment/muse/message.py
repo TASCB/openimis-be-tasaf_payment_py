@@ -374,6 +374,26 @@ def summarise(problems):
             for (s, f, r, m), n in counts.most_common()]
 
 
+def describe(problems, summary=None, rows=6, named=3):
+    """Each summary row with its count and up to *named* payees (HHID and refused value)."""
+    summary = summarise(problems) if summary is None else summary
+    parts = []
+    for row in summary[:rows]:
+        key = (row['section'], row['field'], row['rule'], row['message'])
+        who = []
+        for p in problems:
+            if 'index' not in p or (p['section'], p['field'], p['rule'], p['message']) != key:
+                continue
+            name = p.get('hhid') or p.get('payeeCode') or f"row {p['index'] + 1}"
+            who.append(f"{name} {p['value']!r}" if p.get('value') is not None else name)
+            if len(who) == named:
+                break
+        more = ', …' if who and row['count'] > len(who) else ''
+        listed = f": {', '.join(who)}{more}" if who else ''
+        parts.append(f"{row['section']}.{row['field']}: {row['message']} ({row['count']}{listed})")
+    return '; '.join(parts)
+
+
 # ── Preview ─────────────────────────────────────────────────────────────────
 
 def _request_type_name():

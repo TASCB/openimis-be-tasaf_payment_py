@@ -163,7 +163,7 @@ class MuseSender:
         problems = muse_message.check(body)
         if problems:
             summary = muse_message.summarise(problems)
-            text = '; '.join(f"{p['section']}.{p['field']}: {p['message']} ({p['count']})" for p in summary[:6])
+            text = muse_message.describe(problems, summary)
             return SendResult(REFUSED, f'MUSE would reject this message — {text}', problems=summary)
 
         try:

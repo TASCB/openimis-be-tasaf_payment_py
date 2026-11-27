@@ -218,3 +218,64 @@ class MusePreviewSizeDbTest(TestCase):
         summary = lambda p: p['body']['requestdata']['message']['paymentSummary']  # noqa: E731
         self.assertEqual(summary(sample)['totalAmount'], summary(full)['totalAmount'])
         self.assertEqual(summary(sample)['noofTransaction'], full['payments'])
+
+
+class InvalidAccountNumberWithdrawDbTest(TestCase):
+    setUp = MuseSendRaceDbTest.setUp
+    submit = MuseSendRaceDbTest.submit
+
+    def break_one_account(self, number):
+        from tasaf_payment.models import PaymentAccount
+        item = (self.paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING)
+                .order_by('id').first())
+        PaymentAccount.objects.filter(id=item.payment_account_id).update(account_number=number)
+        on_account = self.paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING,
+                                               payment_account_id=item.payment_account_id).count()
+        return item, on_account
+
+    def test_payee_with_invalid_account_number_is_withdrawn_and_the_rest_sent(self):
+        from case_management.models import FollowUpRemark
+        from tasaf_payment.models import PaylistItem
+        pending = self.paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING).count()
+        bad, on_account = self.break_one_account('0754 12')
+        if on_account == pending:
+            self.skipTest('needs a paylist with more than one account')
+        result, paylist = self.submit()
+
+        self.assertTrue(result['success'], result)
+        self.assertEqual(result['withdrawn_invalid_account'], on_account)
+        self.assertIn('invalid account number were withdrawn', result['message'])
+        self.assertEqual(paylist.status, PaylistStatus.SUBMITTED)
+        item = PaylistItem.objects.get(id=bad.id)
+        self.assertEqual(item.status, PaylistItemStatus.WITHDRAWN)
+        self.assertEqual(item.json_ext['withdrawn_reason'], 'INVALID_ACCOUNT_NUMBER')
+        self.assertIn("'0754 12'", item.return_reason)
+        self.assertTrue(FollowUpRemark.objects.filter(paylist_item_id=bad.id, category='DATA_QUALITY').exists())
+        self.assertEqual(paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING).count(),
+                         pending - on_account)
+
+    def test_empty_account_number_is_withdrawn(self):
+        from tasaf_payment.models import PaylistItem
+        from tasaf_payment.muse.rejection import withdraw_invalid_account_numbers
+        bad, on_account = self.break_one_account('')
+        self.assertEqual(withdraw_invalid_account_numbers(self.paylist, self.user), on_account)
+        self.assertEqual(PaylistItem.objects.get(id=bad.id).status, PaylistItemStatus.WITHDRAWN)
+
+    def test_every_payee_withdrawn_is_refused_with_the_reason(self):
+        from tasaf_payment.models import PaymentAccount
+        ids = self.paylist.items.filter(is_deleted=False, status=PaylistItemStatus.PENDING) \
+            .values_list('payment_account_id', flat=True)
+        PaymentAccount.objects.filter(id__in=ids).update(account_number='12')
+        result, paylist = self.submit()
+        self.assertFalse(result['success'])
+        self.assertIn('for an invalid account number now', result['error'])
+        self.assertEqual(paylist.status, PaylistStatus.APPROVED)
+
+    def test_database_filter_agrees_with_the_muse_pattern(self):
+        from tasaf_payment.muse.message import PATTERNS
+        from tasaf_payment.muse.rejection import withdraw_invalid_account_numbers
+        pattern = PATTERNS['payeeAccountNumber'][0]
+        expected = sum(1 for number in self.paylist.items.filter(
+            is_deleted=False, status=PaylistItemStatus.PENDING).values_list(
+            'payment_account__account_number', flat=True) if not (number and pattern.match(number)))
+        self.assertEqual(withdraw_invalid_account_numbers(self.paylist, self.user), expected)
